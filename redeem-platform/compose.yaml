@@ -1,0 +1,19 @@
+services:
+  redeem-platform:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      REDEEM_HOST: 0.0.0.0
+      REDEEM_PORT: 8090
+      REDEEM_DATABASE_PATH: /app/data/redeem-platform.db
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - redeem-platform-data:/app/data
+
+volumes:
+  redeem-platform-data:

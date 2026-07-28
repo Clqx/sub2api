@@ -1,0 +1,9 @@
+.env
+data
+coverage
+test
+*.log
+.git
+.gitignore
+README.md
+compose.yaml

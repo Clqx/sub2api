@@ -2,6 +2,9 @@
 
 > 单文件中英双语文档 / Single-file bilingual documentation (Chinese + English)
 
+管理员 API 全量能力、订阅续期/退款和外置兑换平台安全边界见
+[`ADMIN_TOKEN_API_INTEGRATION_CN.md`](ADMIN_TOKEN_API_INTEGRATION_CN.md)。
+
 ---
 
 ## 中文
@@ -28,7 +31,7 @@
 ### 1) 一步完成创建并兑换
 `POST /api/v1/admin/redeem-codes/create-and-redeem`
 
-用途：原子完成“创建兑换码 + 兑换到指定用户”。
+用途：用固定业务码创建或恢复兑换，并把“兑换码标记已用 + 权益发放”放在同一事务中。
 
 请求头：
 - `x-api-key`
@@ -48,7 +51,8 @@
 幂等语义：
 - 同 `code` 且 `used_by` 一致：`200`
 - 同 `code` 但 `used_by` 不一致：`409`
-- 缺少 `Idempotency-Key`：`400`（`IDEMPOTENCY_KEY_REQUIRED`）
+- `idempotency.observe_only=false` 时缺少 `Idempotency-Key`：`400`
+  （`IDEMPOTENCY_KEY_REQUIRED`）；默认观察模式可能放行，但调用方仍必须传
 
 curl 示例：
 ```bash
@@ -116,11 +120,12 @@ https://pay.example.com/pay?user_id=123&token=<jwt>&theme=light&lang=zh&ui_mode=
 - 支付成功与充值成功分状态落库
 - 回调验签成功后立即标记“支付成功”
 - 支付成功但充值失败的订单允许后续重试
-- 重试保持相同 `code`，并使用新的 `Idempotency-Key`
+- 同一履约动作重试时保持相同 `code`、相同 `Idempotency-Key` 和完全相同的请求体
+- 独立退款/扣回是新的业务动作，使用新的 `code` 和 `Idempotency-Key`
 
 ### 6) `doc_url` 配置建议
-- 查看链接：`https://github.com/Wei-Shaw/sub2api/blob/main/ADMIN_PAYMENT_INTEGRATION_API.md`
-- 下载链接：`https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/ADMIN_PAYMENT_INTEGRATION_API.md`
+- 查看链接：`https://github.com/Wei-Shaw/sub2api/blob/main/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
+- 下载链接：`https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
 
 ---
 
@@ -148,7 +153,8 @@ Note: Admin JWT can also access admin routes, but Admin API Key is recommended f
 ### 1) Create and Redeem in one step
 `POST /api/v1/admin/redeem-codes/create-and-redeem`
 
-Use case: atomically create a redeem code and redeem it to a target user.
+Use case: create or resume fulfillment with a fixed business code. Marking the code
+as used and granting the benefit are committed in the same transaction.
 
 Headers:
 - `x-api-key`
@@ -168,7 +174,9 @@ Request body:
 Idempotency behavior:
 - Same `code` and same `used_by`: `200`
 - Same `code` but different `used_by`: `409`
-- Missing `Idempotency-Key`: `400` (`IDEMPOTENCY_KEY_REQUIRED`)
+- When `idempotency.observe_only=false`, a missing `Idempotency-Key` returns `400`
+  (`IDEMPOTENCY_KEY_REQUIRED`). Observe-only mode may allow it, but callers must
+  still send the header.
 
 curl example:
 ```bash
@@ -236,8 +244,9 @@ https://pay.example.com/pay?user_id=123&token=<jwt>&theme=light&lang=zh&ui_mode=
 - Persist payment success and recharge success as separate states
 - Mark payment as successful immediately after verified callback
 - Allow retry for orders with payment success but recharge failure
-- Keep the same `code` for retry, and use a new `Idempotency-Key`
+- Retry the same fulfillment action with the same `code`, the same `Idempotency-Key`, and the exact same request body
+- Treat an independent refund/reversal as a new operation with a new `code` and `Idempotency-Key`
 
 ### 6) Recommended `doc_url`
-- View URL: `https://github.com/Wei-Shaw/sub2api/blob/main/ADMIN_PAYMENT_INTEGRATION_API.md`
-- Download URL: `https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/ADMIN_PAYMENT_INTEGRATION_API.md`
+- View URL: `https://github.com/Wei-Shaw/sub2api/blob/main/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
+- Download URL: `https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/docs/ADMIN_PAYMENT_INTEGRATION_API.md`

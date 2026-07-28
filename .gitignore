@@ -135,6 +135,7 @@ docs/*
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
+!docs/ADMIN_TOKEN_API_INTEGRATION_CN.md
 !docs/ASYNC_IMAGE_TASKS.md
 !docs/legal/
 !docs/legal/*.md
@@ -143,3 +144,8 @@ docs/*
 frontend/coverage/
 aicodex
 output/
+
+# Standalone redemption platform
+redeem-platform/.env
+redeem-platform/data/
+redeem-platform/coverage/

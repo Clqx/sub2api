@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>Sub2API 兑换中心</title>
+  <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script type="module" src="/assets/user.js"></script>
+</head>
+<body class="user-page">
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="Sub2API 兑换中心">
+      <img src="/assets/logo.svg" alt="" width="36" height="36">
+      <span>
+        <strong>Sub2API</strong>
+        <small>兑换中心</small>
+      </span>
+    </a>
+    <div class="identity-chip" id="identityChip" hidden>
+      <span class="identity-avatar" id="identityAvatar">U</span>
+      <span class="identity-text">
+        <strong id="identityName">用户</strong>
+        <small id="identityEmail"></small>
+      </span>
+    </div>
+  </header>
+
+  <main class="user-main">
+    <section class="user-heading">
+      <p class="eyebrow">ACCOUNT BENEFITS</p>
+      <h1>兑换中心</h1>
+    </section>
+
+    <section class="auth-state" id="authState" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      <div>
+        <strong>正在确认账户</strong>
+        <p>请稍候</p>
+      </div>
+    </section>
+
+    <div class="user-grid" id="userContent" hidden>
+      <section class="redeem-tool" aria-labelledby="redeemTitle">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">REDEEM</p>
+            <h2 id="redeemTitle">输入兑换码</h2>
+          </div>
+          <span class="secure-mark">安全连接</span>
+        </div>
+        <form id="redeemForm" novalidate>
+          <label for="redeemCode">兑换码</label>
+          <div class="code-input-row">
+            <input
+              id="redeemCode"
+              name="code"
+              type="text"
+              inputmode="text"
+              autocomplete="off"
+              autocapitalize="characters"
+              spellcheck="false"
+              maxlength="80"
+              placeholder="S2-XXXX-XXXX-XXXX"
+              required
+            >
+            <button class="primary-button" type="submit" id="redeemButton">确认兑换</button>
+          </div>
+          <p class="field-error" id="redeemError" role="alert" hidden></p>
+        </form>
+        <div class="redemption-result" id="redemptionResult" hidden aria-live="polite"></div>
+      </section>
+
+      <section class="history-section" aria-labelledby="historyTitle">
+        <div class="section-heading compact">
+          <div>
+            <p class="eyebrow">HISTORY</p>
+            <h2 id="historyTitle">最近兑换</h2>
+          </div>
+          <button class="text-button" type="button" id="refreshHistory">刷新</button>
+        </div>
+        <div class="history-list" id="historyList"></div>
+        <div class="empty-state" id="historyEmpty" hidden>
+          <strong>暂无兑换记录</strong>
+          <p>成功兑换后将在这里显示</p>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

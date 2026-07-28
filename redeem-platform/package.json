@@ -1,0 +1,15 @@
+{
+  "name": "sub2api-redeem-platform",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "test": "node --test",
+    "test:watch": "node --test --watch"
+  }
+}

@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>兑换运营台</title>
+  <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script type="module" src="/assets/admin.js"></script>
+</head>
+<body class="admin-page">
+  <header class="admin-header">
+    <a class="brand" href="/admin" aria-label="兑换运营台">
+      <img src="/assets/logo.svg" alt="" width="34" height="34">
+      <span>
+        <strong>兑换运营台</strong>
+        <small>Sub2API Benefits</small>
+      </span>
+    </a>
+    <div class="header-actions">
+      <span class="health-indicator" id="healthIndicator">
+        <span></span>
+        服务检查中
+      </span>
+      <button class="secondary-button compact-button" id="globalRefresh" type="button">刷新数据</button>
+    </div>
+  </header>
+
+  <nav class="admin-tabs" aria-label="管理视图">
+    <button class="tab-button active" type="button" data-tab="overview">概览</button>
+    <button class="tab-button" type="button" data-tab="redemptions">兑换记录</button>
+    <button class="tab-button" type="button" data-tab="codes">兑换码</button>
+  </nav>
+
+  <main class="admin-main">
+    <section class="tab-view active" id="overviewView" data-view="overview">
+      <div class="page-heading-row">
+        <div>
+          <p class="eyebrow">OPERATIONS OVERVIEW</p>
+          <h1>兑换分析</h1>
+        </div>
+        <div class="date-filter">
+          <label>开始日期<input type="date" id="overviewFrom"></label>
+          <label>结束日期<input type="date" id="overviewTo"></label>
+          <button class="secondary-button" id="applyOverviewDates" type="button">应用</button>
+        </div>
+      </div>
+
+      <div class="metric-grid" id="metricGrid">
+        <article class="metric-card">
+          <span>兑换总数</span>
+          <strong id="metricTotal">0</strong>
+          <small id="metricPending">0 条处理中</small>
+        </article>
+        <article class="metric-card success">
+          <span>成功率</span>
+          <strong id="metricRate">0%</strong>
+          <small id="metricSucceeded">0 条成功</small>
+        </article>
+        <article class="metric-card balance">
+          <span>余额充值</span>
+          <strong id="metricBalance">0</strong>
+          <small>累计发放金额</small>
+        </article>
+        <article class="metric-card subscription">
+          <span>订阅天数</span>
+          <strong id="metricDays">0</strong>
+          <small id="metricFailed">0 条失败</small>
+        </article>
+      </div>
+
+      <section class="analytics-section">
+        <div class="section-heading compact">
+          <div>
+            <p class="eyebrow">DAILY TREND</p>
+            <h2>每日兑换趋势</h2>
+          </div>
+          <div class="chart-legend">
+            <span><i class="legend-balance"></i>余额</span>
+            <span><i class="legend-subscription"></i>订阅</span>
+          </div>
+        </div>
+        <div class="trend-chart" id="trendChart"></div>
+      </section>
+
+      <div class="analysis-grid">
+        <section class="analytics-section">
+          <div class="section-heading compact">
+            <div>
+              <p class="eyebrow">CAMPAIGNS</p>
+              <h2>活动表现</h2>
+            </div>
+          </div>
+          <div class="rank-list" id="campaignList"></div>
+        </section>
+        <section class="analytics-section">
+          <div class="section-heading compact">
+            <div>
+              <p class="eyebrow">SUBSCRIPTIONS</p>
+              <h2>订阅分组</h2>
+            </div>
+          </div>
+          <div class="rank-list" id="groupList"></div>
+        </section>
+      </div>
+    </section>
+
+    <section class="tab-view" id="redemptionsView" data-view="redemptions">
+      <div class="page-heading-row">
+        <div>
+          <p class="eyebrow">REDEMPTION LEDGER</p>
+          <h1>兑换记录</h1>
+        </div>
+        <a class="secondary-button button-link" id="exportRedemptions" href="/api/admin/export.csv">导出 CSV</a>
+      </div>
+      <form class="filter-bar" id="redemptionFilters">
+        <label>搜索<input type="search" name="search" placeholder="用户、业务码、活动"></label>
+        <label>状态
+          <select name="status">
+            <option value="">全部状态</option>
+            <option value="succeeded">成功</option>
+            <option value="processing">处理中</option>
+            <option value="retryable">待重试</option>
+            <option value="failed">失败</option>
+          </select>
+        </label>
+        <label>类型
+          <select name="type">
+            <option value="">全部类型</option>
+            <option value="balance">余额</option>
+            <option value="subscription">订阅</option>
+          </select>
+        </label>
+        <label>开始日期<input type="date" name="from"></label>
+        <label>结束日期<input type="date" name="to"></label>
+        <button class="primary-button filter-submit" type="submit">查询</button>
+      </form>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>用户</th>
+              <th>权益</th>
+              <th>活动</th>
+              <th>状态</th>
+              <th>尝试</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="redemptionRows"></tbody>
+        </table>
+      </div>
+      <div class="pagination" id="redemptionPagination"></div>
+    </section>
+
+    <section class="tab-view" id="codesView" data-view="codes">
+      <div class="page-heading-row">
+        <div>
+          <p class="eyebrow">CODE INVENTORY</p>
+          <h1>兑换码</h1>
+        </div>
+        <button class="primary-button" type="button" id="openGenerateCodes">生成兑换码</button>
+      </div>
+      <form class="filter-bar code-filter" id="codeFilters">
+        <label>搜索<input type="search" name="search" placeholder="掩码、活动、备注"></label>
+        <label>状态
+          <select name="status">
+            <option value="">全部状态</option>
+            <option value="unused">未使用</option>
+            <option value="processing">处理中</option>
+            <option value="redeemed">已兑换</option>
+            <option value="failed">履约失败</option>
+            <option value="disabled">已停用</option>
+          </select>
+        </label>
+        <label>类型
+          <select name="type">
+            <option value="">全部类型</option>
+            <option value="balance">余额</option>
+            <option value="subscription">订阅</option>
+          </select>
+        </label>
+        <button class="secondary-button filter-submit" type="submit">筛选</button>
+      </form>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>兑换码</th>
+              <th>权益</th>
+              <th>活动</th>
+              <th>有效期</th>
+              <th>状态</th>
+              <th>创建时间</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="codeRows"></tbody>
+        </table>
+      </div>
+      <div class="pagination" id="codePagination"></div>
+    </section>
+  </main>
+
+  <dialog class="modal" id="generateCodesModal">
+    <form method="dialog" class="modal-shell" id="generateCodesForm">
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">NEW CODE BATCH</p>
+          <h2>生成兑换码</h2>
+        </div>
+        <button class="close-button" type="button" data-close-dialog aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="segmented-control" aria-label="权益类型">
+          <label><input type="radio" name="benefit_type" value="balance" checked><span>余额充值</span></label>
+          <label><input type="radio" name="benefit_type" value="subscription"><span>订阅续期</span></label>
+        </div>
+        <div class="form-grid">
+          <label>记账金额<input name="value" inputmode="decimal" placeholder="100.00" required></label>
+          <label>生成数量<input name="count" type="number" min="1" max="100" value="1" required></label>
+          <label class="subscription-field" hidden>订阅分组
+            <select name="group_id" id="groupSelect"></select>
+          </label>
+          <label class="subscription-field" hidden>有效天数
+            <input name="validity_days" type="number" min="1" max="36500" value="30">
+          </label>
+          <label>活动标识<input name="campaign" maxlength="100" placeholder="summer-2026"></label>
+          <label>兑换截止<input name="expires_at" type="datetime-local"></label>
+          <label class="full-field">备注<textarea name="notes" rows="3" maxlength="500"></textarea></label>
+        </div>
+        <p class="field-error" id="generateError" role="alert" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary-button" type="button" data-close-dialog>取消</button>
+        <button class="primary-button" type="submit" id="generateSubmit">生成</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal generated-modal" id="generatedCodesModal">
+    <section class="modal-shell">
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">GENERATED ONCE</p>
+          <h2>兑换码已生成</h2>
+        </div>
+        <button class="close-button" type="button" data-close-generated aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="generated-actions">
+          <span id="generatedCount">0 个兑换码</span>
+          <div>
+            <button class="text-button" type="button" id="copyGenerated">复制全部</button>
+            <button class="text-button" type="button" id="downloadGenerated">下载 TXT</button>
+          </div>
+        </div>
+        <pre class="generated-code-list" id="generatedCodeList"></pre>
+      </div>
+      <div class="modal-footer">
+        <button class="primary-button" type="button" data-close-generated>完成</button>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog class="detail-drawer" id="redemptionDetail">
+    <section>
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow">REDEMPTION DETAIL</p>
+          <h2>兑换详情</h2>
+        </div>
+        <button class="close-button" type="button" data-close-detail aria-label="关闭">×</button>
+      </div>
+      <div id="redemptionDetailBody" class="drawer-body"></div>
+      <div class="drawer-footer" id="redemptionDetailActions"></div>
+    </section>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+</body>
+</html>
