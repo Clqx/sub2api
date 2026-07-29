@@ -30,6 +30,7 @@
   <nav class="admin-tabs" aria-label="管理视图">
     <button class="tab-button active" type="button" data-tab="overview">概览</button>
     <button class="tab-button" type="button" data-tab="redemptions">兑换记录</button>
+    <button class="tab-button" type="button" data-tab="products">商品</button>
     <button class="tab-button" type="button" data-tab="codes">兑换码</button>
   </nav>
 
@@ -155,6 +156,32 @@
       <div class="pagination" id="redemptionPagination"></div>
     </section>
 
+    <section class="tab-view" id="productsView" data-view="products">
+      <div class="page-heading-row">
+        <div>
+          <p class="eyebrow">PRODUCT CATALOG</p>
+          <h1>商品</h1>
+        </div>
+        <button class="primary-button" type="button" id="openProductModal">新建商品</button>
+      </div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>商品</th>
+              <th>展示价格</th>
+              <th>兑换权益</th>
+              <th>购买入口</th>
+              <th>状态</th>
+              <th>顺序</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="productRows"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="tab-view" id="codesView" data-view="codes">
       <div class="page-heading-row">
         <div>
@@ -214,28 +241,94 @@
         <button class="close-button" type="button" data-close-dialog aria-label="关闭">×</button>
       </div>
       <div class="modal-body">
-        <div class="segmented-control" aria-label="权益类型">
-          <label><input type="radio" name="benefit_type" value="balance" checked><span>余额充值</span></label>
-          <label><input type="radio" name="benefit_type" value="subscription"><span>订阅续期</span></label>
-        </div>
         <div class="form-grid">
-          <label>记账金额<input name="value" inputmode="decimal" placeholder="100.00" required></label>
+          <label class="full-field">关联商品
+            <select name="product_id" id="codeProductSelect">
+              <option value="">自定义权益</option>
+            </select>
+          </label>
           <label>生成数量<input name="count" type="number" min="1" max="100" value="1" required></label>
-          <label class="subscription-field" hidden>订阅分组
-            <select name="group_id" id="groupSelect"></select>
-          </label>
-          <label class="subscription-field" hidden>有效天数
-            <input name="validity_days" type="number" min="1" max="36500" value="30">
-          </label>
           <label>活动标识<input name="campaign" maxlength="100" placeholder="summer-2026"></label>
           <label>兑换截止<input name="expires_at" type="datetime-local"></label>
           <label class="full-field">备注<textarea name="notes" rows="3" maxlength="500"></textarea></label>
+        </div>
+        <div class="manual-benefit-fields" id="manualBenefitFields">
+          <p class="form-section-label">自定义兑换权益</p>
+          <div class="segmented-control" aria-label="权益类型">
+            <label><input type="radio" name="benefit_type" value="balance" checked><span>余额充值</span></label>
+            <label><input type="radio" name="benefit_type" value="subscription"><span>订阅续期</span></label>
+          </div>
+          <div class="form-grid">
+            <label>记账金额<input name="value" inputmode="decimal" placeholder="100.00" required></label>
+            <label class="subscription-field" hidden>订阅分组
+              <select name="group_id" id="groupSelect"></select>
+            </label>
+            <label class="subscription-field" hidden>有效天数
+              <input name="validity_days" type="number" min="1" max="36500" value="30">
+            </label>
+          </div>
         </div>
         <p class="field-error" id="generateError" role="alert" hidden></p>
       </div>
       <div class="modal-footer">
         <button class="secondary-button" type="button" data-close-dialog>取消</button>
         <button class="primary-button" type="submit" id="generateSubmit">生成</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="productModal">
+    <form method="dialog" class="modal-shell" id="productForm">
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">PRODUCT</p>
+          <h2 id="productModalTitle">新建商品</h2>
+        </div>
+        <button class="close-button" type="button" data-close-product aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" name="id">
+        <div class="form-grid">
+          <label>商品 SKU<input name="sku" maxlength="50" placeholder="BALANCE-100" required></label>
+          <label>商品名称<input name="name" maxlength="100" required></label>
+          <label>展示价格<input name="price" inputmode="decimal" placeholder="99.00" required></label>
+          <label>货币
+            <select name="currency">
+              <option value="CNY">CNY 人民币</option>
+              <option value="USD">USD 美元</option>
+              <option value="HKD">HKD 港币</option>
+            </select>
+          </label>
+          <label class="full-field">商品说明<textarea name="description" rows="3" maxlength="1000"></textarea></label>
+          <label class="full-field">外部购买链接<input name="purchase_url" type="url" maxlength="2048" placeholder="https://store.example.com/product"></label>
+        </div>
+        <p class="form-section-label">兑换后发放</p>
+        <div class="segmented-control" aria-label="商品权益类型">
+          <label><input type="radio" name="benefit_type" value="balance" checked><span>余额充值</span></label>
+          <label><input type="radio" name="benefit_type" value="subscription"><span>订阅续期</span></label>
+        </div>
+        <div class="form-grid">
+          <label>记账金额<input name="value" inputmode="decimal" placeholder="100.00" required></label>
+          <label class="product-subscription-field" hidden>订阅分组
+            <select name="group_id" id="productGroupSelect"></select>
+          </label>
+          <label class="product-subscription-field" hidden>有效天数
+            <input name="validity_days" type="number" min="1" max="36500" value="30">
+          </label>
+          <label>状态
+            <select name="status">
+              <option value="draft">草稿</option>
+              <option value="active">上架</option>
+              <option value="archived">归档</option>
+            </select>
+          </label>
+          <label>展示顺序<input name="sort_order" type="number" min="-100000" max="100000" value="0" required></label>
+        </div>
+        <p class="field-error" id="productError" role="alert" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary-button" type="button" data-close-product>取消</button>
+        <button class="primary-button" type="submit" id="productSubmit">保存商品</button>
       </div>
     </form>
   </dialog>

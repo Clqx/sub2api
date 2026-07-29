@@ -41,6 +41,39 @@ function displayCode(row) {
   }
 }
 
+function displayProduct(row) {
+  if (!row) return null
+  const result = plain(row)
+  return {
+    ...result,
+    price: formatAmountMicros(result.price_micros),
+    price_micros: undefined,
+    value: formatAmountMicros(result.value_micros),
+    value_micros: undefined,
+    group_id: numeric(result.group_id),
+    validity_days: numeric(result.validity_days),
+    sort_order: Number(result.sort_order || 0),
+  }
+}
+
+function displayPublicProduct(row) {
+  const product = displayProduct(row)
+  if (!product) return null
+  return {
+    id: product.id,
+    sku: product.sku,
+    name: product.name,
+    description: product.description,
+    price: product.price,
+    currency: product.currency,
+    benefit_type: product.benefit_type,
+    value: product.value,
+    group_id: product.group_id,
+    validity_days: product.validity_days,
+    purchase_url: product.purchase_url,
+  }
+}
+
 function displayRedemption(row) {
   if (!row) return null
   const result = plain(row)
@@ -186,18 +219,19 @@ export class RedeemDatabase {
       for (const record of records) {
         await client.query(`
           INSERT INTO redeem_codes (
-            id, code_hash, code_mask, benefit_type, value_micros, group_id,
+            id, code_hash, code_mask, product_id, benefit_type, value_micros, group_id,
             validity_days, status, campaign, notes, expires_at, created_by,
             created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'unused', $8, $9, $10, $11, $12, $13)
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'unused', $9, $10, $11, $12, $13, $14)
         `, [
-          record.id, record.codeHash, record.codeMask, record.benefitType,
+          record.id, record.codeHash, record.codeMask, record.productID, record.benefitType,
           record.valueMicros, record.groupID, record.validityDays, record.campaign,
           record.notes, record.expiresAt, actor, createdAt, createdAt,
         ])
       }
       await this.audit(client, actor, 'codes.generate', 'redeem_code_batch', '', {
         count: records.length,
+        product_id: records[0]?.productID || '',
         benefit_type: records[0]?.benefitType || '',
         campaign: records[0]?.campaign || '',
       })
@@ -206,6 +240,9 @@ export class RedeemDatabase {
       id: record.id,
       code: record.code,
       code_mask: record.codeMask,
+      product_id: record.productID,
+      product_name: record.productName,
+      product_sku: record.productSKU,
       benefit_type: record.benefitType,
       value: formatAmountMicros(record.valueMicros),
       group_id: record.groupID,
@@ -222,24 +259,29 @@ export class RedeemDatabase {
     const params = []
     if (filters.status) {
       params.push(filters.status)
-      clauses.push(`status = $${params.length}`)
+      clauses.push(`c.status = $${params.length}`)
     }
     if (filters.type) {
       params.push(filters.type)
-      clauses.push(`benefit_type = $${params.length}`)
+      clauses.push(`c.benefit_type = $${params.length}`)
     }
     if (filters.search) {
       const needle = `%${String(filters.search).slice(0, 100)}%`
       params.push(needle)
-      clauses.push(`(code_mask ILIKE $${params.length} OR campaign ILIKE $${params.length} OR notes ILIKE $${params.length})`)
+      clauses.push(`(c.code_mask ILIKE $${params.length} OR c.campaign ILIKE $${params.length} OR c.notes ILIKE $${params.length} OR p.name ILIKE $${params.length} OR p.sku ILIKE $${params.length})`)
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const totalResult = await this.pool.query(`SELECT COUNT(*) AS total FROM redeem_codes ${where}`, params)
+    const totalResult = await this.pool.query(`
+      SELECT COUNT(*) AS total FROM redeem_codes c
+      LEFT JOIN products p ON p.id = c.product_id ${where}
+    `, params)
     const total = Number(totalResult.rows[0].total)
     const rows = await this.pool.query(`
-      SELECT * FROM redeem_codes
+      SELECT c.*, p.name AS product_name, p.sku AS product_sku
+      FROM redeem_codes c
+      LEFT JOIN products p ON p.id = c.product_id
       ${where}
-      ORDER BY created_at DESC
+      ORDER BY c.created_at DESC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
     `, [...params, pageSize, (page - 1) * pageSize])
     return {
@@ -248,6 +290,81 @@ export class RedeemDatabase {
       page,
       page_size: pageSize,
       pages: Math.max(1, Math.ceil(total / pageSize)),
+    }
+  }
+
+  async listProducts({ publicOnly = false } = {}) {
+    const result = await this.pool.query(`
+      SELECT * FROM products
+      ${publicOnly ? "WHERE status = 'active'" : ''}
+      ORDER BY sort_order ASC, created_at DESC
+    `)
+    return result.rows.map(publicOnly ? displayPublicProduct : displayProduct)
+  }
+
+  async getProduct(id, queryable = this.pool) {
+    const result = await queryable.query('SELECT * FROM products WHERE id = $1', [id])
+    return displayProduct(result.rows[0])
+  }
+
+  async insertProduct(product, actor) {
+    const at = nowISO()
+    try {
+      return await this.transaction(async (client) => {
+        const result = await client.query(`
+          INSERT INTO products (
+            id, sku, name, description, price_micros, currency, benefit_type,
+            value_micros, group_id, validity_days, purchase_url, status,
+            sort_order, created_by, created_at, updated_at
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+          ) RETURNING *
+        `, [
+          product.id, product.sku, product.name, product.description, product.priceMicros,
+          product.currency, product.benefitType, product.valueMicros, product.groupID,
+          product.validityDays, product.purchaseURL, product.status, product.sortOrder,
+          actor, at, at,
+        ])
+        await this.audit(client, actor, 'product.create', 'product', product.id, {
+          sku: product.sku,
+          status: product.status,
+        })
+        return { kind: 'created', product: displayProduct(result.rows[0]) }
+      })
+    } catch (error) {
+      if (error?.code === '23505') return { kind: 'duplicate' }
+      throw error
+    }
+  }
+
+  async updateProduct(id, product, actor) {
+    try {
+      return await this.transaction(async (client) => {
+        const found = await client.query('SELECT status FROM products WHERE id = $1 FOR UPDATE', [id])
+        if (!found.rowCount) return { kind: 'not_found' }
+        const result = await client.query(`
+          UPDATE products SET
+            sku = $1, name = $2, description = $3, price_micros = $4,
+            currency = $5, benefit_type = $6, value_micros = $7, group_id = $8,
+            validity_days = $9, purchase_url = $10, status = $11, sort_order = $12,
+            updated_at = $13
+          WHERE id = $14 RETURNING *
+        `, [
+          product.sku, product.name, product.description, product.priceMicros,
+          product.currency, product.benefitType, product.valueMicros, product.groupID,
+          product.validityDays, product.purchaseURL, product.status, product.sortOrder,
+          nowISO(), id,
+        ])
+        await this.audit(client, actor, 'product.update', 'product', id, {
+          sku: product.sku,
+          previous_status: found.rows[0].status,
+          status: product.status,
+        })
+        return { kind: 'updated', product: displayProduct(result.rows[0]) }
+      })
+    } catch (error) {
+      if (error?.code === '23505') return { kind: 'duplicate' }
+      throw error
     }
   }
 
@@ -273,9 +390,11 @@ export class RedeemDatabase {
       if (!code) return { kind: 'not_found' }
 
       const existingResult = await client.query(`
-        SELECT r.*, c.code_mask, c.campaign
+        SELECT r.*, c.code_mask, c.campaign, c.product_id,
+          p.name AS product_name, p.sku AS product_sku
         FROM redemptions r
         JOIN redeem_codes c ON c.id = r.code_id
+        LEFT JOIN products p ON p.id = c.product_id
         WHERE r.code_id = $1
       `, [code.id])
       const existing = plain(existingResult.rows[0])
@@ -319,9 +438,11 @@ export class RedeemDatabase {
 
   async getRedemption(id, queryable = this.pool) {
     const result = await queryable.query(`
-      SELECT r.*, c.code_mask, c.campaign, c.notes
+      SELECT r.*, c.code_mask, c.campaign, c.notes, c.product_id,
+        p.name AS product_name, p.sku AS product_sku
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
+      LEFT JOIN products p ON p.id = c.product_id
       WHERE r.id = $1
     `, [id])
     return displayRedemption(result.rows[0])
@@ -517,9 +638,11 @@ export class RedeemDatabase {
     const totalResult = await this.pool.query('SELECT COUNT(*) AS total FROM redemptions WHERE user_id = $1', [userID])
     const total = Number(totalResult.rows[0].total)
     const rows = await this.pool.query(`
-      SELECT r.*, c.code_mask, c.campaign
+      SELECT r.*, c.code_mask, c.campaign, c.product_id,
+        p.name AS product_name, p.sku AS product_sku
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
+      LEFT JOIN products p ON p.id = c.product_id
       WHERE r.user_id = $1
       ORDER BY r.created_at DESC
       LIMIT $2 OFFSET $3
@@ -545,9 +668,11 @@ export class RedeemDatabase {
     `, where.params)
     const total = Number(totalResult.rows[0].total)
     const rows = await this.pool.query(`
-      SELECT r.*, c.code_mask, c.campaign
+      SELECT r.*, c.code_mask, c.campaign, c.product_id,
+        p.name AS product_name, p.sku AS product_sku
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
+      LEFT JOIN products p ON p.id = c.product_id
       ${where.sql}
       ORDER BY r.created_at DESC
       LIMIT $${where.params.length + 1} OFFSET $${where.params.length + 2}

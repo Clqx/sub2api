@@ -258,6 +258,91 @@ a {
   gap: 22px;
 }
 
+.product-catalog {
+  min-width: 0;
+}
+
+.product-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.product-card {
+  display: grid;
+  min-width: 0;
+  min-height: 190px;
+  grid-template-rows: auto 1fr auto;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.product-card-heading,
+.product-card-footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.product-card-heading > div {
+  min-width: 0;
+}
+
+.product-card-heading small {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-card h3 {
+  overflow-wrap: anywhere;
+  margin: 5px 0 0;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.product-price {
+  flex: 0 0 auto;
+  color: var(--brand-dark);
+  font-size: 19px;
+  line-height: 1.25;
+}
+
+.product-description {
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-line;
+}
+
+.product-card-footer {
+  align-items: center;
+  padding-top: 13px;
+  border-top: 1px solid #edf0ef;
+}
+
+.product-card-footer > span {
+  min-width: 0;
+  color: #42504c;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.product-buy {
+  min-height: 36px;
+  padding-inline: 12px;
+  font-size: 12px;
+}
+
 .redeem-tool,
 .history-section,
 .analytics-section {
@@ -1142,6 +1227,40 @@ dialog::backdrop {
   gap: 16px;
 }
 
+.form-section-label {
+  margin: 22px 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.manual-benefit-fields {
+  margin-top: 18px;
+  padding-top: 1px;
+  border-top: 1px solid var(--line);
+}
+
+.table-muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-badge.draft {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.status-badge.active {
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+}
+
+.status-badge.archived {
+  color: var(--muted);
+  background: #edf1ef;
+}
+
 .full-field {
   grid-column: 1 / -1;
 }
@@ -1373,6 +1492,20 @@ dialog::backdrop {
 
   .code-input-row {
     grid-template-columns: 1fr;
+  }
+
+  .product-list {
+    grid-template-columns: 1fr;
+  }
+
+  .product-card-heading,
+  .product-card-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .product-buy {
+    width: 100%;
   }
 
   .code-input-row .primary-button {

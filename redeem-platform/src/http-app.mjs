@@ -209,6 +209,8 @@ async function redemptionsCSV(database, filters) {
     'user_id',
     'user_email',
     'benefit_type',
+    'product_sku',
+    'product_name',
     'value',
     'group_id',
     'validity_days',
@@ -305,6 +307,11 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
         return sendJSON(res, config, 200, user)
       }
 
+      if (method === 'GET' && url.pathname === '/api/products') {
+        authenticatedUser(req, config)
+        return sendJSON(res, config, 200, await database.listProducts({ publicOnly: true }))
+      }
+
       if (method === 'POST' && url.pathname === '/api/redeem') {
         const user = authenticatedUser(req, config)
         const ip = clientIP(req, config)
@@ -337,6 +344,18 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
 
         if (method === 'GET' && url.pathname === '/api/admin/analytics') {
           return sendJSON(res, config, 200, await database.analytics(queryFilters(url)))
+        }
+        if (method === 'GET' && url.pathname === '/api/admin/products') {
+          return sendJSON(res, config, 200, await database.listProducts())
+        }
+        if (method === 'POST' && url.pathname === '/api/admin/products') {
+          const body = await readJSON(req)
+          return sendJSON(res, config, 201, await service.createProduct(body, actor), '商品已创建')
+        }
+        const productMatch = /^\/api\/admin\/products\/([0-9a-f-]+)$/.exec(url.pathname)
+        if (method === 'PUT' && productMatch) {
+          const body = await readJSON(req)
+          return sendJSON(res, config, 200, await service.updateProduct(productMatch[1], body, actor), '商品已更新')
         }
         if (method === 'GET' && url.pathname === '/api/admin/redemptions') {
           return sendJSON(res, config, 200, await database.listRedemptions(queryFilters(url)))

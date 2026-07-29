@@ -21,6 +21,34 @@ function validateExpiration(value) {
   return date.toISOString()
 }
 
+function parsePositiveAmount(value, code, message) {
+  try {
+    return parseAmountMicros(value, { allowNegative: false })
+  } catch {
+    throw new AppError(400, code, message)
+  }
+}
+
+function validatePurchaseURL(value) {
+  const text = cleanText(value, 2048)
+  if (!text) return ''
+  let url
+  try {
+    url = new URL(text)
+  } catch {
+    throw new AppError(400, 'INVALID_PURCHASE_URL', '购买链接必须是完整的 HTTP 或 HTTPS 地址')
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new AppError(400, 'INVALID_PURCHASE_URL', '购买链接必须是无账号信息的 HTTP 或 HTTPS 地址')
+  }
+  return url.href
+}
+
+function validUUID(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    .test(String(value))
+}
+
 export class RedemptionService {
   constructor({ database, sub2api, config, logger = console }) {
     this.database = database
@@ -59,44 +87,22 @@ export class RedemptionService {
     if (!Number.isInteger(count) || count < 1 || count > 100) {
       throw new AppError(400, 'INVALID_COUNT', '单次生成数量必须在 1 到 100 之间')
     }
-    const benefitType = String(input.benefit_type || input.type || '')
-    if (!['balance', 'subscription'].includes(benefitType)) {
-      throw new AppError(400, 'INVALID_BENEFIT_TYPE', '权益类型无效')
-    }
-    let valueMicros
-    try {
-      valueMicros = parseAmountMicros(input.value, { allowNegative: false })
-    } catch {
-      throw new AppError(400, 'INVALID_VALUE', '记账金额必须是大于零的数字，最多六位小数')
-    }
-
-    let groupID = null
-    let validityDays = null
-    if (benefitType === 'subscription') {
-      groupID = Number(input.group_id)
-      validityDays = Number(input.validity_days)
-      if (!Number.isInteger(groupID) || groupID <= 0) {
-        throw new AppError(400, 'INVALID_GROUP_ID', '订阅兑换码必须选择有效分组')
+    let product = null
+    if (input.product_id) {
+      if (!validUUID(input.product_id)) {
+        throw new AppError(400, 'INVALID_PRODUCT_ID', '商品编号无效')
       }
-      if (!Number.isInteger(validityDays) || validityDays < 1 || validityDays > 36500) {
-        throw new AppError(400, 'INVALID_VALIDITY_DAYS', '订阅天数必须在 1 到 36500 之间')
-      }
-      let groups
-      try {
-        groups = await this.sub2api.listGroups()
-      } catch (error) {
-        if (error instanceof UpstreamError) {
-          throw new AppError(502, error.reason || 'UPSTREAM_GROUPS_FAILED', '无法验证订阅分组')
-        }
-        throw error
-      }
-      const group = groups.find((item) => Number(item.id) === groupID)
-      if (!group || group.subscription_type !== 'subscription' || group.status !== 'active') {
-        throw new AppError(400, 'INVALID_SUBSCRIPTION_GROUP', '订阅分组不存在、未启用或不支持订阅')
+      product = await this.database.getProduct(String(input.product_id))
+      if (!product) throw new AppError(404, 'PRODUCT_NOT_FOUND', '商品不存在')
+      if (product.status !== 'active') {
+        throw new AppError(409, 'PRODUCT_NOT_ACTIVE', '只有已上架商品可以生成关联兑换码')
       }
     }
 
-    const campaign = cleanText(input.campaign, 100)
+    const benefit = await this.validateBenefit(product || input)
+    const { benefitType, valueMicros, groupID, validityDays } = benefit
+
+    const campaign = cleanText(input.campaign || product?.sku, 100)
     const notes = cleanText(input.notes, 500)
     const expiresAt = validateExpiration(input.expires_at)
     const records = []
@@ -107,6 +113,9 @@ export class RedemptionService {
         code,
         codeHash: hashRedeemCode(code, this.config.codePepper),
         codeMask: maskRedeemCode(code),
+        productID: product?.id || null,
+        productName: product?.name || '',
+        productSKU: product?.sku || '',
         benefitType,
         valueMicros,
         groupID,
@@ -117,6 +126,105 @@ export class RedemptionService {
       })
     }
     return this.database.insertCodes(records, actor)
+  }
+
+  async validateBenefit(input, { requireActiveGroup = true } = {}) {
+    const benefitType = String(input.benefit_type || input.type || '')
+    if (!['balance', 'subscription'].includes(benefitType)) {
+      throw new AppError(400, 'INVALID_BENEFIT_TYPE', '权益类型无效')
+    }
+    const valueMicros = parsePositiveAmount(
+      input.value,
+      'INVALID_VALUE',
+      '记账金额必须是大于零的数字，最多六位小数',
+    )
+    let groupID = null
+    let validityDays = null
+    if (benefitType === 'subscription') {
+      groupID = Number(input.group_id)
+      validityDays = Number(input.validity_days)
+      if (!Number.isInteger(groupID) || groupID <= 0) {
+        throw new AppError(400, 'INVALID_GROUP_ID', '订阅权益必须选择有效分组')
+      }
+      if (!Number.isInteger(validityDays) || validityDays < 1 || validityDays > 36500) {
+        throw new AppError(400, 'INVALID_VALIDITY_DAYS', '订阅天数必须在 1 到 36500 之间')
+      }
+      if (requireActiveGroup) {
+        let groups
+        try {
+          groups = await this.sub2api.listGroups()
+        } catch (error) {
+          if (error instanceof UpstreamError) {
+            throw new AppError(502, error.reason || 'UPSTREAM_GROUPS_FAILED', '无法验证订阅分组')
+          }
+          throw error
+        }
+        const group = groups.find((item) => Number(item.id) === groupID)
+        if (!group || group.subscription_type !== 'subscription' || group.status !== 'active') {
+          throw new AppError(400, 'INVALID_SUBSCRIPTION_GROUP', '订阅分组不存在、未启用或不支持订阅')
+        }
+      }
+    }
+    return { benefitType, valueMicros, groupID, validityDays }
+  }
+
+  async validateProduct(input) {
+    const sku = cleanText(input.sku, 50).toUpperCase()
+    if (!/^[A-Z0-9][A-Z0-9._-]{1,49}$/.test(sku)) {
+      throw new AppError(400, 'INVALID_PRODUCT_SKU', '商品 SKU 需为 2 到 50 位字母、数字、点、横线或下划线')
+    }
+    const name = cleanText(input.name, 100)
+    if (!name) throw new AppError(400, 'INVALID_PRODUCT_NAME', '商品名称不能为空')
+    const description = cleanText(input.description, 1000)
+    const priceMicros = parsePositiveAmount(
+      input.price,
+      'INVALID_PRODUCT_PRICE',
+      '商品价格必须是大于零的数字，最多六位小数',
+    )
+    const currency = cleanText(input.currency || 'CNY', 3).toUpperCase()
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      throw new AppError(400, 'INVALID_CURRENCY', '货币代码必须是三位大写字母')
+    }
+    const status = String(input.status || 'draft')
+    if (!['draft', 'active', 'archived'].includes(status)) {
+      throw new AppError(400, 'INVALID_PRODUCT_STATUS', '商品状态无效')
+    }
+    const sortOrder = Number(input.sort_order || 0)
+    if (!Number.isInteger(sortOrder) || sortOrder < -100000 || sortOrder > 100000) {
+      throw new AppError(400, 'INVALID_SORT_ORDER', '展示顺序必须是 -100000 到 100000 的整数')
+    }
+    const benefit = await this.validateBenefit(input, { requireActiveGroup: status !== 'archived' })
+    return {
+      sku,
+      name,
+      description,
+      priceMicros,
+      currency,
+      purchaseURL: validatePurchaseURL(input.purchase_url),
+      status,
+      sortOrder,
+      ...benefit,
+    }
+  }
+
+  async createProduct(input, actor) {
+    const product = await this.validateProduct(input)
+    const result = await this.database.insertProduct({ id: randomID(), ...product }, actor)
+    if (result.kind === 'duplicate') {
+      throw new AppError(409, 'PRODUCT_SKU_EXISTS', '商品 SKU 已存在')
+    }
+    return result.product
+  }
+
+  async updateProduct(id, input, actor) {
+    if (!validUUID(id)) {
+      throw new AppError(400, 'INVALID_PRODUCT_ID', '商品编号无效')
+    }
+    const product = await this.validateProduct(input)
+    const result = await this.database.updateProduct(id, product, actor)
+    if (result.kind === 'not_found') throw new AppError(404, 'PRODUCT_NOT_FOUND', '商品不存在')
+    if (result.kind === 'duplicate') throw new AppError(409, 'PRODUCT_SKU_EXISTS', '商品 SKU 已存在')
+    return result.product
   }
 
   async redeem(rawCode, user) {

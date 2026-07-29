@@ -14,6 +14,8 @@ const redemptionResult = document.querySelector('#redemptionResult')
 const historyList = document.querySelector('#historyList')
 const historyEmpty = document.querySelector('#historyEmpty')
 const refreshHistory = document.querySelector('#refreshHistory')
+const productList = document.querySelector('#productList')
+const productEmpty = document.querySelector('#productEmpty')
 
 let sessionToken = sessionStorage.getItem(SESSION_KEY) || ''
 
@@ -56,6 +58,19 @@ function benefitText(item) {
     return `订阅续期 ${Number(item.validity_days || 0)} 天`
   }
   return `余额充值 ${item.value}`
+}
+
+function formatPrice(item) {
+  try {
+    return new Intl.NumberFormat('zh-CN', {
+      style: 'currency',
+      currency: item.currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 6,
+    }).format(Number(item.price))
+  } catch {
+    return `${item.currency} ${item.price}`
+  }
 }
 
 function setAuthMessage(title, detail, failed = false) {
@@ -102,7 +117,7 @@ function showResult(redemption) {
     <span class="result-icon" aria-hidden="true">${succeeded ? '✓' : '…'}</span>
     <div>
       <strong>${succeeded ? '兑换成功' : '兑换请求已受理'}</strong>
-      <p>${escapeHTML(benefitText(redemption))}${succeeded ? '，权益已经发放到账户。' : '，系统正在自动处理。'}</p>
+      <p>${redemption.product_name ? `${escapeHTML(redemption.product_name)}，` : ''}${escapeHTML(benefitText(redemption))}${succeeded ? '，权益已经发放到账户。' : '，系统正在自动处理。'}</p>
     </div>
   `
   redemptionResult.hidden = false
@@ -121,7 +136,7 @@ function renderHistory(result) {
       </span>
       <div class="history-copy">
         <div>
-          <strong>${escapeHTML(benefitText(item))}</strong>
+          <strong>${escapeHTML(item.product_name || benefitText(item))}</strong>
           <span class="status-badge ${escapeHTML(item.status)}">${escapeHTML(statusLabels[item.status] || item.status)}</span>
         </div>
         <p>
@@ -132,6 +147,41 @@ function renderHistory(result) {
       </div>
     `
     historyList.append(article)
+  }
+}
+
+function renderProducts(items) {
+  productList.replaceChildren()
+  productEmpty.hidden = items.length > 0
+  for (const item of items) {
+    const article = document.createElement('article')
+    article.className = 'product-card'
+    article.innerHTML = `
+      <div class="product-card-heading">
+        <div>
+          <small>${escapeHTML(item.sku)}</small>
+          <h3>${escapeHTML(item.name)}</h3>
+        </div>
+        <strong class="product-price">${escapeHTML(formatPrice(item))}</strong>
+      </div>
+      <p class="product-description">${escapeHTML(item.description)}</p>
+      <div class="product-card-footer">
+        <span>${escapeHTML(benefitText(item))}</span>
+        ${item.purchase_url
+          ? `<a class="primary-button product-buy" href="${escapeHTML(item.purchase_url)}" target="_blank" rel="noopener noreferrer">前往购买 <span aria-hidden="true">↗</span></a>`
+          : '<button class="secondary-button product-buy" type="button" disabled>暂未开放</button>'}
+      </div>
+    `
+    productList.append(article)
+  }
+}
+
+async function loadProducts() {
+  try {
+    renderProducts(await request('/api/products'))
+  } catch (error) {
+    if (error.status === 401) throw error
+    productList.innerHTML = '<p class="inline-error">商品暂时无法加载</p>'
   }
 }
 
@@ -225,7 +275,7 @@ try {
   showIdentity(user)
   authState.hidden = true
   userContent.hidden = false
-  await loadHistory()
+  await Promise.all([loadProducts(), loadHistory()])
 } catch (error) {
   sessionStorage.removeItem(SESSION_KEY)
   sessionToken = ''

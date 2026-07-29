@@ -105,6 +105,66 @@ databaseTest('subscription code generation rejects an unavailable or non-subscri
   )
 })
 
+databaseTest('product codes keep their benefit snapshot after the product changes', async (t) => {
+  const { service, calls } = await createService(t, async (redemption) => successfulResult(redemption))
+  const product = await service.createProduct({
+    sku: 'BALANCE-100',
+    name: '余额 100',
+    description: '测试商品',
+    price: '88',
+    currency: 'CNY',
+    benefit_type: 'balance',
+    value: '100',
+    purchase_url: 'https://store.example.com/balance-100',
+    status: 'active',
+    sort_order: 10,
+  }, 'manager:test')
+  const [generated] = await service.generateCodes({
+    count: 1,
+    product_id: product.id,
+  }, 'manager:test')
+
+  await service.updateProduct(product.id, {
+    ...product,
+    price: '188',
+    value: '200',
+  }, 'manager:test')
+  const result = await service.redeem(generated.code, user)
+
+  assert.equal(generated.product_id, product.id)
+  assert.equal(result.product_name, '余额 100')
+  assert.equal(result.value, '100')
+  assert.equal(calls[0].value, '100')
+})
+
+databaseTest('draft products cannot issue codes and unsafe purchase URLs are rejected', async (t) => {
+  const { service } = await createService(t, async (redemption) => successfulResult(redemption))
+  await assert.rejects(
+    service.createProduct({
+      sku: 'BAD-LINK',
+      name: '无效链接',
+      price: '10',
+      benefit_type: 'balance',
+      value: '10',
+      purchase_url: 'javascript:alert(1)',
+    }, 'manager:test'),
+    (error) => error instanceof AppError && error.code === 'INVALID_PURCHASE_URL',
+  )
+
+  const product = await service.createProduct({
+    sku: 'DRAFT-10',
+    name: '草稿商品',
+    price: '10',
+    benefit_type: 'balance',
+    value: '10',
+    status: 'draft',
+  }, 'manager:test')
+  await assert.rejects(
+    service.generateCodes({ count: 1, product_id: product.id }, 'manager:test'),
+    (error) => error instanceof AppError && error.code === 'PRODUCT_NOT_ACTIVE',
+  )
+})
+
 databaseTest('retry reuses the same upstream code and idempotency key', async (t) => {
   const { service, calls } = await createService(t, async (redemption, attempt) => {
     if (attempt === 1) {

@@ -7,6 +7,7 @@ const state = {
   codePage: 1,
   generatedCodes: [],
   groupNames: new Map(),
+  products: [],
 }
 
 const statusLabels = {
@@ -18,6 +19,9 @@ const statusLabels = {
   redeemed: '已兑换',
   failed: '失败',
   disabled: '已停用',
+  draft: '草稿',
+  active: '已上架',
+  archived: '已归档',
 }
 
 function escapeHTML(value) {
@@ -49,6 +53,19 @@ function benefitText(item) {
     return `${group || `分组 ${item.group_id}`} · ${Number(item.validity_days || 0)} 天`
   }
   return `余额 ${item.value}`
+}
+
+function formatPrice(item) {
+  try {
+    return new Intl.NumberFormat('zh-CN', {
+      style: 'currency',
+      currency: item.currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 6,
+    }).format(Number(item.price))
+  } catch {
+    return `${item.currency} ${item.price}`
+  }
 }
 
 async function api(path, options = {}) {
@@ -122,6 +139,7 @@ function switchTab(tab) {
   history.replaceState(null, '', tab === 'overview' ? '#overview' : `#${tab}`)
   if (tab === 'overview') loadAnalytics()
   if (tab === 'redemptions') loadRedemptions()
+  if (tab === 'products') loadProducts()
   if (tab === 'codes') loadCodes()
 }
 
@@ -242,7 +260,7 @@ async function loadRedemptions(page = state.redemptionPage) {
         </td>
         <td>
           <strong class="table-primary">${escapeHTML(benefitText(item))}</strong>
-          <small>${escapeHTML(item.code_mask)}</small>
+          <small>${escapeHTML(item.product_name || item.code_mask)}</small>
         </td>
         <td>${escapeHTML(item.campaign || '未分类')}</td>
         <td><span class="status-badge ${escapeHTML(item.status)}">${escapeHTML(statusLabels[item.status] || item.status)}</span></td>
@@ -277,7 +295,7 @@ async function loadCodes(page = state.codePage) {
         <td><strong class="code-mask">${escapeHTML(item.code_mask)}</strong></td>
         <td>
           <strong class="table-primary">${escapeHTML(benefitText(item))}</strong>
-          <small>${item.benefit_type === 'subscription' ? '订阅续期' : '余额充值'}</small>
+          <small>${escapeHTML(item.product_name || (item.benefit_type === 'subscription' ? '自定义订阅' : '自定义余额'))}</small>
         </td>
         <td>${escapeHTML(item.campaign || '未分类')}</td>
         <td>${escapeHTML(item.expires_at ? formatDate(item.expires_at) : '长期有效')}</td>
@@ -336,6 +354,7 @@ async function openRedemptionDetail(id) {
         ${detailField('用户', item.user_email || `用户 ${item.user_id}`)}
         ${detailField('用户 ID', item.user_id)}
         ${detailField('权益', benefitText(item), true)}
+        ${detailField('关联商品', item.product_name || '自定义权益')}
         ${detailField('活动', item.campaign || '未分类')}
         ${detailField('创建时间', formatDate(item.created_at, true))}
         ${detailField('完成时间', formatDate(item.completed_at, true))}
@@ -390,33 +409,142 @@ async function openRedemptionDetail(id) {
 }
 
 async function loadGroups() {
-  const select = $('#groupSelect')
-  select.innerHTML = '<option value="">正在读取分组</option>'
+  const selects = [$('#groupSelect'), $('#productGroupSelect')]
+  selects.forEach((select) => { select.innerHTML = '<option value="">正在读取分组</option>' })
   try {
     const groups = await api('/api/admin/groups')
     state.groupNames = new Map(groups.map((group) => [Number(group.id), group.name]))
-    select.replaceChildren()
     const eligible = groups.filter((group) => (
       group.subscription_type === 'subscription' && group.status === 'active'
     ))
-    for (const group of eligible) {
-      const option = document.createElement('option')
-      option.value = group.id
-      option.textContent = `${group.name}（ID ${group.id}）`
-      select.append(option)
+    for (const select of selects) {
+      select.replaceChildren()
+      for (const group of eligible) {
+        const option = document.createElement('option')
+        option.value = group.id
+        option.textContent = `${group.name}（ID ${group.id}）`
+        select.append(option)
+      }
+      if (!eligible.length) select.innerHTML = '<option value="">无可用订阅分组</option>'
     }
-    if (!eligible.length) select.innerHTML = '<option value="">无可用订阅分组</option>'
   } catch (error) {
-    select.innerHTML = '<option value="">分组读取失败</option>'
+    selects.forEach((select) => { select.innerHTML = '<option value="">分组读取失败</option>' })
     toast(error.message, 'error')
   }
 }
 
-function updateBenefitFields() {
-  const subscription = $('[name="benefit_type"]:checked').value === 'subscription'
-  $$('.subscription-field').forEach((field) => { field.hidden = !subscription })
-  $('[name="group_id"]').required = subscription
-  $('[name="validity_days"]').required = subscription
+function updateBenefitFields(form, fieldClass) {
+  const subscription = $('[name="benefit_type"]:checked', form)?.value === 'subscription'
+  $$(`.${fieldClass}`, form).forEach((field) => { field.hidden = !subscription })
+  const group = $('[name="group_id"]', form)
+  const days = $('[name="validity_days"]', form)
+  if (group) group.required = subscription
+  if (days) days.required = subscription
+}
+
+async function loadProducts() {
+  const rows = $('#productRows')
+  if (state.tab === 'products') emptyTable(rows, 7, '正在加载')
+  try {
+    state.products = await api('/api/admin/products')
+    const select = $('#codeProductSelect')
+    const selected = select.value
+    select.innerHTML = '<option value="">自定义权益</option>'
+    for (const product of state.products.filter((item) => item.status === 'active')) {
+      const option = document.createElement('option')
+      option.value = product.id
+      option.textContent = `${product.name}（${product.sku}）`
+      select.append(option)
+    }
+    if ([...select.options].some((option) => option.value === selected)) select.value = selected
+    if (state.tab !== 'products') return
+    rows.replaceChildren()
+    if (!state.products.length) emptyTable(rows, 7, '尚未创建商品')
+    for (const item of state.products) {
+      const tr = document.createElement('tr')
+      tr.innerHTML = `
+        <td>
+          <strong class="table-primary">${escapeHTML(item.name)}</strong>
+          <small>${escapeHTML(item.sku)}</small>
+        </td>
+        <td><strong class="table-primary">${escapeHTML(formatPrice(item))}</strong></td>
+        <td>${escapeHTML(benefitText(item))}</td>
+        <td>${item.purchase_url ? `<a class="row-action" href="${escapeHTML(item.purchase_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : '<span class="table-muted">未配置</span>'}</td>
+        <td><span class="status-badge ${escapeHTML(item.status)}">${escapeHTML(statusLabels[item.status])}</span></td>
+        <td>${Number(item.sort_order)}</td>
+        <td><button class="row-action" type="button" data-edit-product="${escapeHTML(item.id)}">编辑</button></td>
+      `
+      rows.append(tr)
+    }
+    $$('[data-edit-product]', rows).forEach((button) => {
+      button.addEventListener('click', () => openProductModal(button.dataset.editProduct))
+    })
+  } catch (error) {
+    if (state.tab === 'products') emptyTable(rows, 7, error.message)
+    else toast(error.message, 'error')
+  }
+}
+
+function updateGenerateProductFields() {
+  const manual = !$('#codeProductSelect').value
+  const section = $('#manualBenefitFields')
+  section.hidden = !manual
+  $$('input, select', section).forEach((field) => { field.disabled = !manual })
+  if (manual) updateBenefitFields($('#generateCodesForm'), 'subscription-field')
+}
+
+function openProductModal(id = '') {
+  const form = $('#productForm')
+  form.reset()
+  form.elements.id.value = ''
+  $('#productError').hidden = true
+  const product = state.products.find((item) => item.id === id)
+  $('#productModalTitle').textContent = product ? '编辑商品' : '新建商品'
+  if (product) {
+    for (const key of ['id', 'sku', 'name', 'price', 'currency', 'description', 'purchase_url', 'value', 'status', 'sort_order']) {
+      if (form.elements[key]) form.elements[key].value = product[key] ?? ''
+    }
+    const benefit = $(`[name="benefit_type"][value="${product.benefit_type}"]`, form)
+    if (benefit) benefit.checked = true
+    if (product.group_id && ![...form.elements.group_id.options].some((option) => Number(option.value) === Number(product.group_id))) {
+      const option = document.createElement('option')
+      option.value = product.group_id
+      option.textContent = `${state.groupNames.get(Number(product.group_id)) || `分组 ${product.group_id}`}（当前不可用）`
+      form.elements.group_id.append(option)
+    }
+    form.elements.group_id.value = product.group_id ?? ''
+    form.elements.validity_days.value = product.validity_days ?? 30
+  }
+  updateBenefitFields(form, 'product-subscription-field')
+  $('#productModal').showModal()
+}
+
+async function saveProduct(event) {
+  event.preventDefault()
+  const form = event.currentTarget
+  const values = Object.fromEntries(new FormData(form))
+  const id = values.id
+  delete values.id
+  const error = $('#productError')
+  const submit = $('#productSubmit')
+  error.hidden = true
+  submit.disabled = true
+  submit.textContent = '正在保存'
+  try {
+    await api(id ? `/api/admin/products/${id}` : '/api/admin/products', {
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify(values),
+    })
+    $('#productModal').close()
+    toast(id ? '商品已更新' : '商品已创建')
+    await loadProducts()
+  } catch (requestError) {
+    error.textContent = requestError.message
+    error.hidden = false
+  } finally {
+    submit.disabled = false
+    submit.textContent = '保存商品'
+  }
 }
 
 async function generateCodes(event) {
@@ -488,13 +616,23 @@ $('#globalRefresh').addEventListener('click', async () => {
 })
 $('#openGenerateCodes').addEventListener('click', async () => {
   $('#generateError').hidden = true
+  await Promise.all([loadGroups(), loadProducts()])
+  updateGenerateProductFields()
   $('#generateCodesModal').showModal()
-  await loadGroups()
 })
-$$('[name="benefit_type"]').forEach((radio) => {
-  radio.addEventListener('change', updateBenefitFields)
+$$('[name="benefit_type"]', $('#generateCodesForm')).forEach((radio) => {
+  radio.addEventListener('change', () => updateBenefitFields($('#generateCodesForm'), 'subscription-field'))
 })
+$$('[name="benefit_type"]', $('#productForm')).forEach((radio) => {
+  radio.addEventListener('change', () => updateBenefitFields($('#productForm'), 'product-subscription-field'))
+})
+$('#codeProductSelect').addEventListener('change', updateGenerateProductFields)
 $('#generateCodesForm').addEventListener('submit', generateCodes)
+$('#openProductModal').addEventListener('click', () => openProductModal())
+$('#productForm').addEventListener('submit', saveProduct)
+$$('[data-close-product]').forEach((button) => {
+  button.addEventListener('click', () => $('#productModal').close())
+})
 $$('[data-close-dialog]').forEach((button) => {
   button.addEventListener('click', () => $('#generateCodesModal').close())
 })
@@ -513,7 +651,7 @@ for (const dialog of $$('dialog')) {
 
 await checkHealth()
 await loadGroups()
-const initialTab = ['overview', 'redemptions', 'codes'].includes(location.hash.slice(1))
+const initialTab = ['overview', 'redemptions', 'products', 'codes'].includes(location.hash.slice(1))
   ? location.hash.slice(1)
   : 'overview'
 switchTab(initialTab)
