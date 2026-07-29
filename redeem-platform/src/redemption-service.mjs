@@ -44,6 +44,21 @@ function validatePurchaseURL(value) {
   return url.href
 }
 
+function validateIconURL(value) {
+  const text = cleanText(value, 2048)
+  if (!text) return ''
+  let url
+  try {
+    url = new URL(text)
+  } catch {
+    throw new AppError(400, 'INVALID_ICON_URL', '商品图标必须是完整的 HTTP 或 HTTPS 地址')
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new AppError(400, 'INVALID_ICON_URL', '商品图标必须是无账号信息的 HTTP 或 HTTPS 地址')
+  }
+  return url.href
+}
+
 function validUUID(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
     .test(String(value))
@@ -201,6 +216,7 @@ export class RedemptionService {
       priceMicros,
       currency,
       purchaseURL: validatePurchaseURL(input.purchase_url),
+      iconURL: validateIconURL(input.icon_url),
       status,
       sortOrder,
       ...benefit,

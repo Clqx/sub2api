@@ -614,7 +614,8 @@ func safeRawJSONArray(raw string) json.RawMessage {
 }
 
 // GetFrameSrcOrigins returns deduplicated http(s) origins from home_content URL,
-// purchase_subscription_url, and all custom_menu_items URLs. Used by the router layer for CSP frame-src injection.
+// purchase_subscription_url, and all custom_menu_items URLs. The router uses these trusted
+// administrator-configured origins for CSP frame-src and connect-src injection.
 func (s *SettingService) GetFrameSrcOrigins(ctx context.Context) ([]string, error) {
 	settings, err := s.GetPublicSettings(ctx)
 	if err != nil {

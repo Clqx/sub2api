@@ -24,7 +24,7 @@ function securityHeaders(config, isAPI = false) {
       "object-src 'none'",
       "script-src 'self'",
       "style-src 'self'",
-      "img-src 'self' data:",
+      "img-src 'self' data: http: https:",
       "connect-src 'self'",
       "form-action 'self'",
       `frame-ancestors ${config.frameAncestors}`,
@@ -41,16 +41,29 @@ function send(res, status, headers, body = '') {
   res.end(body)
 }
 
-function sendJSON(res, config, status, data, message = 'success') {
+function sendJSON(res, config, status, data, message = 'success', extraHeaders = {}) {
   send(
     res,
     status,
     {
       ...securityHeaders(config, true),
+      ...extraHeaders,
       'Content-Type': 'application/json; charset=utf-8',
     },
     JSON.stringify({ code: status < 400 ? 0 : status, message, data }),
   )
+}
+
+function catalogHeaders(req, config) {
+  const origin = String(req.headers.origin || '').trim()
+  if (!origin) return {}
+  if (!config.catalogOrigins.includes(origin)) {
+    throw new AppError(403, 'CATALOG_ORIGIN_FORBIDDEN', '当前来源不能读取商品目录')
+  }
+  return {
+    'Access-Control-Allow-Origin': origin,
+    Vary: 'Origin',
+  }
 }
 
 function sendError(res, config, error) {
@@ -305,6 +318,18 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
       if (method === 'GET' && url.pathname === '/api/me') {
         const user = authenticatedUser(req, config)
         return sendJSON(res, config, 200, user)
+      }
+
+      if (method === 'GET' && url.pathname === '/api/public/products') {
+        const headers = catalogHeaders(req, config)
+        return sendJSON(
+          res,
+          config,
+          200,
+          await database.listProducts({ publicOnly: true }),
+          'success',
+          headers,
+        )
       }
 
       if (method === 'GET' && url.pathname === '/api/products') {

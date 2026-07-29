@@ -19,6 +19,14 @@ describe('site_logo sanitization', () => {
     expect(homeViewSource).toContain('sanitizeUrl(appStore.cachedPublicSettings?.site_logo || appStore.siteLogo')
   })
 
+  it('HomeView sanitizes custom HTML and product purchase URLs', () => {
+    expect(homeViewSource).toContain("import DOMPurify from 'dompurify'")
+    expect(homeViewSource).toContain('v-html="sanitizedHomeContent"')
+    expect(homeViewSource).not.toContain('v-html="homeContent"')
+    expect(homeViewSource).toContain(':href="purchaseUrl(product)"')
+    expect(homeViewSource).toContain("return sanitizeUrl(product.purchase_url || '')")
+  })
+
   it('KeyUsageView applies sanitizeUrl to siteLogo', () => {
     expect(keyUsageViewSource).toContain('sanitizeUrl(appStore.cachedPublicSettings?.site_logo || appStore.siteLogo')
   })

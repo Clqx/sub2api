@@ -71,6 +71,7 @@ function displayPublicProduct(row) {
     group_id: product.group_id,
     validity_days: product.validity_days,
     purchase_url: product.purchase_url,
+    icon_url: product.icon_url,
   }
 }
 
@@ -314,15 +315,15 @@ export class RedeemDatabase {
         const result = await client.query(`
           INSERT INTO products (
             id, sku, name, description, price_micros, currency, benefit_type,
-            value_micros, group_id, validity_days, purchase_url, status,
+            value_micros, group_id, validity_days, purchase_url, icon_url, status,
             sort_order, created_by, created_at, updated_at
           ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
           ) RETURNING *
         `, [
           product.id, product.sku, product.name, product.description, product.priceMicros,
           product.currency, product.benefitType, product.valueMicros, product.groupID,
-          product.validityDays, product.purchaseURL, product.status, product.sortOrder,
+          product.validityDays, product.purchaseURL, product.iconURL, product.status, product.sortOrder,
           actor, at, at,
         ])
         await this.audit(client, actor, 'product.create', 'product', product.id, {
@@ -346,13 +347,13 @@ export class RedeemDatabase {
           UPDATE products SET
             sku = $1, name = $2, description = $3, price_micros = $4,
             currency = $5, benefit_type = $6, value_micros = $7, group_id = $8,
-            validity_days = $9, purchase_url = $10, status = $11, sort_order = $12,
-            updated_at = $13
-          WHERE id = $14 RETURNING *
+            validity_days = $9, purchase_url = $10, icon_url = $11, status = $12,
+            sort_order = $13, updated_at = $14
+          WHERE id = $15 RETURNING *
         `, [
           product.sku, product.name, product.description, product.priceMicros,
           product.currency, product.benefitType, product.valueMicros, product.groupID,
-          product.validityDays, product.purchaseURL, product.status, product.sortOrder,
+          product.validityDays, product.purchaseURL, product.iconURL, product.status, product.sortOrder,
           nowISO(), id,
         ])
         await this.audit(client, actor, 'product.update', 'product', id, {

@@ -47,6 +47,29 @@ function frameAncestors(value) {
   return entries.join(' ')
 }
 
+function catalogOrigins(value, fallback) {
+  const entries = String(value || fallback || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry && entry !== "'self'" && entry !== "'none'")
+  const origins = []
+  for (const entry of entries) {
+    const url = new URL(entry)
+    if (
+      !['http:', 'https:'].includes(url.protocol)
+      || url.pathname !== '/'
+      || url.search
+      || url.hash
+      || url.username
+      || url.password
+    ) {
+      throw new Error(`invalid REDEEM_CATALOG_ORIGINS entry: ${entry}`)
+    }
+    origins.push(url.origin)
+  }
+  return [...new Set(origins)]
+}
+
 function databaseSSLMode(value) {
   const mode = String(value || 'disable').toLowerCase()
   if (mode === 'disable') return false
@@ -144,5 +167,9 @@ export function loadConfig(env = process.env) {
     maxAttempts: integerValue(env.REDEEM_MAX_ATTEMPTS, 8, { min: 1, max: 50 }),
     trustProxy: booleanValue(env.REDEEM_TRUST_PROXY),
     frameAncestors: frameAncestors(env.REDEEM_FRAME_ANCESTORS),
+    catalogOrigins: Object.freeze(catalogOrigins(
+      env.REDEEM_CATALOG_ORIGINS,
+      env.REDEEM_FRAME_ANCESTORS,
+    )),
   })
 }

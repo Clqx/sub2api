@@ -212,6 +212,26 @@ func TestSecurityHeaders(t *testing.T) {
 		assert.Contains(t, csp, "default-src 'self'")
 	})
 
+	t.Run("allows_trusted_page_origins_for_frames_and_data_requests", func(t *testing.T) {
+		cfg := config.CSPConfig{
+			Enabled: true,
+			Policy:  "default-src 'self'; script-src 'self'; connect-src 'self'; frame-src 'self'",
+		}
+		middleware := SecurityHeaders(cfg, func() []string {
+			return []string{"http://redeem.example.test:8090"}
+		})
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+		middleware(c)
+
+		csp := w.Header().Get("Content-Security-Policy")
+		assert.Equal(t, 1, countDirectiveValue(csp, "frame-src", "http://redeem.example.test:8090"))
+		assert.Equal(t, 1, countDirectiveValue(csp, "connect-src", "http://redeem.example.test:8090"))
+		assert.Equal(t, 0, countDirectiveValue(csp, "connect-src", "http:"))
+	})
+
 	t.Run("multiple_nonce_placeholders_replaced", func(t *testing.T) {
 		cfg := config.CSPConfig{
 			Enabled: true,

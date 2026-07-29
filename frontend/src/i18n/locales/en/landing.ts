@@ -17,6 +17,36 @@ export default {
     // User-focused value proposition
     heroSubtitle: 'One Key, All AI Models',
     heroDescription: 'No need to manage multiple subscriptions. Access Claude, GPT, Gemini and more with a single API key',
+    nav: {
+      primary: 'Primary navigation',
+      products: 'Products',
+      capabilities: 'Capabilities',
+      models: 'Models'
+    },
+    catalog: {
+      title: 'Choose a product that fits your workload',
+      description: 'Products, pricing, and redemption benefits are managed centrally and synchronized here automatically.',
+      viewProducts: 'View products',
+      unifiedProtocol: 'Unified protocol',
+      modelCoverage: 'Leading model coverage',
+      serviceAvailability: 'Service availability',
+      defaultDescription: 'Flexible access to the AI models and API services available on the platform.',
+      subscriptionBenefit: '{days}-day subscription after redemption',
+      balanceBenefit: '{value} balance after redemption',
+      buy: 'Purchase',
+      comingSoon: 'Coming soon',
+      empty: 'Products are being prepared',
+      emptyDescription: 'Active products will appear here automatically after they are published.',
+      unavailable: 'The product catalog is temporarily unavailable',
+      unavailableDescription: 'You can still sign in and use existing services. Please check the catalog again later.',
+      haveCode: 'Already have a redemption code?',
+      haveCodeDescription: 'Open the redemption page from your user center and apply the benefit to this account.',
+      redeemNow: 'Redeem now'
+    },
+    capabilities: {
+      title: 'Built for reliable, controlled AI access',
+      description: 'Bring model access and daily operations into one clear workspace, from gateway routing to usage controls.'
+    },
     tags: {
       subscriptionToApi: 'Subscription to API',
       stickySession: 'Session Persistence',

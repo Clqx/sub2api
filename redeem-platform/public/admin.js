@@ -464,8 +464,16 @@ async function loadProducts() {
       const tr = document.createElement('tr')
       tr.innerHTML = `
         <td>
-          <strong class="table-primary">${escapeHTML(item.name)}</strong>
-          <small>${escapeHTML(item.sku)}</small>
+          <div class="table-product">
+            <span class="product-icon product-icon-small" aria-hidden="true">
+              <span>${escapeHTML(item.name.slice(0, 1).toUpperCase())}</span>
+              ${item.icon_url ? `<img src="${escapeHTML(item.icon_url)}" alt="">` : ''}
+            </span>
+            <span>
+              <strong class="table-primary">${escapeHTML(item.name)}</strong>
+              <small>${escapeHTML(item.sku)}</small>
+            </span>
+          </div>
         </td>
         <td><strong class="table-primary">${escapeHTML(formatPrice(item))}</strong></td>
         <td>${escapeHTML(benefitText(item))}</td>
@@ -474,6 +482,8 @@ async function loadProducts() {
         <td>${Number(item.sort_order)}</td>
         <td><button class="row-action" type="button" data-edit-product="${escapeHTML(item.id)}">编辑</button></td>
       `
+      const icon = $('img', tr)
+      if (icon) icon.addEventListener('error', () => icon.remove(), { once: true })
       rows.append(tr)
     }
     $$('[data-edit-product]', rows).forEach((button) => {
@@ -501,7 +511,7 @@ function openProductModal(id = '') {
   const product = state.products.find((item) => item.id === id)
   $('#productModalTitle').textContent = product ? '编辑商品' : '新建商品'
   if (product) {
-    for (const key of ['id', 'sku', 'name', 'price', 'currency', 'description', 'purchase_url', 'value', 'status', 'sort_order']) {
+    for (const key of ['id', 'sku', 'name', 'price', 'currency', 'description', 'icon_url', 'purchase_url', 'value', 'status', 'sort_order']) {
       if (form.elements[key]) form.elements[key].value = product[key] ?? ''
     }
     const benefit = $(`[name="benefit_type"][value="${product.benefit_type}"]`, form)

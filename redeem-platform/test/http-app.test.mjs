@@ -107,6 +107,7 @@ databaseTest('HTTP flow exchanges identity, generates, redeems, and lists record
       group_id: 8,
       validity_days: 30,
       purchase_url: 'https://store.example.com/sub-30',
+      icon_url: 'https://cdn.example.com/sub-30.png',
       status: 'active',
       sort_order: 1,
     }),
@@ -120,8 +121,25 @@ databaseTest('HTTP flow exchanges identity, generates, redeems, and lists record
   assert.equal(catalog.response.status, 200)
   assert.equal(catalog.body.data.length, 1)
   assert.equal(catalog.body.data[0].price, '149')
+  assert.equal(catalog.body.data[0].icon_url, 'https://cdn.example.com/sub-30.png')
   assert.equal(catalog.body.data[0].created_by, undefined)
   assert.equal(catalog.body.data[0].status, undefined)
+
+  const publicCatalog = await jsonRequest(baseURL, '/api/public/products', {
+    headers: { Origin: 'http://sub2api.example.test' },
+  })
+  assert.equal(publicCatalog.response.status, 200)
+  assert.equal(
+    publicCatalog.response.headers.get('access-control-allow-origin'),
+    'http://sub2api.example.test',
+  )
+  assert.equal(publicCatalog.body.data[0].sku, 'SUB-30')
+
+  const forbiddenCatalog = await jsonRequest(baseURL, '/api/public/products', {
+    headers: { Origin: 'https://attacker.example.test' },
+  })
+  assert.equal(forbiddenCatalog.response.status, 403)
+  assert.equal(forbiddenCatalog.body.reason, 'CATALOG_ORIGIN_FORBIDDEN')
 
   const generated = await jsonRequest(baseURL, '/api/admin/codes/generate', {
     method: 'POST',

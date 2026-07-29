@@ -70,9 +70,9 @@ func GetNonceFromContext(c *gin.Context) string {
 }
 
 // SecurityHeaders sets baseline security headers for all responses.
-// getFrameSrcOrigins is an optional function that returns extra origins to inject into frame-src;
-// pass nil to disable dynamic frame-src injection.
-func SecurityHeaders(cfg config.CSPConfig, getFrameSrcOrigins func() []string) gin.HandlerFunc {
+// getTrustedPageOrigins returns administrator-configured external page origins. They are allowed
+// for both iframe embedding and frontend data requests made by those integrations.
+func SecurityHeaders(cfg config.CSPConfig, getTrustedPageOrigins func() []string) gin.HandlerFunc {
 	policy := strings.TrimSpace(cfg.Policy)
 	if policy == "" {
 		policy = config.DefaultCSPPolicy
@@ -83,10 +83,11 @@ func SecurityHeaders(cfg config.CSPConfig, getFrameSrcOrigins func() []string) g
 
 	return func(c *gin.Context) {
 		finalPolicy := policy
-		if getFrameSrcOrigins != nil {
-			for _, origin := range getFrameSrcOrigins() {
+		if getTrustedPageOrigins != nil {
+			for _, origin := range getTrustedPageOrigins() {
 				if origin != "" {
 					finalPolicy = addToDirective(finalPolicy, "frame-src", origin)
+					finalPolicy = addToDirective(finalPolicy, "connect-src", origin)
 				}
 			}
 		}

@@ -158,7 +158,11 @@ function renderProducts(items) {
     article.className = 'product-card'
     article.innerHTML = `
       <div class="product-card-heading">
-        <div>
+        <span class="product-icon" aria-hidden="true">
+          <span>${escapeHTML(item.name.slice(0, 1).toUpperCase())}</span>
+          ${item.icon_url ? `<img src="${escapeHTML(item.icon_url)}" alt="">` : ''}
+        </span>
+        <div class="product-title-copy">
           <small>${escapeHTML(item.sku)}</small>
           <h3>${escapeHTML(item.name)}</h3>
         </div>
@@ -172,6 +176,8 @@ function renderProducts(items) {
           : '<button class="secondary-button product-buy" type="button" disabled>暂未开放</button>'}
       </div>
     `
+    const icon = $('img', article)
+    if (icon) icon.addEventListener('error', () => icon.remove(), { once: true })
     productList.append(article)
   }
 }

@@ -32,6 +32,7 @@ export function testConfig(overrides = {}) {
     maxAttempts: 3,
     trustProxy: false,
     frameAncestors: "'self'",
+    catalogOrigins: ['http://sub2api.example.test'],
     ...overrides,
   }
 }

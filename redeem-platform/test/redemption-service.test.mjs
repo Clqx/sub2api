@@ -116,6 +116,7 @@ databaseTest('product codes keep their benefit snapshot after the product change
     benefit_type: 'balance',
     value: '100',
     purchase_url: 'https://store.example.com/balance-100',
+    icon_url: 'https://cdn.example.com/balance-100.png',
     status: 'active',
     sort_order: 10,
   }, 'manager:test')
@@ -132,6 +133,7 @@ databaseTest('product codes keep their benefit snapshot after the product change
   const result = await service.redeem(generated.code, user)
 
   assert.equal(generated.product_id, product.id)
+  assert.equal(product.icon_url, 'https://cdn.example.com/balance-100.png')
   assert.equal(result.product_name, '余额 100')
   assert.equal(result.value, '100')
   assert.equal(calls[0].value, '100')
@@ -149,6 +151,18 @@ databaseTest('draft products cannot issue codes and unsafe purchase URLs are rej
       purchase_url: 'javascript:alert(1)',
     }, 'manager:test'),
     (error) => error instanceof AppError && error.code === 'INVALID_PURCHASE_URL',
+  )
+
+  await assert.rejects(
+    service.createProduct({
+      sku: 'BAD-ICON',
+      name: '无效图标',
+      price: '10',
+      benefit_type: 'balance',
+      value: '10',
+      icon_url: 'data:image/svg+xml,unsafe',
+    }, 'manager:test'),
+    (error) => error instanceof AppError && error.code === 'INVALID_ICON_URL',
   )
 
   const product = await service.createProduct({

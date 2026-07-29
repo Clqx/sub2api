@@ -1,0 +1,2 @@
+ALTER TABLE products
+  ADD COLUMN icon_url TEXT NOT NULL DEFAULT '';

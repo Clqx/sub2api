@@ -1,645 +1,1078 @@
 <template>
-  <!-- Custom Home Content: Full Page Mode -->
   <div v-if="homeContent" class="min-h-screen">
-    <!-- iframe mode -->
     <iframe
-      v-if="isHomeContentUrl"
-      :src="homeContent.trim()"
+      v-if="customHomeUrl"
+      :src="customHomeUrl"
       class="h-screen w-full border-0"
       allowfullscreen
     ></iframe>
-    <!-- HTML mode - SECURITY: homeContent is admin-only setting, XSS risk is acceptable -->
-    <div v-else v-html="homeContent"></div>
+    <div v-else v-html="sanitizedHomeContent"></div>
   </div>
 
-  <!-- Default Home Page -->
-  <div
-    v-else
-    class="relative flex min-h-screen flex-col overflow-hidden bg-gradient-to-br from-gray-50 via-primary-50/30 to-gray-100 dark:from-dark-950 dark:via-dark-900 dark:to-dark-950"
-  >
-    <!-- Background Decorations -->
-    <div class="pointer-events-none absolute inset-0 overflow-hidden">
-      <div
-        class="absolute -right-40 -top-40 h-96 w-96 rounded-full bg-primary-400/20 blur-3xl"
-      ></div>
-      <div
-        class="absolute -bottom-40 -left-40 h-96 w-96 rounded-full bg-primary-500/15 blur-3xl"
-      ></div>
-      <div
-        class="absolute left-1/3 top-1/4 h-72 w-72 rounded-full bg-primary-300/10 blur-3xl"
-      ></div>
-      <div
-        class="absolute bottom-1/4 right-1/4 h-64 w-64 rounded-full bg-primary-400/10 blur-3xl"
-      ></div>
-      <div
-        class="absolute inset-0 bg-[linear-gradient(rgba(20,184,166,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(20,184,166,0.03)_1px,transparent_1px)] bg-[size:64px_64px]"
-      ></div>
-    </div>
-
-    <!-- Header -->
-    <header class="relative z-20 px-6 py-4">
-      <nav class="mx-auto flex max-w-6xl items-center justify-between">
-        <!-- Logo -->
-        <div class="flex items-center">
-          <div class="h-10 w-10 overflow-hidden rounded-xl shadow-md">
-            <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
-          </div>
+  <div v-else class="landing-page">
+    <header class="site-header">
+      <nav class="site-nav" :aria-label="t('home.nav.primary')">
+        <a class="brand" href="#top">
+          <img :src="siteLogo || '/logo.svg'" alt="" />
+          <span>{{ siteName }}</span>
+        </a>
+        <div class="nav-links">
+          <a href="#products">{{ t('home.nav.products') }}</a>
+          <a href="#capabilities">{{ t('home.nav.capabilities') }}</a>
+          <a href="#models">{{ t('home.nav.models') }}</a>
         </div>
-
-        <!-- Nav Actions -->
-        <div class="flex items-center gap-3">
-          <!-- Language Switcher -->
+        <div class="nav-actions">
           <LocaleSwitcher />
-
-          <!-- Doc Link -->
           <a
             v-if="docUrl"
             :href="docUrl"
             target="_blank"
             rel="noopener noreferrer"
-            class="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-dark-400 dark:hover:bg-dark-800 dark:hover:text-white"
+            class="icon-button"
             :title="t('home.viewDocs')"
           >
             <Icon name="book" size="md" />
           </a>
-
-          <!-- Theme Toggle -->
           <button
-            @click="toggleTheme"
-            class="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-dark-400 dark:hover:bg-dark-800 dark:hover:text-white"
+            type="button"
+            class="icon-button"
             :title="isDark ? t('home.switchToLight') : t('home.switchToDark')"
+            @click="toggleTheme"
           >
-            <Icon v-if="isDark" name="sun" size="md" />
-            <Icon v-else name="moon" size="md" />
+            <Icon :name="isDark ? 'sun' : 'moon'" size="md" />
           </button>
-
-          <!-- Login / Dashboard Button -->
-          <router-link
-            v-if="isAuthenticated"
-            :to="dashboardPath"
-            class="inline-flex items-center gap-1.5 rounded-full bg-gray-900 py-1 pl-1 pr-2.5 transition-colors hover:bg-gray-800 dark:bg-gray-800 dark:hover:bg-gray-700"
-          >
-            <span
-              class="flex h-5 w-5 items-center justify-center rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-[10px] font-semibold text-white"
-            >
-              {{ userInitial }}
-            </span>
-            <span class="text-xs font-medium text-white">{{ t('home.dashboard') }}</span>
-            <svg
-              class="h-3 w-3 text-gray-400"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M4.5 19.5l15-15m0 0H8.25m11.25 0v11.25"
-              />
-            </svg>
-          </router-link>
-          <router-link
-            v-else
-            to="/login"
-            class="inline-flex items-center rounded-full bg-gray-900 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-gray-800 dark:bg-gray-800 dark:hover:bg-gray-700"
-          >
-            {{ t('home.login') }}
+          <router-link class="header-login" :to="isAuthenticated ? dashboardPath : '/login'">
+            <span v-if="isAuthenticated" class="user-initial">{{ userInitial }}</span>
+            <Icon v-else name="login" size="sm" />
+            {{ isAuthenticated ? t('home.dashboard') : t('home.login') }}
           </router-link>
         </div>
       </nav>
     </header>
 
-    <!-- Main Content -->
-    <main class="relative z-10 flex-1 px-6 py-16">
-      <div class="mx-auto max-w-6xl">
-        <!-- Hero Section - Left/Right Layout -->
-        <div class="mb-12 flex flex-col items-center justify-between gap-12 lg:flex-row lg:gap-16">
-          <!-- Left: Text Content -->
-          <div class="flex-1 text-center lg:text-left">
-            <h1
-              class="mb-4 text-4xl font-bold text-gray-900 dark:text-white md:text-5xl lg:text-6xl"
-            >
-              {{ siteName }}
-            </h1>
-            <p class="mb-8 text-lg text-gray-600 dark:text-dark-300 md:text-xl">
-              {{ siteSubtitle }}
-            </p>
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-shade"></div>
+        <div class="hero-content">
+          <p class="hero-eyebrow">AI API INFRASTRUCTURE</p>
+          <h1 id="hero-title">{{ siteName }}</h1>
+          <p class="hero-subtitle">{{ siteSubtitle || t('home.heroSubtitle') }}</p>
+          <p class="hero-description">{{ t('home.heroDescription') }}</p>
+          <div class="hero-actions">
+            <router-link class="primary-action" :to="isAuthenticated ? dashboardPath : '/login'">
+              {{ isAuthenticated ? t('home.goToDashboard') : t('home.getStarted') }}
+              <Icon name="arrowRight" size="sm" />
+            </router-link>
+            <a class="secondary-action" href="#products">
+              {{ t('home.catalog.viewProducts') }}
+            </a>
+          </div>
+        </div>
+        <div class="hero-facts" aria-label="Service highlights">
+          <div>
+            <strong>OpenAI</strong>
+            <span>{{ t('home.catalog.unifiedProtocol') }}</span>
+          </div>
+          <div>
+            <strong>Claude · GPT · Gemini</strong>
+            <span>{{ t('home.catalog.modelCoverage') }}</span>
+          </div>
+          <div>
+            <strong>24 / 7</strong>
+            <span>{{ t('home.catalog.serviceAvailability') }}</span>
+          </div>
+        </div>
+      </section>
 
-            <!-- CTA Button -->
+      <section id="products" class="catalog-section section-band" aria-labelledby="catalog-title">
+        <div class="section-inner">
+          <div class="section-heading">
             <div>
-              <router-link
-                :to="isAuthenticated ? dashboardPath : '/login'"
-                class="btn btn-primary px-8 py-3 text-base shadow-lg shadow-primary-500/30"
-              >
-                {{ isAuthenticated ? t('home.goToDashboard') : t('home.getStarted') }}
-                <Icon name="arrowRight" size="md" class="ml-2" :stroke-width="2" />
-              </router-link>
+              <p class="section-eyebrow">PRODUCT CATALOG</p>
+              <h2 id="catalog-title">{{ t('home.catalog.title') }}</h2>
             </div>
+            <p>{{ t('home.catalog.description') }}</p>
           </div>
 
-          <!-- Right: Terminal Animation -->
-          <div class="flex flex-1 justify-center lg:justify-end">
-            <div class="terminal-container">
-              <div class="terminal-window">
-                <!-- Window header -->
-                <div class="terminal-header">
-                  <div class="terminal-buttons">
-                    <span class="btn-close"></span>
-                    <span class="btn-minimize"></span>
-                    <span class="btn-maximize"></span>
-                  </div>
-                  <span class="terminal-title">terminal</span>
-                </div>
-                <!-- Terminal content -->
-                <div class="terminal-body">
-                  <div class="code-line line-1">
-                    <span class="code-prompt">$</span>
-                    <span class="code-cmd">curl</span>
-                    <span class="code-flag">-X POST</span>
-                    <span class="code-url">/v1/messages</span>
-                  </div>
-                  <div class="code-line line-2">
-                    <span class="code-comment"># Routing to upstream...</span>
-                  </div>
-                  <div class="code-line line-3">
-                    <span class="code-success">200 OK</span>
-                    <span class="code-response">{ "content": "Hello!" }</span>
-                  </div>
-                  <div class="code-line line-4">
-                    <span class="code-prompt">$</span>
-                    <span class="cursor"></span>
-                  </div>
-                </div>
+          <div v-if="catalogLoading" class="catalog-state" aria-live="polite">
+            <span class="loading-line"></span>
+            <span class="loading-line"></span>
+            <span class="loading-line"></span>
+          </div>
+          <div v-else-if="catalogUnavailable" class="catalog-message" role="status">
+            <Icon name="exclamationCircle" size="md" />
+            <div>
+              <strong>{{ t('home.catalog.unavailable') }}</strong>
+              <p>{{ t('home.catalog.unavailableDescription') }}</p>
+            </div>
+          </div>
+          <div v-else-if="products.length === 0" class="catalog-message" role="status">
+            <Icon name="cube" size="md" />
+            <div>
+              <strong>{{ t('home.catalog.empty') }}</strong>
+              <p>{{ t('home.catalog.emptyDescription') }}</p>
+            </div>
+          </div>
+          <div v-else class="product-grid">
+            <article v-for="product in products" :key="product.id" class="product-card">
+              <div class="product-heading">
+                <span class="product-icon" aria-hidden="true">
+                  <span>{{ product.name.charAt(0).toUpperCase() }}</span>
+                  <img
+                    v-if="productIcon(product)"
+                    :src="productIcon(product)"
+                    alt=""
+                    loading="lazy"
+                    @error="hideBrokenIcon"
+                  />
+                </span>
+                <span class="product-sku">{{ product.sku }}</span>
               </div>
+              <div class="product-copy">
+                <h3>{{ product.name }}</h3>
+                <p>{{ product.description || t('home.catalog.defaultDescription') }}</p>
+              </div>
+              <div class="product-benefit">
+                <Icon :name="product.benefit_type === 'subscription' ? 'calendar' : 'creditCard'" size="sm" />
+                {{ benefitText(product) }}
+              </div>
+              <div class="product-footer">
+                <strong class="product-price">{{ formatPrice(product) }}</strong>
+                <a
+                  v-if="purchaseUrl(product)"
+                  class="buy-button"
+                  :href="purchaseUrl(product)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {{ t('home.catalog.buy') }}
+                  <Icon name="externalLink" size="xs" />
+                </a>
+                <button v-else class="buy-button disabled" type="button" disabled>
+                  {{ t('home.catalog.comingSoon') }}
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <div v-if="redeemURL" class="catalog-redeem">
+            <div>
+              <Icon name="gift" size="lg" />
+              <span>
+                <strong>{{ t('home.catalog.haveCode') }}</strong>
+                <small>{{ t('home.catalog.haveCodeDescription') }}</small>
+              </span>
             </div>
+            <a :href="redeemURL" class="redeem-link">
+              {{ t('home.catalog.redeemNow') }}
+              <Icon name="arrowRight" size="sm" />
+            </a>
           </div>
         </div>
+      </section>
 
-        <!-- Feature Tags - Centered -->
-        <div class="mb-12 flex flex-wrap items-center justify-center gap-4 md:gap-6">
-          <div
-            class="inline-flex items-center gap-2.5 rounded-full border border-gray-200/50 bg-white/80 px-5 py-2.5 shadow-sm backdrop-blur-sm dark:border-dark-700/50 dark:bg-dark-800/80"
-          >
-            <Icon name="swap" size="sm" class="text-primary-500" />
-            <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{
-              t('home.tags.subscriptionToApi')
-            }}</span>
+      <section id="capabilities" class="capability-section section-band" aria-labelledby="capability-title">
+        <div class="section-inner">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">BUILT FOR RELIABLE ACCESS</p>
+              <h2 id="capability-title">{{ t('home.capabilities.title') }}</h2>
+            </div>
+            <p>{{ t('home.capabilities.description') }}</p>
           </div>
-          <div
-            class="inline-flex items-center gap-2.5 rounded-full border border-gray-200/50 bg-white/80 px-5 py-2.5 shadow-sm backdrop-blur-sm dark:border-dark-700/50 dark:bg-dark-800/80"
-          >
-            <Icon name="shield" size="sm" class="text-primary-500" />
-            <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{
-              t('home.tags.stickySession')
-            }}</span>
-          </div>
-          <div
-            class="inline-flex items-center gap-2.5 rounded-full border border-gray-200/50 bg-white/80 px-5 py-2.5 shadow-sm backdrop-blur-sm dark:border-dark-700/50 dark:bg-dark-800/80"
-          >
-            <Icon name="chart" size="sm" class="text-primary-500" />
-            <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{
-              t('home.tags.realtimeBilling')
-            }}</span>
+          <div class="capability-grid">
+            <article>
+              <Icon name="server" size="lg" />
+              <h3>{{ t('home.features.unifiedGateway') }}</h3>
+              <p>{{ t('home.features.unifiedGatewayDesc') }}</p>
+            </article>
+            <article>
+              <Icon name="users" size="lg" />
+              <h3>{{ t('home.features.multiAccount') }}</h3>
+              <p>{{ t('home.features.multiAccountDesc') }}</p>
+            </article>
+            <article>
+              <Icon name="chartBar" size="lg" />
+              <h3>{{ t('home.features.balanceQuota') }}</h3>
+              <p>{{ t('home.features.balanceQuotaDesc') }}</p>
+            </article>
           </div>
         </div>
+      </section>
 
-        <!-- Features Grid -->
-        <div class="mb-12 grid gap-6 md:grid-cols-3">
-          <!-- Feature 1: Unified Gateway -->
-          <div
-            class="group rounded-2xl border border-gray-200/50 bg-white/60 p-6 backdrop-blur-sm transition-all duration-300 hover:shadow-xl hover:shadow-primary-500/10 dark:border-dark-700/50 dark:bg-dark-800/60"
-          >
-            <div
-              class="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg shadow-blue-500/30 transition-transform group-hover:scale-110"
-            >
-              <Icon name="server" size="lg" class="text-white" />
-            </div>
-            <h3 class="mb-2 text-lg font-semibold text-gray-900 dark:text-white">
-              {{ t('home.features.unifiedGateway') }}
-            </h3>
-            <p class="text-sm leading-relaxed text-gray-600 dark:text-dark-400">
-              {{ t('home.features.unifiedGatewayDesc') }}
-            </p>
+      <section id="models" class="model-section section-band" aria-labelledby="model-title">
+        <div class="section-inner model-layout">
+          <div>
+            <p class="section-eyebrow">MODEL ROUTING</p>
+            <h2 id="model-title">{{ t('home.providers.title') }}</h2>
+            <p>{{ t('home.providers.description') }}</p>
           </div>
-
-          <!-- Feature 2: Account Pool -->
-          <div
-            class="group rounded-2xl border border-gray-200/50 bg-white/60 p-6 backdrop-blur-sm transition-all duration-300 hover:shadow-xl hover:shadow-primary-500/10 dark:border-dark-700/50 dark:bg-dark-800/60"
-          >
-            <div
-              class="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 shadow-lg shadow-primary-500/30 transition-transform group-hover:scale-110"
-            >
-              <svg
-                class="h-6 w-6 text-white"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                stroke-width="1.5"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"
-                />
-              </svg>
-            </div>
-            <h3 class="mb-2 text-lg font-semibold text-gray-900 dark:text-white">
-              {{ t('home.features.multiAccount') }}
-            </h3>
-            <p class="text-sm leading-relaxed text-gray-600 dark:text-dark-400">
-              {{ t('home.features.multiAccountDesc') }}
-            </p>
-          </div>
-
-          <!-- Feature 3: Billing & Quota -->
-          <div
-            class="group rounded-2xl border border-gray-200/50 bg-white/60 p-6 backdrop-blur-sm transition-all duration-300 hover:shadow-xl hover:shadow-primary-500/10 dark:border-dark-700/50 dark:bg-dark-800/60"
-          >
-            <div
-              class="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-purple-600 shadow-lg shadow-purple-500/30 transition-transform group-hover:scale-110"
-            >
-              <svg
-                class="h-6 w-6 text-white"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                stroke-width="1.5"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M2.25 18.75a60.07 60.07 0 0115.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 013 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 00-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 01-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 003 15h-.75M15 10.5a3 3 0 11-6 0 3 3 0 016 0zm3 0h.008v.008H18V10.5zm-12 0h.008v.008H6V10.5z"
-                />
-              </svg>
-            </div>
-            <h3 class="mb-2 text-lg font-semibold text-gray-900 dark:text-white">
-              {{ t('home.features.balanceQuota') }}
-            </h3>
-            <p class="text-sm leading-relaxed text-gray-600 dark:text-dark-400">
-              {{ t('home.features.balanceQuotaDesc') }}
-            </p>
+          <div class="model-list">
+            <span><b>C</b> Claude</span>
+            <span><b>G</b> GPT</span>
+            <span><b>G</b> {{ t('home.providers.gemini') }}</span>
+            <span><b>A</b> {{ t('home.providers.antigravity') }}</span>
           </div>
         </div>
+      </section>
 
-        <!-- Supported Providers -->
-        <div class="mb-8 text-center">
-          <h2 class="mb-3 text-2xl font-bold text-gray-900 dark:text-white">
-            {{ t('home.providers.title') }}
-          </h2>
-          <p class="text-sm text-gray-600 dark:text-dark-400">
-            {{ t('home.providers.description') }}
-          </p>
+      <section class="closing-section section-band">
+        <div class="section-inner closing-layout">
+          <div>
+            <p class="section-eyebrow">START BUILDING</p>
+            <h2>{{ t('home.cta.title') }}</h2>
+            <p>{{ t('home.cta.description') }}</p>
+          </div>
+          <router-link class="primary-action light" :to="isAuthenticated ? dashboardPath : '/login'">
+            {{ isAuthenticated ? t('home.goToDashboard') : t('home.cta.button') }}
+            <Icon name="arrowRight" size="sm" />
+          </router-link>
         </div>
-
-        <div class="mb-16 flex flex-wrap items-center justify-center gap-4">
-          <!-- Claude - Supported -->
-          <div
-            class="flex items-center gap-2 rounded-xl border border-primary-200 bg-white/60 px-5 py-3 ring-1 ring-primary-500/20 backdrop-blur-sm dark:border-primary-800 dark:bg-dark-800/60"
-          >
-            <div
-              class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-orange-400 to-orange-500"
-            >
-              <span class="text-xs font-bold text-white">C</span>
-            </div>
-            <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('home.providers.claude') }}</span>
-            <span
-              class="rounded bg-primary-100 px-1.5 py-0.5 text-[10px] font-medium text-primary-600 dark:bg-primary-900/30 dark:text-primary-400"
-              >{{ t('home.providers.supported') }}</span
-            >
-          </div>
-          <!-- GPT - Supported -->
-          <div
-            class="flex items-center gap-2 rounded-xl border border-primary-200 bg-white/60 px-5 py-3 ring-1 ring-primary-500/20 backdrop-blur-sm dark:border-primary-800 dark:bg-dark-800/60"
-          >
-            <div
-              class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-green-500 to-green-600"
-            >
-              <span class="text-xs font-bold text-white">G</span>
-            </div>
-            <span class="text-sm font-medium text-gray-700 dark:text-dark-200">GPT</span>
-            <span
-              class="rounded bg-primary-100 px-1.5 py-0.5 text-[10px] font-medium text-primary-600 dark:bg-primary-900/30 dark:text-primary-400"
-              >{{ t('home.providers.supported') }}</span
-            >
-          </div>
-          <!-- Gemini - Supported -->
-          <div
-            class="flex items-center gap-2 rounded-xl border border-primary-200 bg-white/60 px-5 py-3 ring-1 ring-primary-500/20 backdrop-blur-sm dark:border-primary-800 dark:bg-dark-800/60"
-          >
-            <div
-              class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-blue-600"
-            >
-              <span class="text-xs font-bold text-white">G</span>
-            </div>
-            <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('home.providers.gemini') }}</span>
-            <span
-              class="rounded bg-primary-100 px-1.5 py-0.5 text-[10px] font-medium text-primary-600 dark:bg-primary-900/30 dark:text-primary-400"
-              >{{ t('home.providers.supported') }}</span
-            >
-          </div>
-          <!-- Antigravity - Supported -->
-          <div
-            class="flex items-center gap-2 rounded-xl border border-primary-200 bg-white/60 px-5 py-3 ring-1 ring-primary-500/20 backdrop-blur-sm dark:border-primary-800 dark:bg-dark-800/60"
-          >
-            <div
-              class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-rose-500 to-pink-600"
-            >
-              <span class="text-xs font-bold text-white">A</span>
-            </div>
-            <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('home.providers.antigravity') }}</span>
-            <span
-              class="rounded bg-primary-100 px-1.5 py-0.5 text-[10px] font-medium text-primary-600 dark:bg-primary-900/30 dark:text-primary-400"
-              >{{ t('home.providers.supported') }}</span
-            >
-          </div>
-          <!-- More - Coming Soon -->
-          <div
-            class="flex items-center gap-2 rounded-xl border border-gray-200/50 bg-white/40 px-5 py-3 opacity-60 backdrop-blur-sm dark:border-dark-700/50 dark:bg-dark-800/40"
-          >
-            <div
-              class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-gray-500 to-gray-600"
-            >
-              <span class="text-xs font-bold text-white">+</span>
-            </div>
-            <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('home.providers.more') }}</span>
-            <span
-              class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-dark-700 dark:text-dark-400"
-              >{{ t('home.providers.soon') }}</span
-            >
-          </div>
-        </div>
-      </div>
+      </section>
     </main>
 
-    <!-- Footer -->
-    <footer class="relative z-10 border-t border-gray-200/50 px-6 py-8 dark:border-dark-800/50">
-      <div
-        class="mx-auto flex max-w-6xl flex-col items-center justify-center gap-4 text-center sm:flex-row sm:text-left"
-      >
-        <p class="text-sm text-gray-500 dark:text-dark-400">
-          &copy; {{ currentYear }} {{ siteName }}. {{ t('home.footer.allRightsReserved') }}
-        </p>
-        <div class="flex items-center gap-4">
-          <a
-            v-if="docUrl"
-            :href="docUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="text-sm text-gray-500 transition-colors hover:text-gray-700 dark:text-dark-400 dark:hover:text-white"
-          >
-            {{ t('home.docs') }}
-          </a>
-          <a
-            :href="githubUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="text-sm text-gray-500 transition-colors hover:text-gray-700 dark:text-dark-400 dark:hover:text-white"
-          >
-            GitHub
-          </a>
-        </div>
+    <footer class="site-footer">
+      <div>
+        <span>&copy; {{ currentYear }} {{ siteName }}. {{ t('home.footer.allRightsReserved') }}</span>
+        <nav>
+          <a v-if="docUrl" :href="docUrl" target="_blank" rel="noopener noreferrer">{{ t('home.docs') }}</a>
+          <a :href="githubUrl" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </nav>
       </div>
     </footer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import DOMPurify from 'dompurify'
 import { useAuthStore, useAppStore } from '@/stores'
 import LocaleSwitcher from '@/components/common/LocaleSwitcher.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { sanitizeUrl } from '@/utils/url'
 
-const { t } = useI18n()
+interface CatalogProduct {
+  id: string
+  sku: string
+  name: string
+  description: string
+  price: string
+  currency: string
+  benefit_type: 'balance' | 'subscription'
+  value: string
+  group_id: number | null
+  validity_days: number | null
+  purchase_url: string
+  icon_url: string
+}
 
+interface CatalogResponse {
+  code: number
+  data: CatalogProduct[]
+}
+
+const { t, locale } = useI18n()
 const authStore = useAuthStore()
 const appStore = useAppStore()
 
-// Site settings - directly from appStore (already initialized from injected config)
 const siteName = computed(() => appStore.cachedPublicSettings?.site_name || appStore.siteName || 'Sub2API')
 const siteLogo = computed(() => sanitizeUrl(appStore.cachedPublicSettings?.site_logo || appStore.siteLogo || '', { allowRelative: true, allowDataUrl: true }))
-const siteSubtitle = computed(() => appStore.cachedPublicSettings?.site_subtitle || 'AI API Gateway Platform')
+const siteSubtitle = computed(() => appStore.cachedPublicSettings?.site_subtitle || t('home.heroSubtitle'))
 const docUrl = computed(() => sanitizeUrl(appStore.cachedPublicSettings?.doc_url || appStore.docUrl || ''))
 const homeContent = computed(() => appStore.cachedPublicSettings?.home_content || '')
+const customHomeUrl = computed(() => sanitizeUrl(homeContent.value))
+const sanitizedHomeContent = computed(() => DOMPurify.sanitize(homeContent.value))
 
-// Check if homeContent is a URL (for iframe display)
-const isHomeContentUrl = computed(() => {
-  const content = homeContent.value.trim()
-  return content.startsWith('http://') || content.startsWith('https://')
+const redeemMenu = computed(() => appStore.cachedPublicSettings?.custom_menu_items
+  .find((item) => item.id === 'redeem-center' && item.visibility === 'user'))
+const redeemURL = computed(() => sanitizeUrl(redeemMenu.value?.url || ''))
+const catalogEndpoint = computed(() => {
+  if (!redeemURL.value) return ''
+  try {
+    const url = new URL(redeemURL.value, window.location.origin)
+    return new URL('/api/public/products', url.origin).toString()
+  } catch {
+    return ''
+  }
 })
 
-// Theme
+const products = ref<CatalogProduct[]>([])
+const catalogLoading = ref(true)
+const catalogUnavailable = ref(false)
 const isDark = ref(document.documentElement.classList.contains('dark'))
-
-// GitHub URL
+const isAuthenticated = computed(() => authStore.isAuthenticated)
+const dashboardPath = computed(() => authStore.isAdmin ? '/admin/dashboard' : '/dashboard')
+const userInitial = computed(() => authStore.user?.email?.charAt(0).toUpperCase() || 'U')
+const currentYear = new Date().getFullYear()
 const githubUrl = 'https://github.com/Wei-Shaw/sub2api'
 
-// Auth state
-const isAuthenticated = computed(() => authStore.isAuthenticated)
-const isAdmin = computed(() => authStore.isAdmin)
-const dashboardPath = computed(() => isAdmin.value ? '/admin/dashboard' : '/dashboard')
-const userInitial = computed(() => {
-  const user = authStore.user
-  if (!user || !user.email) return ''
-  return user.email.charAt(0).toUpperCase()
-})
-
-// Current year for footer
-const currentYear = computed(() => new Date().getFullYear())
-
-// Toggle theme
 function toggleTheme() {
   isDark.value = !isDark.value
   document.documentElement.classList.toggle('dark', isDark.value)
   localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
 }
 
-// Initialize theme
 function initTheme() {
   const savedTheme = localStorage.getItem('theme')
-  if (
-    savedTheme === 'dark' ||
-    (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)
-  ) {
+  if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
     isDark.value = true
     document.documentElement.classList.add('dark')
   }
 }
 
-onMounted(() => {
-  initTheme()
+function productIcon(product: CatalogProduct) {
+  return sanitizeUrl(product.icon_url || '')
+}
 
-  // Check auth state
-  authStore.checkAuth()
+function purchaseUrl(product: CatalogProduct) {
+  return sanitizeUrl(product.purchase_url || '')
+}
 
-  // Ensure public settings are loaded (will use cache if already loaded from injected config)
-  if (!appStore.publicSettingsLoaded) {
-    appStore.fetchPublicSettings()
+function hideBrokenIcon(event: Event) {
+  const image = event.currentTarget as HTMLImageElement
+  image.remove()
+}
+
+function formatPrice(product: CatalogProduct) {
+  try {
+    return new Intl.NumberFormat(locale.value, {
+      style: 'currency',
+      currency: product.currency,
+      maximumFractionDigits: 6,
+    }).format(Number(product.price))
+  } catch {
+    return `${product.currency} ${product.price}`
   }
+}
+
+function benefitText(product: CatalogProduct) {
+  if (product.benefit_type === 'subscription') {
+    return t('home.catalog.subscriptionBenefit', { days: product.validity_days || 0 })
+  }
+  return t('home.catalog.balanceBenefit', { value: product.value })
+}
+
+async function loadCatalog() {
+  catalogLoading.value = true
+  catalogUnavailable.value = false
+  if (!catalogEndpoint.value) {
+    catalogUnavailable.value = true
+    catalogLoading.value = false
+    return
+  }
+  try {
+    const response = await fetch(catalogEndpoint.value, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new Error(`catalog request failed: ${response.status}`)
+    const body = await response.json() as CatalogResponse
+    products.value = Array.isArray(body.data) ? body.data : []
+  } catch {
+    catalogUnavailable.value = true
+  } finally {
+    catalogLoading.value = false
+  }
+}
+
+onMounted(async () => {
+  initTheme()
+  await Promise.all([
+    authStore.checkAuth(),
+    appStore.publicSettingsLoaded ? Promise.resolve() : appStore.fetchPublicSettings(),
+  ])
+  await loadCatalog()
 })
 </script>
 
 <style scoped>
-/* Terminal Container */
-.terminal-container {
-  position: relative;
-  display: inline-block;
+.landing-page {
+  --page: #f5f7f6;
+  --surface: #ffffff;
+  --ink: #15201d;
+  --muted: #63706c;
+  --line: #dce3e0;
+  --brand: #087c6b;
+  --brand-dark: #056355;
+  min-width: 320px;
+  min-height: 100vh;
+  color: var(--ink);
+  background: var(--page);
+  letter-spacing: 0;
 }
 
-/* Terminal Window */
-.terminal-window {
-  width: 420px;
-  background: linear-gradient(145deg, #1e293b 0%, #0f172a 100%);
-  border-radius: 14px;
-  box-shadow:
-    0 25px 50px -12px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(255, 255, 255, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+:global(.dark) .landing-page {
+  --page: #101513;
+  --surface: #171d1b;
+  --ink: #f1f5f3;
+  --muted: #a6b1ad;
+  --line: #303a36;
+  --brand: #35b49d;
+  --brand-dark: #72d6c3;
+}
+
+.site-header {
+  position: sticky;
+  z-index: 30;
+  top: 0;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.site-nav,
+.section-inner,
+.site-footer > div {
+  width: min(1180px, calc(100% - 48px));
+  margin: 0 auto;
+}
+
+.site-nav {
+  display: flex;
+  min-height: 68px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+}
+
+.brand,
+.nav-actions,
+.header-login,
+.primary-action,
+.secondary-action,
+.buy-button,
+.redeem-link,
+.catalog-redeem > div,
+.product-benefit {
+  display: inline-flex;
+  align-items: center;
+}
+
+.brand {
+  min-width: 0;
+  gap: 10px;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 750;
+}
+
+.brand img {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.brand span {
   overflow: hidden;
-  transform: perspective(1000px) rotateX(2deg) rotateY(-2deg);
-  transition: transform 0.3s ease;
+  max-width: 220px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.terminal-window:hover {
-  transform: perspective(1000px) rotateX(0deg) rotateY(0deg) translateY(-4px);
-}
-
-/* Terminal Header */
-.terminal-header {
+.nav-links {
   display: flex;
-  align-items: center;
-  padding: 12px 16px;
-  background: rgba(30, 41, 59, 0.8);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.terminal-buttons {
-  display: flex;
-  gap: 8px;
-}
-
-.terminal-buttons span {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-}
-
-.btn-close {
-  background: #ef4444;
-}
-.btn-minimize {
-  background: #eab308;
-}
-.btn-maximize {
-  background: #22c55e;
-}
-
-.terminal-title {
   flex: 1;
-  text-align: center;
-  font-size: 12px;
-  font-family: ui-monospace, monospace;
-  color: #64748b;
-  margin-right: 52px;
+  justify-content: center;
+  gap: 34px;
 }
 
-/* Terminal Body */
-.terminal-body {
-  padding: 20px 24px;
-  font-family: ui-monospace, 'Fira Code', monospace;
+.nav-links a,
+.site-footer a {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  transition: color 150ms ease;
+}
+
+.nav-links a:hover,
+.site-footer a:hover {
+  color: var(--brand);
+}
+
+.nav-actions {
+  gap: 8px;
+}
+
+.icon-button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.icon-button:hover {
+  color: var(--ink);
+  background: var(--page);
+}
+
+.header-login {
+  min-height: 38px;
+  gap: 7px;
+  padding: 0 14px;
+  border-radius: 6px;
+  color: #ffffff;
+  background: #17221f;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.user-initial {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  color: #053b33;
+  background: #80ddca;
+  font-size: 10px;
+}
+
+.hero {
+  position: relative;
+  display: flex;
+  min-height: min(690px, calc(100vh - 68px));
+  flex-direction: column;
+  justify-content: space-between;
+  overflow: hidden;
+  color: #ffffff;
+  background-color: #10231f;
+  background-image: url('/product-console.jpg');
+  background-position: center 28%;
+  background-size: cover;
+}
+
+.hero-shade {
+  position: absolute;
+  inset: 0;
+  background: rgb(6 20 17 / 72%);
+}
+
+.hero-content {
+  position: relative;
+  z-index: 1;
+  width: min(1180px, calc(100% - 48px));
+  margin: auto;
+  padding: 90px 0 74px;
+}
+
+.hero-eyebrow,
+.section-eyebrow {
+  margin: 0 0 16px;
+  color: #60d1ba;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.hero h1 {
+  max-width: 820px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 64px;
+  line-height: 1.06;
+}
+
+.hero-subtitle {
+  max-width: 700px;
+  margin: 24px 0 0;
+  font-size: 25px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.hero-description {
+  max-width: 650px;
+  margin: 14px 0 0;
+  color: #d3ddda;
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 34px;
+}
+
+.primary-action,
+.secondary-action,
+.buy-button,
+.redeem-link {
+  justify-content: center;
+  gap: 9px;
+  min-height: 46px;
+  padding: 0 20px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   font-size: 14px;
-  line-height: 2;
+  font-weight: 700;
 }
 
-.code-line {
+.primary-action {
+  color: #073b32;
+  background: #71dbc6;
+}
+
+.secondary-action {
+  border-color: rgb(255 255 255 / 55%);
+  color: #ffffff;
+  background: rgb(9 26 22 / 42%);
+}
+
+.hero-facts {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: min(1180px, calc(100% - 48px));
+  grid-template-columns: repeat(3, 1fr);
+  margin: 0 auto;
+  border-top: 1px solid rgb(255 255 255 / 28%);
+}
+
+.hero-facts div {
+  min-width: 0;
+  padding: 24px 30px;
+  border-left: 1px solid rgb(255 255 255 / 20%);
+}
+
+.hero-facts div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.hero-facts strong,
+.hero-facts span {
+  display: block;
+}
+
+.hero-facts strong {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.hero-facts span {
+  margin-top: 5px;
+  color: #b9c9c4;
+  font-size: 11px;
+}
+
+.section-band {
+  scroll-margin-top: 68px;
+  border-bottom: 1px solid var(--line);
+}
+
+.catalog-section {
+  padding: 90px 0;
+  background: var(--surface);
+}
+
+.section-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 460px);
+  align-items: end;
+  gap: 60px;
+  margin-bottom: 40px;
+}
+
+.section-heading h2,
+.model-layout h2,
+.closing-layout h2 {
+  margin: 0;
+  font-size: 36px;
+  line-height: 1.2;
+}
+
+.section-heading > p,
+.model-layout > div > p:last-child,
+.closing-layout p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+.section-eyebrow {
+  color: var(--brand);
+}
+
+.product-grid,
+.catalog-state {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.product-card {
+  display: grid;
+  min-width: 0;
+  min-height: 342px;
+  grid-template-rows: auto 1fr auto auto;
+  gap: 20px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.product-card:hover {
+  border-color: color-mix(in srgb, var(--brand) 50%, var(--line));
+  box-shadow: 0 12px 30px rgb(28 59 50 / 8%);
+}
+
+.product-heading {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.product-icon {
+  position: relative;
+  display: grid;
+  width: 52px;
+  height: 52px;
+  flex: 0 0 52px;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--brand) 22%, var(--line));
+  border-radius: 7px;
+  color: var(--brand-dark);
+  background: color-mix(in srgb, var(--brand) 10%, var(--surface));
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.product-icon img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--surface);
+  object-fit: cover;
+}
+
+.product-sku {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-copy h3 {
+  overflow-wrap: anywhere;
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.4;
+}
+
+.product-copy p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-line;
+}
+
+.product-benefit {
   gap: 8px;
-  flex-wrap: wrap;
-  opacity: 0;
-  animation: line-appear 0.5s ease forwards;
+  color: var(--brand-dark);
+  font-size: 12px;
+  font-weight: 700;
 }
 
-.line-1 {
-  animation-delay: 0.3s;
-}
-.line-2 {
-  animation-delay: 1s;
-}
-.line-3 {
-  animation-delay: 1.8s;
-}
-.line-4 {
-  animation-delay: 2.5s;
+.product-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
 }
 
-@keyframes line-appear {
-  from {
-    opacity: 0;
-    transform: translateY(5px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.product-price {
+  overflow-wrap: anywhere;
+  font-size: 22px;
+  line-height: 1.2;
 }
 
-.code-prompt {
-  color: #22c55e;
-  font-weight: bold;
-}
-.code-cmd {
-  color: #38bdf8;
-}
-.code-flag {
-  color: #a78bfa;
-}
-.code-url {
-  color: #14b8a6;
-}
-.code-comment {
-  color: #64748b;
-  font-style: italic;
-}
-.code-success {
-  color: #22c55e;
-  background: rgba(34, 197, 94, 0.15);
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-weight: 600;
-}
-.code-response {
-  color: #fbbf24;
+.buy-button {
+  min-height: 38px;
+  padding: 0 13px;
+  color: #ffffff;
+  background: #17221f;
+  font-size: 12px;
 }
 
-/* Blinking Cursor */
-.cursor {
-  display: inline-block;
-  width: 8px;
-  height: 16px;
-  background: #22c55e;
-  animation: blink 1s step-end infinite;
+.buy-button.disabled {
+  color: var(--muted);
+  background: var(--page);
 }
 
-@keyframes blink {
-  0%,
-  50% {
-    opacity: 1;
-  }
-  51%,
-  100% {
-    opacity: 0;
-  }
+.catalog-state .loading-line {
+  height: 342px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--page) 75%, var(--surface));
+  animation: loading-pulse 1.4s ease-in-out infinite alternate;
 }
 
-/* Dark mode adjustments */
-:deep(.dark) .terminal-window {
-  box-shadow:
-    0 25px 50px -12px rgba(0, 0, 0, 0.6),
-    0 0 0 1px rgba(20, 184, 166, 0.2),
-    0 0 40px rgba(20, 184, 166, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+@keyframes loading-pulse {
+  to { opacity: 0.52; }
+}
+
+.catalog-message {
+  display: flex;
+  min-height: 130px;
+  align-items: center;
+  gap: 16px;
+  padding: 26px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--page);
+}
+
+.catalog-message strong {
+  display: block;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.catalog-message p {
+  margin: 5px 0 0;
+  font-size: 13px;
+}
+
+.catalog-redeem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  margin-top: 20px;
+  padding: 22px 24px;
+  border: 1px solid #cfe4dd;
+  background: color-mix(in srgb, var(--brand) 7%, var(--surface));
+}
+
+.catalog-redeem > div {
+  gap: 14px;
+  color: var(--brand-dark);
+}
+
+.catalog-redeem span,
+.catalog-redeem strong,
+.catalog-redeem small {
+  display: block;
+}
+
+.catalog-redeem small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.redeem-link {
+  flex: 0 0 auto;
+  min-height: 40px;
+  color: #ffffff;
+  background: var(--brand-dark);
+  font-size: 12px;
+}
+
+.capability-section {
+  padding: 90px 0;
+  background: var(--page);
+}
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.capability-grid article {
+  min-width: 0;
+  padding: 34px 36px;
+  border-left: 1px solid var(--line);
+}
+
+.capability-grid article:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.capability-grid svg {
+  color: var(--brand);
+}
+
+.capability-grid h3 {
+  margin: 22px 0 10px;
+  font-size: 17px;
+}
+
+.capability-grid p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.model-section {
+  padding: 76px 0;
+  background: var(--surface);
+}
+
+.model-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.2fr);
+  align-items: center;
+  gap: 80px;
+}
+
+.model-layout > div > p:last-child {
+  margin-top: 18px;
+}
+
+.model-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+.model-list span {
+  display: flex;
+  min-height: 82px;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.model-list b {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--brand-dark);
+  background: color-mix(in srgb, var(--brand) 10%, var(--surface));
+}
+
+.closing-section {
+  padding: 68px 0;
+  color: #ffffff;
+  background: #14231f;
+}
+
+.closing-layout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 48px;
+}
+
+.closing-layout p {
+  margin-top: 12px;
+  color: #b8c7c2;
+}
+
+.primary-action.light {
+  flex: 0 0 auto;
+  background: #ffffff;
+}
+
+.site-footer {
+  padding: 28px 0;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.site-footer > div,
+.site-footer nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+}
+
+.site-footer nav {
+  justify-content: flex-end;
+}
+
+@media (max-width: 900px) {
+  .nav-links { display: none; }
+  .hero h1 { font-size: 50px; }
+  .product-grid,
+  .catalog-state { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .catalog-state .loading-line:last-child { display: none; }
+  .section-heading { grid-template-columns: 1fr; gap: 18px; }
+  .model-layout { gap: 44px; }
+}
+
+@media (max-width: 680px) {
+  .site-nav,
+  .section-inner,
+  .site-footer > div,
+  .hero-content,
+  .hero-facts { width: min(100% - 32px, 1180px); }
+  .site-nav { min-height: 62px; gap: 12px; }
+  .brand span { max-width: 120px; font-size: 14px; }
+  .brand img { width: 30px; height: 30px; }
+  .nav-actions { gap: 3px; }
+  .nav-actions > :deep(.locale-switcher) { display: none; }
+  .icon-button { width: 32px; height: 34px; }
+  .header-login { min-height: 36px; padding: 0 10px; font-size: 12px; }
+  .hero { min-height: 650px; background-position: 62% center; }
+  .hero-content { padding: 74px 0 48px; }
+  .hero h1 { font-size: 40px; }
+  .hero-subtitle { font-size: 20px; }
+  .hero-description { font-size: 14px; }
+  .hero-facts { grid-template-columns: 1fr; }
+  .hero-facts div { padding: 14px 0; border-top: 1px solid rgb(255 255 255 / 16%); border-left: 0; }
+  .hero-facts div:first-child { border-top: 0; }
+  .catalog-section,
+  .capability-section { padding: 66px 0; }
+  .section-heading h2,
+  .model-layout h2,
+  .closing-layout h2 { font-size: 29px; }
+  .product-grid,
+  .catalog-state { grid-template-columns: 1fr; }
+  .catalog-state .loading-line:nth-child(n + 2) { display: none; }
+  .product-card { min-height: 320px; }
+  .catalog-redeem,
+  .closing-layout { align-items: flex-start; flex-direction: column; }
+  .catalog-redeem { padding: 20px; }
+  .redeem-link { width: 100%; }
+  .capability-grid { grid-template-columns: 1fr; }
+  .capability-grid article,
+  .capability-grid article:first-child { padding: 28px 0; border-top: 1px solid var(--line); border-left: 0; }
+  .capability-grid article:first-child { border-top: 0; }
+  .model-section { padding: 64px 0; }
+  .model-layout { grid-template-columns: 1fr; }
+  .model-list { grid-template-columns: 1fr; }
+  .closing-section { padding: 58px 0; }
+  .primary-action.light { width: 100%; }
+  .site-footer > div { align-items: flex-start; flex-direction: column; }
+}
+
+@media (max-width: 390px) {
+  .brand span { display: none; }
+  .hero-actions > * { width: 100%; }
+  .product-footer { align-items: flex-start; flex-direction: column; }
+  .buy-button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .catalog-state .loading-line { animation: none; }
 }
 </style>

@@ -71,10 +71,24 @@ test('embedding is limited to explicitly configured Sub2API origins', () => {
     REDEEM_FRAME_ANCESTORS: "'self',https://sub2api.example.com",
   })
   assert.equal(config.frameAncestors, "'self' https://sub2api.example.com")
+  assert.deepEqual(config.catalogOrigins, ['https://sub2api.example.com'])
 
   assert.throws(() => loadConfig({
     ...productionEnvironment,
     SUB2API_ADMIN_API_KEY: 'scoped-admin-api-key',
     REDEEM_FRAME_ANCESTORS: 'https://sub2api.example.com/not-an-origin',
   }), /invalid REDEEM_FRAME_ANCESTORS/)
+})
+
+test('catalog origins can be configured separately from iframe origins', () => {
+  const config = loadConfig({
+    ...productionEnvironment,
+    SUB2API_ADMIN_API_KEY: 'scoped-admin-api-key',
+    REDEEM_FRAME_ANCESTORS: "'self',https://app.example.com",
+    REDEEM_CATALOG_ORIGINS: 'https://www.example.com,http://127.0.0.1:18080',
+  })
+  assert.deepEqual(config.catalogOrigins, [
+    'https://www.example.com',
+    'http://127.0.0.1:18080',
+  ])
 })

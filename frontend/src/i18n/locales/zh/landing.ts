@@ -17,6 +17,36 @@ export default {
     // 新增：面向用户的价值主张
     heroSubtitle: '一个密钥，畅用多个 AI 模型',
     heroDescription: '无需管理多个订阅账号，一站式接入 Claude、GPT、Gemini 等主流 AI 服务',
+    nav: {
+      primary: '主页导航',
+      products: '商品方案',
+      capabilities: '平台能力',
+      models: '支持模型'
+    },
+    catalog: {
+      title: '选择适合你的商品方案',
+      description: '商品、价格与兑换权益由运营后台统一配置，更新后将自动同步到这里。',
+      viewProducts: '查看商品',
+      unifiedProtocol: '统一兼容协议',
+      modelCoverage: '主流模型覆盖',
+      serviceAvailability: '持续服务能力',
+      defaultDescription: '灵活使用平台提供的 AI 模型与 API 服务。',
+      subscriptionBenefit: '兑换后获得 {days} 天订阅',
+      balanceBenefit: '兑换后到账余额 {value}',
+      buy: '前往购买',
+      comingSoon: '购买待开放',
+      empty: '商品正在准备中',
+      emptyDescription: '运营后台上架商品后将自动呈现在这里。',
+      unavailable: '商品目录暂时无法加载',
+      unavailableDescription: '你仍可登录控制台使用现有服务，请稍后再查看商品。',
+      haveCode: '已经获得兑换码？',
+      haveCodeDescription: '从用户中心进入兑换页面，将权益发放到当前账户。',
+      redeemNow: '立即兑换'
+    },
+    capabilities: {
+      title: '为稳定、可控的 AI 接入而设计',
+      description: '从统一网关到用量管理，把模型接入和日常运营集中在一个清晰的工作台内。'
+    },
     tags: {
       subscriptionToApi: '订阅转 API',
       stickySession: '会话保持',
