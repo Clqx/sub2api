@@ -105,7 +105,7 @@ function authenticatedUser(req, config) {
   }
 }
 
-function requireManager(req, res, config) {
+function requireManager(req, res, config, limiter) {
   if (config.managerAuthDisabled) return true
   if (parseManagerAuthorization(
     req.headers.authorization,
@@ -113,6 +113,19 @@ function requireManager(req, res, config) {
     config.managerPassword,
   )) {
     return true
+  }
+  const ip = clientIP(req, config)
+  if (!limiter.check(`manager-auth:${ip}`, 10, 60000)) {
+    send(res, 429, {
+      ...securityHeaders(config, true),
+      'Content-Type': 'application/json; charset=utf-8',
+      'Retry-After': '60',
+    }, JSON.stringify({
+      code: 429,
+      reason: 'MANAGER_AUTH_RATE_LIMITED',
+      message: '管理员身份验证请求过于频繁',
+    }))
+    return false
   }
   send(res, 401, {
     ...securityHeaders(config, true),
@@ -187,7 +200,7 @@ function csvCell(value) {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
 }
 
-function redemptionsCSV(database, filters) {
+async function redemptionsCSV(database, filters) {
   const columns = [
     'id',
     'created_at',
@@ -209,7 +222,7 @@ function redemptionsCSV(database, filters) {
   let page = 1
   let exported = 0
   while (exported < 10000) {
-    const result = database.listRedemptions({
+    const result = await database.listRedemptions({
       ...filters,
       page,
       pageSize: 100,
@@ -234,6 +247,7 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
     const method = req.method || 'GET'
     try {
       if (method === 'GET' && url.pathname === '/health') {
+        await database.health()
         return sendJSON(res, config, 200, {
           status: 'ok',
           demo_mode: config.demoMode,
@@ -250,7 +264,7 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
       }
 
       if (method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin/')) {
-        if (!requireManager(req, res, config)) return
+        if (!requireManager(req, res, config, limiter)) return
         const body = fs.readFileSync(path.join(config.publicDir, 'admin.html'))
         return send(res, 200, {
           ...securityHeaders(config),
@@ -310,7 +324,7 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
 
       if (method === 'GET' && url.pathname === '/api/my-redemptions') {
         const user = authenticatedUser(req, config)
-        return sendJSON(res, config, 200, database.listUserRedemptions(
+        return sendJSON(res, config, 200, await database.listUserRedemptions(
           user.id,
           url.searchParams.get('page'),
           url.searchParams.get('page_size'),
@@ -318,18 +332,18 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
       }
 
       if (url.pathname.startsWith('/api/admin/')) {
-        if (!requireManager(req, res, config)) return
+        if (!requireManager(req, res, config, limiter)) return
         const actor = `manager:${config.managerUsername}`
 
         if (method === 'GET' && url.pathname === '/api/admin/analytics') {
-          return sendJSON(res, config, 200, database.analytics(queryFilters(url)))
+          return sendJSON(res, config, 200, await database.analytics(queryFilters(url)))
         }
         if (method === 'GET' && url.pathname === '/api/admin/redemptions') {
-          return sendJSON(res, config, 200, database.listRedemptions(queryFilters(url)))
+          return sendJSON(res, config, 200, await database.listRedemptions(queryFilters(url)))
         }
         const redemptionMatch = /^\/api\/admin\/redemptions\/([0-9a-f-]+)$/.exec(url.pathname)
         if (method === 'GET' && redemptionMatch) {
-          const detail = database.getRedemptionDetail(redemptionMatch[1])
+          const detail = await database.getRedemptionDetail(redemptionMatch[1])
           if (!detail) throw new AppError(404, 'REDEMPTION_NOT_FOUND', '兑换记录不存在')
           return sendJSON(res, config, 200, detail)
         }
@@ -339,7 +353,7 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
           return sendJSON(res, config, 200, await service.retry(retryMatch[1], actor))
         }
         if (method === 'GET' && url.pathname === '/api/admin/codes') {
-          return sendJSON(res, config, 200, database.listCodes({
+          return sendJSON(res, config, 200, await database.listCodes({
             status: url.searchParams.get('status') || '',
             type: url.searchParams.get('type') || '',
             search: url.searchParams.get('search') || '',
@@ -349,12 +363,12 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
         }
         if (method === 'POST' && url.pathname === '/api/admin/codes/generate') {
           const body = await readJSON(req)
-          return sendJSON(res, config, 201, service.generateCodes(body, actor), '兑换码已生成')
+          return sendJSON(res, config, 201, await service.generateCodes(body, actor), '兑换码已生成')
         }
         const disableMatch = /^\/api\/admin\/codes\/([0-9a-f-]+)\/disable$/.exec(url.pathname)
         if (method === 'POST' && disableMatch) {
           await readJSON(req)
-          const result = database.disableCode(disableMatch[1], actor)
+          const result = await database.disableCode(disableMatch[1], actor)
           if (result.kind === 'not_found') {
             throw new AppError(404, 'CODE_NOT_FOUND', '兑换码不存在')
           }
@@ -378,11 +392,11 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
             res,
             config,
             200,
-            database.auditEvents(url.searchParams.get('limit')),
+            await database.auditEvents(url.searchParams.get('limit')),
           )
         }
         if (method === 'GET' && url.pathname === '/api/admin/export.csv') {
-          const csv = redemptionsCSV(database, queryFilters(url))
+          const csv = await redemptionsCSV(database, queryFilters(url))
           return send(res, 200, {
             ...securityHeaders(config, true),
             'Content-Disposition': 'attachment; filename="redemptions.csv"',

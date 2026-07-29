@@ -1,0 +1,210 @@
+name: sub2api-loc
+
+services:
+  postgres-loc:
+    image: postgres:18-alpine
+    container_name: sub2api-loc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      REDEEM_POSTGRES_USER: ${REDEEM_POSTGRES_USER:?REDEEM_POSTGRES_USER is required}
+      REDEEM_POSTGRES_PASSWORD: ${REDEEM_POSTGRES_PASSWORD:?REDEEM_POSTGRES_PASSWORD is required}
+      REDEEM_POSTGRES_DB: ${REDEEM_POSTGRES_DB:?REDEEM_POSTGRES_DB is required}
+      PGDATA: /var/lib/postgresql/data
+      TZ: ${TZ:-Asia/Shanghai}
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=4GB
+    volumes:
+      - postgres-loc-data:/var/lib/postgresql/data
+      - ./deploy/localized/init-databases.sh:/docker-entrypoint-initdb.d/10-create-redeem-database.sh:ro
+    networks:
+      - sub2api-loc-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis-loc:
+    image: redis:8-alpine
+    container_name: sub2api-loc-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    command: >-
+      sh -c 'redis-server
+      --save 60 1
+      --appendonly yes
+      --appendfsync everysec
+      $${REDIS_PASSWORD:+--requirepass "$$REDIS_PASSWORD"}'
+    volumes:
+      - redis-loc-data:/data
+    networks:
+      - sub2api-loc-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  sub2api-loc:
+    image: sub2api-loc:${SUB2API_LOC_IMAGE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}
+    container_name: sub2api-loc
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${SUB2API_LOC_PORT:-18080}:8080"
+    volumes:
+      - sub2api-loc-data:/app/data
+    environment:
+      AUTO_SETUP: "true"
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      SERVER_MODE: release
+      RUN_MODE: standard
+      DATABASE_HOST: postgres-loc
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DATABASE_DBNAME: ${POSTGRES_DB:?POSTGRES_DB is required}
+      DATABASE_SSLMODE: disable
+      DATABASE_MAX_OPEN_CONNS: 50
+      DATABASE_MAX_IDLE_CONNS: 10
+      REDIS_HOST: redis-loc
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: 0
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY is required}
+      TZ: ${TZ:-Asia/Shanghai}
+      HTTP_PROXY: ${SUB2API_LOC_HTTP_PROXY:-}
+      HTTPS_PROXY: ${SUB2API_LOC_HTTPS_PROXY:-}
+      ALL_PROXY: ${SUB2API_LOC_ALL_PROXY:-}
+      NO_PROXY: ${SUB2API_LOC_NO_PROXY:-127.0.0.1,localhost,::1,postgres-loc,redis-loc,sub2api-loc,redeem-platform}
+    depends_on:
+      postgres-loc:
+        condition: service_healthy
+      redis-loc:
+        condition: service_healthy
+    networks:
+      - sub2api-loc-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redeem-bootstrap:
+    image: node:24-alpine
+    container_name: sub2api-loc-redeem-bootstrap
+    restart: "no"
+    environment:
+      SUB2API_BASE_URL: http://sub2api-loc:8080
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      ADMIN_COMPLIANCE_ACK_PHRASE: ${ADMIN_COMPLIANCE_ACK_PHRASE:-}
+      ADMIN_COMPLIANCE_LANGUAGE: ${ADMIN_COMPLIANCE_LANGUAGE:-zh}
+      SUB2API_ADMIN_API_KEY_FILE: /run/redeem-secrets/admin-api-key
+      REDEEM_PUBLIC_URL: ${REDEEM_PUBLIC_URL:-}
+    volumes:
+      - ./deploy/localized/bootstrap-redeem.mjs:/app/bootstrap-redeem.mjs:ro
+      - redeem-loc-secrets:/run/redeem-secrets
+    command: ["node", "/app/bootstrap-redeem.mjs"]
+    depends_on:
+      sub2api-loc:
+        condition: service_healthy
+    networks:
+      - sub2api-loc-network
+
+  redeem-platform:
+    image: sub2api-redeem-loc:${SUB2API_LOC_IMAGE_TAG:-dev}
+    build:
+      context: ./redeem-platform
+      dockerfile: Dockerfile
+    container_name: sub2api-loc-redeem
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${REDEEM_PORT:-8090}:8090"
+    environment:
+      NODE_ENV: production
+      SUB2API_BASE_URL: http://sub2api-loc:8080
+      SUB2API_ADMIN_API_KEY_FILE: /run/redeem-secrets/admin-api-key
+      REDEEM_CODE_PEPPER: ${REDEEM_CODE_PEPPER:?REDEEM_CODE_PEPPER is required}
+      REDEEM_SESSION_SECRET: ${REDEEM_SESSION_SECRET:?REDEEM_SESSION_SECRET is required}
+      REDEEM_MANAGER_USERNAME: ${REDEEM_MANAGER_USERNAME:?REDEEM_MANAGER_USERNAME is required}
+      REDEEM_MANAGER_PASSWORD: ${REDEEM_MANAGER_PASSWORD:?REDEEM_MANAGER_PASSWORD is required}
+      REDEEM_FRAME_ANCESTORS: ${REDEEM_FRAME_ANCESTORS:-'self'}
+      REDEEM_TRUST_PROXY: ${REDEEM_TRUST_PROXY:-false}
+      REDEEM_HOST: 0.0.0.0
+      REDEEM_PORT: 8090
+      REDEEM_DATABASE_HOST: postgres-loc
+      REDEEM_DATABASE_PORT: 5432
+      REDEEM_DATABASE_USER: ${REDEEM_POSTGRES_USER:?REDEEM_POSTGRES_USER is required}
+      REDEEM_DATABASE_PASSWORD: ${REDEEM_POSTGRES_PASSWORD:?REDEEM_POSTGRES_PASSWORD is required}
+      REDEEM_DATABASE_NAME: ${REDEEM_POSTGRES_DB:?REDEEM_POSTGRES_DB is required}
+      REDEEM_DATABASE_SSLMODE: disable
+      REDEEM_DATABASE_POOL_SIZE: ${REDEEM_DATABASE_POOL_SIZE:-10}
+    volumes:
+      - redeem-loc-secrets:/run/redeem-secrets:ro
+    depends_on:
+      postgres-loc:
+        condition: service_healthy
+      redeem-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - sub2api-loc-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redeem-tests:
+    image: sub2api-redeem-loc:${SUB2API_LOC_IMAGE_TAG:-dev}
+    build:
+      context: ./redeem-platform
+      dockerfile: Dockerfile
+    profiles: ["test"]
+    environment:
+      NODE_ENV: test
+      REDEEM_TEST_DATABASE_URL: postgresql://${REDEEM_POSTGRES_USER:?REDEEM_POSTGRES_USER is required}:${REDEEM_POSTGRES_PASSWORD:?REDEEM_POSTGRES_PASSWORD is required}@postgres-loc:5432/${REDEEM_POSTGRES_DB:?REDEEM_POSTGRES_DB is required}
+    command: ["npm", "test"]
+    depends_on:
+      postgres-loc:
+        condition: service_healthy
+    networks:
+      - sub2api-loc-network
+
+networks:
+  sub2api-loc-network:
+    name: sub2api-loc-network
+
+volumes:
+  postgres-loc-data:
+    name: sub2api-loc-postgres-data
+  redis-loc-data:
+    name: sub2api-loc-redis-data
+  sub2api-loc-data:
+    name: sub2api-loc-app-data
+  redeem-loc-secrets:
+    name: sub2api-loc-redeem-secrets

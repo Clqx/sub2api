@@ -10,6 +10,10 @@ const productionEnvironment = {
   REDEEM_SESSION_SECRET: 'session-secret-0123456789abcdef0123456789abcdef',
   REDEEM_MANAGER_USERNAME: 'redeem-manager',
   REDEEM_MANAGER_PASSWORD: 'a-long-manager-password',
+  REDEEM_DATABASE_HOST: 'postgres',
+  REDEEM_DATABASE_USER: 'redeem_platform',
+  REDEEM_DATABASE_PASSWORD: 'test-database-password',
+  REDEEM_DATABASE_NAME: 'redeem_platform',
 }
 
 test('production configuration requires a server-side administrator credential', () => {
@@ -34,6 +38,16 @@ test('API key is preferred and administrator credentials stay in request headers
   assert.equal(headers.Authorization, undefined)
   assert.equal(headers['Idempotency-Key'], 'stable-idempotency-key')
   assert.equal(config.sub2apiBaseURL, 'https://sub2api.example.com')
+  assert.equal(config.database.host, 'postgres')
+  assert.equal(config.database.database, 'redeem_platform')
+})
+
+test('database TLS mode rejects unknown values', () => {
+  assert.throws(() => loadConfig({
+    ...productionEnvironment,
+    SUB2API_ADMIN_API_KEY: 'scoped-admin-api-key',
+    REDEEM_DATABASE_SSLMODE: 'prefer',
+  }), /invalid REDEEM_DATABASE_SSLMODE/)
 })
 
 test('administrator JWT is used only when an API key is absent', () => {

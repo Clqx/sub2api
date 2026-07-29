@@ -1,14 +1,26 @@
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
+import pg from 'pg'
 import { formatAmountMicros, randomID } from './security.mjs'
+
+const { Pool } = pg
+const MIGRATION_LOCK_ID = 725_331_902
 
 function nowISO() {
   return new Date().toISOString()
 }
 
 function plain(row) {
-  return row ? { ...row } : null
+  if (!row) return null
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [
+    key,
+    value instanceof Date ? value.toISOString() : value,
+  ]))
+}
+
+function numeric(value) {
+  return value == null ? null : Number(value)
 }
 
 function clampPage(value, fallback = 1) {
@@ -18,53 +30,54 @@ function clampPage(value, fallback = 1) {
 
 function displayCode(row) {
   if (!row) return null
+  const result = plain(row)
   return {
-    ...plain(row),
-    value: formatAmountMicros(row.value_micros),
+    ...result,
+    value: formatAmountMicros(result.value_micros),
     value_micros: undefined,
-    claimed_by_user_id: row.claimed_by_user_id || null,
+    group_id: numeric(result.group_id),
+    validity_days: numeric(result.validity_days),
+    claimed_by_user_id: numeric(result.claimed_by_user_id),
   }
 }
 
 function displayRedemption(row) {
   if (!row) return null
+  const result = plain(row)
   return {
-    ...plain(row),
-    value: formatAmountMicros(row.value_micros),
+    ...result,
+    value: formatAmountMicros(result.value_micros),
     value_micros: undefined,
-    retryable: Boolean(row.retryable),
+    user_id: numeric(result.user_id),
+    group_id: numeric(result.group_id),
+    validity_days: numeric(result.validity_days),
+    attempt_count: Number(result.attempt_count || 0),
+    retryable: Boolean(result.retryable),
   }
 }
 
 function whereFromFilters(filters = {}, { alias = 'r' } = {}) {
   const clauses = []
   const params = []
-  if (filters.status) {
-    clauses.push(`${alias}.status = ?`)
-    params.push(filters.status)
+  const add = (clause, ...values) => {
+    clauses.push(clause.replaceAll('?', () => {
+      params.push(values.shift())
+      return `$${params.length}`
+    }))
   }
-  if (filters.type) {
-    clauses.push(`${alias}.benefit_type = ?`)
-    params.push(filters.type)
-  }
-  if (filters.from) {
-    clauses.push(`${alias}.created_at >= ?`)
-    params.push(filters.from)
-  }
-  if (filters.to) {
-    clauses.push(`${alias}.created_at < ?`)
-    params.push(filters.to)
-  }
+  if (filters.status) add(`${alias}.status = ?`, filters.status)
+  if (filters.type) add(`${alias}.benefit_type = ?`, filters.type)
+  if (filters.from) add(`${alias}.created_at >= ?`, filters.from)
+  if (filters.to) add(`${alias}.created_at < ?`, filters.to)
   if (filters.search) {
-    clauses.push(`(
-      ${alias}.user_email LIKE ?
-      OR CAST(${alias}.user_id AS TEXT) LIKE ?
-      OR ${alias}.upstream_code LIKE ?
-      OR c.code_mask LIKE ?
-      OR c.campaign LIKE ?
-    )`)
     const needle = `%${String(filters.search).slice(0, 100)}%`
-    params.push(needle, needle, needle, needle, needle)
+    add(`(
+      ${alias}.user_email ILIKE ?
+      OR CAST(${alias}.user_id AS TEXT) ILIKE ?
+      OR ${alias}.upstream_code ILIKE ?
+      OR c.code_mask ILIKE ?
+      OR c.campaign ILIKE ?
+    )`, needle, needle, needle, needle, needle)
   }
   return {
     sql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
@@ -73,78 +86,117 @@ function whereFromFilters(filters = {}, { alias = 'r' } = {}) {
 }
 
 export class RedeemDatabase {
-  constructor(databasePath, migrationDir) {
-    fs.mkdirSync(path.dirname(databasePath), { recursive: true })
-    this.db = new DatabaseSync(databasePath)
-    this.db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
-    this.migrate(migrationDir)
-    this.recoverInterrupted()
+  constructor(databaseConfig, migrationDir, { PoolClass = Pool } = {}) {
+    this.pool = new PoolClass(databaseConfig)
+    this.migrationDir = migrationDir
   }
 
-  migrate(migrationDir) {
-    const files = fs.readdirSync(migrationDir)
-      .filter((name) => /^\d+.*\.sql$/.test(name))
-      .sort()
-    for (const file of files) {
-      this.db.exec(fs.readFileSync(path.join(migrationDir, file), 'utf8'))
+  async initialize() {
+    await this.pool.query('SELECT 1')
+    await this.migrate()
+    await this.recoverInterrupted()
+  }
+
+  async migrate() {
+    const client = await this.pool.connect()
+    try {
+      await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_ID])
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS redeem_schema_migrations (
+          filename TEXT PRIMARY KEY,
+          checksum TEXT NOT NULL,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `)
+      const files = fs.readdirSync(this.migrationDir)
+        .filter((name) => /^\d+.*\.sql$/.test(name))
+        .sort()
+      for (const filename of files) {
+        const sql = fs.readFileSync(path.join(this.migrationDir, filename), 'utf8').trim()
+        const checksum = createHash('sha256').update(sql).digest('hex')
+        const existing = await client.query(
+          'SELECT checksum FROM redeem_schema_migrations WHERE filename = $1',
+          [filename],
+        )
+        if (existing.rowCount) {
+          if (existing.rows[0].checksum !== checksum) {
+            throw new Error(`migration checksum mismatch: ${filename}`)
+          }
+          continue
+        }
+        await client.query('BEGIN')
+        try {
+          await client.query(sql)
+          await client.query(
+            'INSERT INTO redeem_schema_migrations (filename, checksum) VALUES ($1, $2)',
+            [filename, checksum],
+          )
+          await client.query('COMMIT')
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        }
+      }
+    } finally {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_ID])
+      } finally {
+        client.release()
+      }
     }
   }
 
-  close() {
-    this.db.close()
+  async health() {
+    await this.pool.query('SELECT 1')
   }
 
-  transaction(callback) {
-    this.db.exec('BEGIN IMMEDIATE')
+  async close() {
+    await this.pool.end()
+  }
+
+  async transaction(callback) {
+    const client = await this.pool.connect()
     try {
-      const result = callback()
-      this.db.exec('COMMIT')
+      await client.query('BEGIN')
+      const result = await callback(client)
+      await client.query('COMMIT')
       return result
     } catch (error) {
       try {
-        this.db.exec('ROLLBACK')
+        await client.query('ROLLBACK')
       } catch {
         // Preserve the original failure.
       }
       throw error
+    } finally {
+      client.release()
     }
   }
 
-  audit(actor, action, targetType, targetID = '', metadata = {}) {
-    this.db.prepare(`
+  async audit(client, actor, action, targetType, targetID = '', metadata = {}) {
+    await client.query(`
       INSERT INTO audit_events (actor, action, target_type, target_id, metadata_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(actor, action, targetType, targetID, JSON.stringify(metadata), nowISO())
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [actor, action, targetType, targetID, metadata, nowISO()])
   }
 
-  insertCodes(records, actor) {
-    const insert = this.db.prepare(`
-      INSERT INTO redeem_codes (
-        id, code_hash, code_mask, benefit_type, value_micros, group_id,
-        validity_days, status, campaign, notes, expires_at, created_by,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unused', ?, ?, ?, ?, ?, ?)
-    `)
+  async insertCodes(records, actor) {
     const createdAt = nowISO()
-    this.transaction(() => {
+    await this.transaction(async (client) => {
       for (const record of records) {
-        insert.run(
-          record.id,
-          record.codeHash,
-          record.codeMask,
-          record.benefitType,
-          record.valueMicros,
-          record.groupID,
-          record.validityDays,
-          record.campaign,
-          record.notes,
-          record.expiresAt,
-          actor,
-          createdAt,
-          createdAt,
-        )
+        await client.query(`
+          INSERT INTO redeem_codes (
+            id, code_hash, code_mask, benefit_type, value_micros, group_id,
+            validity_days, status, campaign, notes, expires_at, created_by,
+            created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'unused', $8, $9, $10, $11, $12, $13)
+        `, [
+          record.id, record.codeHash, record.codeMask, record.benefitType,
+          record.valueMicros, record.groupID, record.validityDays, record.campaign,
+          record.notes, record.expiresAt, actor, createdAt, createdAt,
+        ])
       }
-      this.audit(actor, 'codes.generate', 'redeem_code_batch', '', {
+      await this.audit(client, actor, 'codes.generate', 'redeem_code_batch', '', {
         count: records.length,
         benefit_type: records[0]?.benefitType || '',
         campaign: records[0]?.campaign || '',
@@ -163,35 +215,35 @@ export class RedeemDatabase {
     }))
   }
 
-  listCodes(filters = {}) {
+  async listCodes(filters = {}) {
     const page = clampPage(filters.page)
     const pageSize = Math.min(clampPage(filters.pageSize, 20), 100)
     const clauses = []
     const params = []
     if (filters.status) {
-      clauses.push('status = ?')
       params.push(filters.status)
+      clauses.push(`status = $${params.length}`)
     }
     if (filters.type) {
-      clauses.push('benefit_type = ?')
       params.push(filters.type)
+      clauses.push(`benefit_type = $${params.length}`)
     }
     if (filters.search) {
-      clauses.push('(code_mask LIKE ? OR campaign LIKE ? OR notes LIKE ?)')
       const needle = `%${String(filters.search).slice(0, 100)}%`
-      params.push(needle, needle, needle)
+      params.push(needle)
+      clauses.push(`(code_mask ILIKE $${params.length} OR campaign ILIKE $${params.length} OR notes ILIKE $${params.length})`)
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const total = Number(this.db.prepare(`SELECT COUNT(*) AS total FROM redeem_codes ${where}`)
-      .get(...params).total)
-    const rows = this.db.prepare(`
+    const totalResult = await this.pool.query(`SELECT COUNT(*) AS total FROM redeem_codes ${where}`, params)
+    const total = Number(totalResult.rows[0].total)
+    const rows = await this.pool.query(`
       SELECT * FROM redeem_codes
       ${where}
       ORDER BY created_at DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, pageSize, (page - 1) * pageSize)
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `, [...params, pageSize, (page - 1) * pageSize])
     return {
-      items: rows.map(displayCode),
+      items: rows.rows.map(displayCode),
       total,
       page,
       page_size: pageSize,
@@ -199,287 +251,281 @@ export class RedeemDatabase {
     }
   }
 
-  disableCode(id, actor) {
-    return this.transaction(() => {
-      const existing = plain(this.db.prepare('SELECT * FROM redeem_codes WHERE id = ?').get(id))
+  async disableCode(id, actor) {
+    return this.transaction(async (client) => {
+      const found = await client.query('SELECT * FROM redeem_codes WHERE id = $1 FOR UPDATE', [id])
+      const existing = plain(found.rows[0])
       if (!existing) return { kind: 'not_found' }
-      if (existing.status !== 'unused') {
-        return { kind: 'conflict', status: existing.status }
-      }
+      if (existing.status !== 'unused') return { kind: 'conflict', status: existing.status }
       const at = nowISO()
-      this.db.prepare(`
-        UPDATE redeem_codes SET status = 'disabled', updated_at = ? WHERE id = ?
-      `).run(at, id)
-      this.audit(actor, 'code.disable', 'redeem_code', id, {
+      await client.query("UPDATE redeem_codes SET status = 'disabled', updated_at = $1 WHERE id = $2", [at, id])
+      await this.audit(client, actor, 'code.disable', 'redeem_code', id, {
         previous_status: existing.status,
       })
       return { kind: 'disabled', code: displayCode({ ...existing, status: 'disabled', updated_at: at }) }
     })
   }
 
-  claimCode({ codeHash, user }) {
-    return this.transaction(() => {
-      const code = plain(this.db.prepare('SELECT * FROM redeem_codes WHERE code_hash = ?').get(codeHash))
+  async claimCode({ codeHash, user }) {
+    return this.transaction(async (client) => {
+      const found = await client.query('SELECT * FROM redeem_codes WHERE code_hash = $1 FOR UPDATE', [codeHash])
+      const code = plain(found.rows[0])
       if (!code) return { kind: 'not_found' }
 
-      const existing = plain(this.db.prepare(`
+      const existingResult = await client.query(`
         SELECT r.*, c.code_mask, c.campaign
         FROM redemptions r
         JOIN redeem_codes c ON c.id = r.code_id
-        WHERE r.code_id = ?
-      `).get(code.id))
+        WHERE r.code_id = $1
+      `, [code.id])
+      const existing = plain(existingResult.rows[0])
       if (existing) {
-        if (Number(existing.user_id) !== Number(user.id)) {
-          return { kind: 'claimed_by_other' }
-        }
+        if (Number(existing.user_id) !== Number(user.id)) return { kind: 'claimed_by_other' }
         return { kind: 'existing', redemption: displayRedemption(existing) }
       }
 
       if (code.status === 'disabled') return { kind: 'disabled' }
       if (code.status !== 'unused') return { kind: 'unavailable', status: code.status }
       if (code.expires_at && new Date(code.expires_at).getTime() <= Date.now()) {
-        this.db.prepare(`
-          UPDATE redeem_codes SET status = 'disabled', updated_at = ? WHERE id = ?
-        `).run(nowISO(), code.id)
+        await client.query("UPDATE redeem_codes SET status = 'disabled', updated_at = $1 WHERE id = $2", [nowISO(), code.id])
         return { kind: 'expired' }
       }
 
       const id = randomID()
       const compactID = id.replaceAll('-', '')
       const at = nowISO()
-      this.db.prepare(`
+      await client.query(`
         INSERT INTO redemptions (
           id, code_id, user_id, user_email, benefit_type, value_micros,
           group_id, validity_days, status, idempotency_key, upstream_code,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-      `).run(
-        id,
-        code.id,
-        user.id,
-        user.email || '',
-        code.benefit_type,
-        code.value_micros,
-        code.group_id,
-        code.validity_days,
-        `rp-${compactID}`,
-        `rp_${compactID}`,
-        at,
-        at,
-      )
-      this.db.prepare(`
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11, $12)
+      `, [
+        id, code.id, user.id, user.email || '', code.benefit_type, code.value_micros,
+        code.group_id, code.validity_days, `rp-${compactID}`, `rp${compactID.slice(0, 30)}`, at, at,
+      ])
+      await client.query(`
         UPDATE redeem_codes
-        SET status = 'processing', claimed_by_user_id = ?, updated_at = ?
-        WHERE id = ?
-      `).run(user.id, at, code.id)
-      this.audit(`user:${user.id}`, 'redemption.claim', 'redemption', id, {
+        SET status = 'processing', claimed_by_user_id = $1, updated_at = $2
+        WHERE id = $3
+      `, [user.id, at, code.id])
+      await this.audit(client, `user:${user.id}`, 'redemption.claim', 'redemption', id, {
         code_id: code.id,
         benefit_type: code.benefit_type,
       })
-      return { kind: 'claimed', redemption: this.getRedemption(id) }
+      return { kind: 'claimed', redemption: await this.getRedemption(id, client) }
     })
   }
 
-  getRedemption(id) {
-    const row = this.db.prepare(`
+  async getRedemption(id, queryable = this.pool) {
+    const result = await queryable.query(`
       SELECT r.*, c.code_mask, c.campaign, c.notes
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
-      WHERE r.id = ?
-    `).get(id)
-    return displayRedemption(row)
+      WHERE r.id = $1
+    `, [id])
+    return displayRedemption(result.rows[0])
   }
 
-  getRedemptionDetail(id) {
-    const redemption = this.getRedemption(id)
+  async getRedemptionDetail(id) {
+    const redemption = await this.getRedemption(id)
     if (!redemption) return null
-    const attempts = this.db.prepare(`
+    const attempts = await this.pool.query(`
       SELECT * FROM redemption_attempts
-      WHERE redemption_id = ?
+      WHERE redemption_id = $1
       ORDER BY attempt_no DESC
-    `).all(id).map(plain)
-    return { ...redemption, attempts }
+    `, [id])
+    return {
+      ...redemption,
+      attempts: attempts.rows.map((row) => ({
+        ...plain(row),
+        id: Number(row.id),
+        attempt_no: Number(row.attempt_no),
+      })),
+    }
   }
 
-  beginAttempt(id) {
-    return this.transaction(() => {
-      const row = plain(this.db.prepare('SELECT * FROM redemptions WHERE id = ?').get(id))
-      if (!row || row.status === 'succeeded') return null
+  async beginAttempt(id) {
+    return this.transaction(async (client) => {
+      const found = await client.query('SELECT * FROM redemptions WHERE id = $1 FOR UPDATE', [id])
+      const row = plain(found.rows[0])
+      if (!row || !['pending', 'retryable'].includes(row.status)) return null
       const attempt = Number(row.attempt_count) + 1
       const at = nowISO()
-      this.db.prepare(`
+      await client.query(`
         UPDATE redemptions
-        SET status = 'processing', attempt_count = ?, started_at = COALESCE(started_at, ?),
-            next_retry_at = NULL, updated_at = ?
-        WHERE id = ?
-      `).run(attempt, at, at, id)
-      this.db.prepare(`
-        INSERT INTO redemption_attempts (
-          redemption_id, attempt_no, status, created_at
-        ) VALUES (?, ?, 'processing', ?)
-      `).run(id, attempt, at)
-      return { redemption: this.getRedemption(id), attempt }
+        SET status = 'processing', attempt_count = $1, started_at = COALESCE(started_at, $2),
+            next_retry_at = NULL, updated_at = $3
+        WHERE id = $4
+      `, [attempt, at, at, id])
+      await client.query(`
+        INSERT INTO redemption_attempts (redemption_id, attempt_no, status, created_at)
+        VALUES ($1, $2, 'processing', $3)
+      `, [id, attempt, at])
+      return { redemption: await this.getRedemption(id, client), attempt }
     })
   }
 
-  completeAttemptSuccess(id, attempt, result) {
+  async completeAttemptSuccess(id, attempt, result) {
     const at = nowISO()
-    return this.transaction(() => {
-      this.db.prepare(`
-        UPDATE redemption_attempts
-        SET status = 'succeeded', http_status = ?, reason = ?,
-            latency_ms = ?, completed_at = ?
-        WHERE redemption_id = ? AND attempt_no = ?
-      `).run(result.httpStatus || 200, result.reason || '', result.latencyMs || 0, at, id, attempt)
-      this.db.prepare(`
-        UPDATE redemptions
-        SET status = 'succeeded', retryable = 0, upstream_http_status = ?,
-            upstream_reason = ?, upstream_response = ?, last_error = '',
-            next_retry_at = NULL, completed_at = ?, updated_at = ?
-        WHERE id = ?
-      `).run(
-        result.httpStatus || 200,
-        result.reason || '',
-        JSON.stringify(result.data || {}),
-        at,
-        at,
-        id,
-      )
-      const row = plain(this.db.prepare('SELECT code_id, user_id FROM redemptions WHERE id = ?').get(id))
-      this.db.prepare(`
-        UPDATE redeem_codes
-        SET status = 'redeemed', redeemed_at = ?, updated_at = ?
-        WHERE id = ?
-      `).run(at, at, row.code_id)
-      this.audit(`system:user:${row.user_id}`, 'redemption.succeeded', 'redemption', id, {
-        attempt,
-      })
-      return this.getRedemption(id)
-    })
-  }
-
-  completeAttemptFailure(id, attempt, failure, maxAttempts) {
-    const at = nowISO()
-    return this.transaction(() => {
-      const current = plain(this.db.prepare(`
-        SELECT code_id, user_id, attempt_count FROM redemptions WHERE id = ?
-      `).get(id))
+    return this.transaction(async (client) => {
+      const found = await client.query(`
+        SELECT code_id, user_id, status FROM redemptions WHERE id = $1 FOR UPDATE
+      `, [id])
+      const current = found.rows[0]
       if (!current) return null
+      const completed = await client.query(`
+        UPDATE redemption_attempts
+        SET status = 'succeeded', http_status = $1, reason = $2,
+            latency_ms = $3, completed_at = $4
+        WHERE redemption_id = $5 AND attempt_no = $6 AND status = 'processing'
+        RETURNING id
+      `, [result.httpStatus || 200, result.reason || '', result.latencyMs || 0, at, id, attempt])
+      if (!completed.rowCount || current.status === 'succeeded') {
+        return this.getRedemption(id, client)
+      }
+      await client.query(`
+        UPDATE redemptions
+        SET status = 'succeeded', retryable = FALSE, upstream_http_status = $1,
+            upstream_reason = $2, upstream_response = $3, last_error = '',
+            next_retry_at = NULL, completed_at = $4, updated_at = $5
+        WHERE id = $6
+      `, [result.httpStatus || 200, result.reason || '', result.data || {}, at, at, id])
+      await client.query(`
+        UPDATE redeem_codes SET status = 'redeemed', redeemed_at = $1, updated_at = $2
+        WHERE id = $3
+      `, [at, at, current.code_id])
+      await this.audit(client, `system:user:${current.user_id}`, 'redemption.succeeded', 'redemption', id, { attempt })
+      return this.getRedemption(id, client)
+    })
+  }
+
+  async completeAttemptFailure(id, attempt, failure, maxAttempts) {
+    const at = nowISO()
+    return this.transaction(async (client) => {
+      const found = await client.query(`
+        SELECT code_id, user_id, status, attempt_count FROM redemptions WHERE id = $1 FOR UPDATE
+      `, [id])
+      const current = found.rows[0]
+      if (!current) return null
+      const completed = await client.query(`
+        UPDATE redemption_attempts
+        SET status = 'failed', http_status = $1, reason = $2, latency_ms = $3,
+            error_message = $4, completed_at = $5
+        WHERE redemption_id = $6 AND attempt_no = $7 AND status = 'processing'
+        RETURNING id
+      `, [
+        failure.httpStatus || null, failure.reason || '', failure.latencyMs || 0,
+        String(failure.message || 'upstream request failed').slice(0, 1000), at, id, attempt,
+      ])
+      if (
+        !completed.rowCount
+        || current.status !== 'processing'
+        || Number(current.attempt_count) !== Number(attempt)
+      ) {
+        return this.getRedemption(id, client)
+      }
       const canRetry = Boolean(failure.retryable) && Number(current.attempt_count) < maxAttempts
       const delaySeconds = Math.min(300, 5 * (2 ** Math.max(0, attempt - 1)))
-      const nextRetryAt = canRetry
-        ? new Date(Date.now() + delaySeconds * 1000).toISOString()
-        : null
-      this.db.prepare(`
-        UPDATE redemption_attempts
-        SET status = 'failed', http_status = ?, reason = ?, latency_ms = ?,
-            error_message = ?, completed_at = ?
-        WHERE redemption_id = ? AND attempt_no = ?
-      `).run(
-        failure.httpStatus || null,
-        failure.reason || '',
-        failure.latencyMs || 0,
-        String(failure.message || 'upstream request failed').slice(0, 1000),
-        at,
-        id,
-        attempt,
-      )
-      this.db.prepare(`
+      const nextRetryAt = canRetry ? new Date(Date.now() + delaySeconds * 1000).toISOString() : null
+      await client.query(`
         UPDATE redemptions
-        SET status = ?, retryable = ?, upstream_http_status = ?,
-            upstream_reason = ?, upstream_response = ?, last_error = ?,
-            next_retry_at = ?, updated_at = ?
-        WHERE id = ?
-      `).run(
-        canRetry ? 'retryable' : 'failed',
-        canRetry ? 1 : 0,
-        failure.httpStatus || null,
-        failure.reason || '',
-        failure.response ? JSON.stringify(failure.response) : '',
+        SET status = $1, retryable = $2, upstream_http_status = $3,
+            upstream_reason = $4, upstream_response = $5, last_error = $6,
+            next_retry_at = $7, updated_at = $8
+        WHERE id = $9
+      `, [
+        canRetry ? 'retryable' : 'failed', canRetry, failure.httpStatus || null,
+        failure.reason || '', failure.response || {},
         String(failure.message || 'upstream request failed').slice(0, 1000),
-        nextRetryAt,
-        at,
-        id,
-      )
-      this.db.prepare(`
-        UPDATE redeem_codes SET status = 'failed', updated_at = ? WHERE id = ?
-      `).run(at, current.code_id)
-      this.audit('system', 'redemption.failed', 'redemption', id, {
+        nextRetryAt, at, id,
+      ])
+      await client.query("UPDATE redeem_codes SET status = 'failed', updated_at = $1 WHERE id = $2", [at, current.code_id])
+      await this.audit(client, 'system', 'redemption.failed', 'redemption', id, {
         attempt,
         retryable: canRetry,
         reason: failure.reason || '',
       })
-      return this.getRedemption(id)
+      return this.getRedemption(id, client)
     })
   }
 
-  recoverInterrupted() {
+  async recoverInterrupted() {
     const at = nowISO()
-    this.transaction(() => {
-      this.db.prepare(`
+    await this.transaction(async (client) => {
+      await client.query(`
+        UPDATE redemption_attempts AS a
+        SET status = 'failed', reason = 'SERVICE_INTERRUPTED',
+            error_message = 'service restarted during fulfillment', completed_at = $1
+        FROM redemptions AS r
+        WHERE a.redemption_id = r.id
+          AND a.status = 'processing'
+          AND r.status = 'processing'
+      `, [at])
+      await client.query(`
         UPDATE redemptions
-        SET status = 'retryable', retryable = 1, next_retry_at = ?,
+        SET status = 'retryable', retryable = TRUE, next_retry_at = $1,
             last_error = CASE
               WHEN last_error = '' THEN 'service restarted during fulfillment'
               ELSE last_error
             END,
-            updated_at = ?
+            updated_at = $2
         WHERE status = 'processing'
-      `).run(at, at)
-      this.db.prepare(`
+      `, [at, at])
+      await client.query(`
         UPDATE redeem_codes
-        SET status = 'failed', updated_at = ?
+        SET status = 'failed', updated_at = $1
         WHERE status = 'processing'
           AND id IN (SELECT code_id FROM redemptions WHERE status = 'retryable')
-      `).run(at)
+      `, [at])
     })
   }
 
-  dueRetries(limit = 10) {
-    return this.db.prepare(`
+  async dueRetries(limit = 10) {
+    const result = await this.pool.query(`
       SELECT id FROM redemptions
-      WHERE status = 'retryable' AND retryable = 1
-        AND (next_retry_at IS NULL OR next_retry_at <= ?)
-      ORDER BY next_retry_at ASC
-      LIMIT ?
-    `).all(nowISO(), limit).map((row) => String(row.id))
+      WHERE status = 'retryable' AND retryable = TRUE
+        AND (next_retry_at IS NULL OR next_retry_at <= $1)
+      ORDER BY next_retry_at ASC NULLS FIRST
+      LIMIT $2
+    `, [nowISO(), limit])
+    return result.rows.map((row) => String(row.id))
   }
 
-  forceRetry(id, actor) {
-    return this.transaction(() => {
-      const row = plain(this.db.prepare('SELECT * FROM redemptions WHERE id = ?').get(id))
+  async forceRetry(id, actor) {
+    return this.transaction(async (client) => {
+      const found = await client.query('SELECT * FROM redemptions WHERE id = $1 FOR UPDATE', [id])
+      const row = plain(found.rows[0])
       if (!row) return { kind: 'not_found' }
       if (row.status === 'succeeded') return { kind: 'succeeded', redemption: displayRedemption(row) }
       const at = nowISO()
-      this.db.prepare(`
+      await client.query(`
         UPDATE redemptions
-        SET status = 'retryable', retryable = 1, next_retry_at = ?,
-            updated_at = ?
-        WHERE id = ?
-      `).run(at, at, id)
-      this.audit(actor, 'redemption.retry', 'redemption', id, {
+        SET status = 'retryable', retryable = TRUE, next_retry_at = $1, updated_at = $2
+        WHERE id = $3
+      `, [at, at, id])
+      await this.audit(client, actor, 'redemption.retry', 'redemption', id, {
         previous_status: row.status,
       })
-      return { kind: 'queued', redemption: this.getRedemption(id) }
+      return { kind: 'queued', redemption: await this.getRedemption(id, client) }
     })
   }
 
-  listUserRedemptions(userID, pageValue = 1, pageSizeValue = 20) {
+  async listUserRedemptions(userID, pageValue = 1, pageSizeValue = 20) {
     const page = clampPage(pageValue)
     const pageSize = Math.min(clampPage(pageSizeValue, 20), 50)
-    const total = Number(this.db.prepare(`
-      SELECT COUNT(*) AS total FROM redemptions WHERE user_id = ?
-    `).get(userID).total)
-    const rows = this.db.prepare(`
+    const totalResult = await this.pool.query('SELECT COUNT(*) AS total FROM redemptions WHERE user_id = $1', [userID])
+    const total = Number(totalResult.rows[0].total)
+    const rows = await this.pool.query(`
       SELECT r.*, c.code_mask, c.campaign
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
-      WHERE r.user_id = ?
+      WHERE r.user_id = $1
       ORDER BY r.created_at DESC
-      LIMIT ? OFFSET ?
-    `).all(userID, pageSize, (page - 1) * pageSize)
+      LIMIT $2 OFFSET $3
+    `, [userID, pageSize, (page - 1) * pageSize])
     return {
-      items: rows.map(displayRedemption),
+      items: rows.rows.map(displayRedemption),
       total,
       page,
       page_size: pageSize,
@@ -487,26 +533,27 @@ export class RedeemDatabase {
     }
   }
 
-  listRedemptions(filters = {}) {
+  async listRedemptions(filters = {}) {
     const page = clampPage(filters.page)
     const pageSize = Math.min(clampPage(filters.pageSize, 25), 100)
     const where = whereFromFilters(filters)
-    const total = Number(this.db.prepare(`
+    const totalResult = await this.pool.query(`
       SELECT COUNT(*) AS total
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
       ${where.sql}
-    `).get(...where.params).total)
-    const rows = this.db.prepare(`
+    `, where.params)
+    const total = Number(totalResult.rows[0].total)
+    const rows = await this.pool.query(`
       SELECT r.*, c.code_mask, c.campaign
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
       ${where.sql}
       ORDER BY r.created_at DESC
-      LIMIT ? OFFSET ?
-    `).all(...where.params, pageSize, (page - 1) * pageSize)
+      LIMIT $${where.params.length + 1} OFFSET $${where.params.length + 2}
+    `, [...where.params, pageSize, (page - 1) * pageSize])
     return {
-      items: rows.map(displayRedemption),
+      items: rows.rows.map(displayRedemption),
       total,
       page,
       page_size: pageSize,
@@ -514,64 +561,58 @@ export class RedeemDatabase {
     }
   }
 
-  analytics(filters = {}) {
+  async analytics(filters = {}) {
     const where = whereFromFilters(filters)
     const baseJoin = 'FROM redemptions r JOIN redeem_codes c ON c.id = r.code_id'
-    const totals = plain(this.db.prepare(`
+    const totalsResult = await this.pool.query(`
       SELECT
         COUNT(*) AS total,
-        SUM(CASE WHEN r.status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
-        SUM(CASE WHEN r.status IN ('pending', 'processing', 'retryable') THEN 1 ELSE 0 END) AS pending,
-        SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) AS failed,
-        COALESCE(SUM(CASE
-          WHEN r.status = 'succeeded' AND r.benefit_type = 'balance'
-          THEN r.value_micros ELSE 0 END), 0) AS balance_micros,
-        COALESCE(SUM(CASE
-          WHEN r.status = 'succeeded' AND r.benefit_type = 'subscription'
-          THEN r.validity_days ELSE 0 END), 0) AS subscription_days
+        COUNT(*) FILTER (WHERE r.status = 'succeeded') AS succeeded,
+        COUNT(*) FILTER (WHERE r.status IN ('pending', 'processing', 'retryable')) AS pending,
+        COUNT(*) FILTER (WHERE r.status = 'failed') AS failed,
+        COALESCE(SUM(r.value_micros) FILTER (
+          WHERE r.status = 'succeeded' AND r.benefit_type = 'balance'
+        ), 0) AS balance_micros,
+        COALESCE(SUM(r.validity_days) FILTER (
+          WHERE r.status = 'succeeded' AND r.benefit_type = 'subscription'
+        ), 0) AS subscription_days
       ${baseJoin}
       ${where.sql}
-    `).get(...where.params))
-    const trend = this.db.prepare(`
+    `, where.params)
+    const totals = totalsResult.rows[0]
+    const trendResult = await this.pool.query(`
       SELECT
-        substr(r.created_at, 1, 10) AS day,
+        TO_CHAR(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
         COUNT(*) AS total,
-        SUM(CASE WHEN r.status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
-        SUM(CASE WHEN r.benefit_type = 'balance' AND r.status = 'succeeded' THEN 1 ELSE 0 END) AS balance_count,
-        SUM(CASE WHEN r.benefit_type = 'subscription' AND r.status = 'succeeded' THEN 1 ELSE 0 END) AS subscription_count
+        COUNT(*) FILTER (WHERE r.status = 'succeeded') AS succeeded,
+        COUNT(*) FILTER (WHERE r.benefit_type = 'balance' AND r.status = 'succeeded') AS balance_count,
+        COUNT(*) FILTER (WHERE r.benefit_type = 'subscription' AND r.status = 'succeeded') AS subscription_count
       ${baseJoin}
       ${where.sql}
-      GROUP BY substr(r.created_at, 1, 10)
+      GROUP BY day
       ORDER BY day ASC
       LIMIT 90
-    `).all(...where.params).map(plain)
-    const statuses = this.db.prepare(`
-      SELECT r.status, COUNT(*) AS count
-      ${baseJoin}
-      ${where.sql}
-      GROUP BY r.status
-      ORDER BY count DESC
-    `).all(...where.params).map(plain)
-    const groups = this.db.prepare(`
-      SELECT r.group_id, COUNT(*) AS redemptions,
-        COALESCE(SUM(r.validity_days), 0) AS validity_days
+    `, where.params)
+    const statusResult = await this.pool.query(`
+      SELECT r.status, COUNT(*) AS count ${baseJoin} ${where.sql}
+      GROUP BY r.status ORDER BY count DESC
+    `, where.params)
+    const groupsResult = await this.pool.query(`
+      SELECT r.group_id, COUNT(*) AS redemptions, COALESCE(SUM(r.validity_days), 0) AS validity_days
       ${baseJoin}
       ${where.sql}${where.sql ? ' AND' : ' WHERE'} r.status = 'succeeded'
         AND r.benefit_type = 'subscription'
-      GROUP BY r.group_id
-      ORDER BY redemptions DESC
-      LIMIT 10
-    `).all(...where.params).map(plain)
-    const campaigns = this.db.prepare(`
+      GROUP BY r.group_id ORDER BY redemptions DESC LIMIT 10
+    `, where.params)
+    const campaignsResult = await this.pool.query(`
       SELECT COALESCE(NULLIF(c.campaign, ''), '未分类') AS campaign,
         COUNT(*) AS redemptions,
-        SUM(CASE WHEN r.status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded
+        COUNT(*) FILTER (WHERE r.status = 'succeeded') AS succeeded
       ${baseJoin}
       ${where.sql}
       GROUP BY COALESCE(NULLIF(c.campaign, ''), '未分类')
-      ORDER BY redemptions DESC
-      LIMIT 10
-    `).all(...where.params).map(plain)
+      ORDER BY redemptions DESC LIMIT 10
+    `, where.params)
     const total = Number(totals.total || 0)
     const succeeded = Number(totals.succeeded || 0)
     return {
@@ -582,19 +623,36 @@ export class RedeemDatabase {
       success_rate: total ? Number(((succeeded / total) * 100).toFixed(1)) : 0,
       balance_value: formatAmountMicros(Number(totals.balance_micros || 0)),
       subscription_days: Number(totals.subscription_days || 0),
-      trend,
-      statuses,
-      groups,
-      campaigns,
+      trend: trendResult.rows.map((row) => ({
+        ...row,
+        total: Number(row.total),
+        succeeded: Number(row.succeeded),
+        balance_count: Number(row.balance_count),
+        subscription_count: Number(row.subscription_count),
+      })),
+      statuses: statusResult.rows.map((row) => ({ ...row, count: Number(row.count) })),
+      groups: groupsResult.rows.map((row) => ({
+        ...row,
+        group_id: numeric(row.group_id),
+        redemptions: Number(row.redemptions),
+        validity_days: Number(row.validity_days),
+      })),
+      campaigns: campaignsResult.rows.map((row) => ({
+        ...row,
+        redemptions: Number(row.redemptions),
+        succeeded: Number(row.succeeded),
+      })),
     }
   }
 
-  auditEvents(limit = 50) {
-    return this.db.prepare(`
-      SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?
-    `).all(Math.min(clampPage(limit, 50), 200)).map((row) => ({
+  async auditEvents(limit = 50) {
+    const result = await this.pool.query(`
+      SELECT * FROM audit_events ORDER BY created_at DESC LIMIT $1
+    `, [Math.min(clampPage(limit, 50), 200)])
+    return result.rows.map((row) => ({
       ...plain(row),
-      metadata: JSON.parse(row.metadata_json || '{}'),
+      id: Number(row.id),
+      metadata: row.metadata_json || {},
       metadata_json: undefined,
     }))
   }

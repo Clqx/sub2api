@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -46,6 +47,39 @@ function frameAncestors(value) {
   return entries.join(' ')
 }
 
+function databaseSSLMode(value) {
+  const mode = String(value || 'disable').toLowerCase()
+  if (mode === 'disable') return false
+  if (mode === 'require') return { rejectUnauthorized: false }
+  if (mode === 'verify-full') return { rejectUnauthorized: true }
+  throw new Error(`invalid REDEEM_DATABASE_SSLMODE: ${value}`)
+}
+
+function databaseConfig(env, demoMode) {
+  const connectionString = String(env.REDEEM_DATABASE_URL || '').trim()
+  const password = String(env.REDEEM_DATABASE_PASSWORD || '')
+  if (!connectionString && !demoMode && !password) {
+    throw new Error('REDEEM_DATABASE_URL or REDEEM_DATABASE_PASSWORD is required')
+  }
+  const common = {
+    max: integerValue(env.REDEEM_DATABASE_POOL_SIZE, 10, { min: 1, max: 100 }),
+    connectionTimeoutMillis: integerValue(env.REDEEM_DATABASE_CONNECTION_TIMEOUT_MS, 5000, {
+      min: 100,
+      max: 120000,
+    }),
+    ssl: databaseSSLMode(env.REDEEM_DATABASE_SSLMODE),
+  }
+  if (connectionString) return { ...common, connectionString }
+  return {
+    ...common,
+    host: String(env.REDEEM_DATABASE_HOST || '127.0.0.1'),
+    port: integerValue(env.REDEEM_DATABASE_PORT, 5432, { min: 1, max: 65535 }),
+    user: String(env.REDEEM_DATABASE_USER || 'redeem_platform'),
+    password,
+    database: String(env.REDEEM_DATABASE_NAME || 'redeem_platform'),
+  }
+}
+
 export function loadConfig(env = process.env) {
   const nodeEnv = String(env.NODE_ENV || 'development')
   const demoMode = booleanValue(env.REDEEM_DEMO_MODE)
@@ -55,7 +89,15 @@ export function loadConfig(env = process.env) {
     throw new Error('demo mode and disabled manager authentication are forbidden in production')
   }
 
-  const adminApiKey = String(env.SUB2API_ADMIN_API_KEY || '').trim()
+  const adminApiKeyFile = String(env.SUB2API_ADMIN_API_KEY_FILE || '').trim()
+  let adminApiKey = String(env.SUB2API_ADMIN_API_KEY || '').trim()
+  if (!adminApiKey && adminApiKeyFile) {
+    try {
+      adminApiKey = fs.readFileSync(adminApiKeyFile, 'utf8').trim()
+    } catch (error) {
+      throw new Error(`cannot read SUB2API_ADMIN_API_KEY_FILE: ${error.message}`)
+    }
+  }
   const adminJWT = String(env.SUB2API_ADMIN_JWT || '').trim()
   const rawBaseURL = String(env.SUB2API_BASE_URL || '').trim()
   if (!demoMode && !rawBaseURL) throw new Error('SUB2API_BASE_URL is required')
@@ -70,10 +112,6 @@ export function loadConfig(env = process.env) {
   }
 
   const moduleRoot = fileURLToPath(new URL('../', import.meta.url))
-  const databasePath = path.resolve(
-    String(env.REDEEM_DATABASE_PATH || path.join(moduleRoot, 'data', 'redeem-platform.db')),
-  )
-
   return Object.freeze({
     nodeEnv,
     demoMode,
@@ -81,9 +119,10 @@ export function loadConfig(env = process.env) {
     port: integerValue(env.REDEEM_PORT, 8090, { min: 1, max: 65535 }),
     publicDir: path.join(moduleRoot, 'public'),
     migrationDir: path.join(moduleRoot, 'migrations'),
-    databasePath,
+    database: Object.freeze(databaseConfig(env, demoMode)),
     sub2apiBaseURL: rawBaseURL ? normalizedBaseURL(rawBaseURL) : 'http://demo.invalid',
     adminApiKey,
+    adminApiKeyFile,
     adminJWT,
     codePepper: requiredSecret(env, 'REDEEM_CODE_PEPPER', demoMode),
     sessionSecret: requiredSecret(env, 'REDEEM_SESSION_SECRET', demoMode),

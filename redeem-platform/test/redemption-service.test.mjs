@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
 import { AppError } from '../src/errors.mjs'
 import { RedemptionService } from '../src/redemption-service.mjs'
+import { hashRedeemCode } from '../src/security.mjs'
 import { UpstreamError } from '../src/sub2api-client.mjs'
-import { silentLogger, temporaryDatabase, testConfig } from './helpers.mjs'
+import { databaseTest, silentLogger, temporaryDatabase, testConfig } from './helpers.mjs'
 
 const user = {
   id: 101,
@@ -11,9 +11,9 @@ const user = {
   username: 'User 101',
 }
 
-function createService(t, fulfill) {
+async function createService(t, fulfill) {
   const config = testConfig()
-  const database = temporaryDatabase(t)
+  const database = await temporaryDatabase(t)
   const calls = []
   const sub2api = {
     async verifyUser() {
@@ -22,6 +22,9 @@ function createService(t, fulfill) {
     async fulfill(redemption) {
       calls.push({ ...redemption })
       return fulfill(redemption, calls.length)
+    },
+    async listGroups() {
+      return [{ id: 8, status: 'active', subscription_type: 'subscription' }]
     },
   }
   return {
@@ -46,9 +49,9 @@ function successfulResult(redemption) {
   }
 }
 
-test('balance code fulfillment stores a successful redemption', async (t) => {
-  const { service, calls } = createService(t, async (redemption) => successfulResult(redemption))
-  const [generated] = service.generateCodes({
+databaseTest('balance code fulfillment stores a successful redemption', async (t) => {
+  const { service, calls } = await createService(t, async (redemption) => successfulResult(redemption))
+  const [generated] = await service.generateCodes({
     count: 1,
     benefit_type: 'balance',
     value: '125.50',
@@ -62,11 +65,13 @@ test('balance code fulfillment stores a successful redemption', async (t) => {
   assert.equal(calls.length, 1)
   assert.equal(calls[0].user_id, user.id)
   assert.match(calls[0].idempotency_key, /^rp-/)
+  assert.match(calls[0].upstream_code, /^rp[0-9a-f]{30}$/)
+  assert.equal(calls[0].upstream_code.length, 32)
 })
 
-test('subscription code fulfills the selected existing group and validity', async (t) => {
-  const { service, calls } = createService(t, async (redemption) => successfulResult(redemption))
-  const [generated] = service.generateCodes({
+databaseTest('subscription code fulfills the selected existing group and validity', async (t) => {
+  const { service, calls } = await createService(t, async (redemption) => successfulResult(redemption))
+  const [generated] = await service.generateCodes({
     count: 1,
     benefit_type: 'subscription',
     value: '299',
@@ -83,8 +88,25 @@ test('subscription code fulfills the selected existing group and validity', asyn
   assert.equal(calls[0].validity_days, 45)
 })
 
-test('retry reuses the same upstream code and idempotency key', async (t) => {
-  const { service, calls } = createService(t, async (redemption, attempt) => {
+databaseTest('subscription code generation rejects an unavailable or non-subscription group', async (t) => {
+  const { service } = await createService(t, async (redemption) => successfulResult(redemption))
+
+  await assert.rejects(
+    service.generateCodes({
+      count: 1,
+      benefit_type: 'subscription',
+      value: '299',
+      group_id: 9,
+      validity_days: 30,
+    }, 'manager:test'),
+    (error) => error instanceof AppError
+      && error.status === 400
+      && error.code === 'INVALID_SUBSCRIPTION_GROUP',
+  )
+})
+
+databaseTest('retry reuses the same upstream code and idempotency key', async (t) => {
+  const { service, calls } = await createService(t, async (redemption, attempt) => {
     if (attempt === 1) {
       throw new UpstreamError('temporary outage', {
         httpStatus: 503,
@@ -94,7 +116,7 @@ test('retry reuses the same upstream code and idempotency key', async (t) => {
     }
     return successfulResult(redemption)
   })
-  const [generated] = service.generateCodes({
+  const [generated] = await service.generateCodes({
     count: 1,
     benefit_type: 'balance',
     value: '50',
@@ -110,9 +132,9 @@ test('retry reuses the same upstream code and idempotency key', async (t) => {
   assert.equal(second.attempt_count, 2)
 })
 
-test('a code claimed by one user is rejected for another user', async (t) => {
-  const { service } = createService(t, async (redemption) => successfulResult(redemption))
-  const [generated] = service.generateCodes({
+databaseTest('a code claimed by one user is rejected for another user', async (t) => {
+  const { service } = await createService(t, async (redemption) => successfulResult(redemption))
+  const [generated] = await service.generateCodes({
     count: 1,
     benefit_type: 'balance',
     value: '10',
@@ -129,4 +151,39 @@ test('a code claimed by one user is rejected for another user', async (t) => {
       && error.status === 409
       && error.code === 'CODE_ALREADY_USED',
   )
+})
+
+databaseTest('an interrupted stale attempt cannot overwrite a later success', async (t) => {
+  const { config, database, service } = await createService(
+    t,
+    async (redemption) => successfulResult(redemption),
+  )
+  const [generated] = await service.generateCodes({
+    count: 1,
+    benefit_type: 'balance',
+    value: '10',
+  }, 'manager:test')
+  const claimed = await database.claimCode({
+    codeHash: hashRedeemCode(generated.code, config.codePepper),
+    user,
+  })
+  const first = await database.beginAttempt(claimed.redemption.id)
+  await database.recoverInterrupted()
+  const second = await database.beginAttempt(claimed.redemption.id)
+  await database.completeAttemptSuccess(
+    claimed.redemption.id,
+    second.attempt,
+    successfulResult(second.redemption),
+  )
+  await database.completeAttemptFailure(
+    claimed.redemption.id,
+    first.attempt,
+    new UpstreamError('stale failure', { httpStatus: 503, retryable: true }),
+    config.maxAttempts,
+  )
+
+  const result = await database.getRedemptionDetail(claimed.redemption.id)
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.retryable, false)
+  assert.equal(result.attempts.find((attempt) => attempt.attempt_no === 1).reason, 'SERVICE_INTERRUPTED')
 })

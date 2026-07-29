@@ -54,7 +54,7 @@ export class RedemptionService {
     return user
   }
 
-  generateCodes(input, actor) {
+  async generateCodes(input, actor) {
     const count = Number(input.count)
     if (!Number.isInteger(count) || count < 1 || count > 100) {
       throw new AppError(400, 'INVALID_COUNT', '单次生成数量必须在 1 到 100 之间')
@@ -80,6 +80,19 @@ export class RedemptionService {
       }
       if (!Number.isInteger(validityDays) || validityDays < 1 || validityDays > 36500) {
         throw new AppError(400, 'INVALID_VALIDITY_DAYS', '订阅天数必须在 1 到 36500 之间')
+      }
+      let groups
+      try {
+        groups = await this.sub2api.listGroups()
+      } catch (error) {
+        if (error instanceof UpstreamError) {
+          throw new AppError(502, error.reason || 'UPSTREAM_GROUPS_FAILED', '无法验证订阅分组')
+        }
+        throw error
+      }
+      const group = groups.find((item) => Number(item.id) === groupID)
+      if (!group || group.subscription_type !== 'subscription' || group.status !== 'active') {
+        throw new AppError(400, 'INVALID_SUBSCRIPTION_GROUP', '订阅分组不存在、未启用或不支持订阅')
       }
     }
 
@@ -113,7 +126,7 @@ export class RedemptionService {
     } catch {
       throw new AppError(404, 'CODE_NOT_FOUND', '兑换码不存在或格式错误')
     }
-    const claimed = this.database.claimCode({ codeHash, user })
+    const claimed = await this.database.claimCode({ codeHash, user })
     switch (claimed.kind) {
       case 'not_found':
         throw new AppError(404, 'CODE_NOT_FOUND', '兑换码不存在或格式错误')
@@ -143,11 +156,11 @@ export class RedemptionService {
     if (this.inFlight.has(id)) return this.database.getRedemption(id)
     this.inFlight.add(id)
     try {
-      const attemptState = this.database.beginAttempt(id)
+      const attemptState = await this.database.beginAttempt(id)
       if (!attemptState) return this.database.getRedemption(id)
       try {
         const result = await this.sub2api.fulfill(attemptState.redemption)
-        return this.database.completeAttemptSuccess(id, attemptState.attempt, result)
+        return await this.database.completeAttemptSuccess(id, attemptState.attempt, result)
       } catch (error) {
         const failure = error instanceof UpstreamError
           ? error
@@ -159,7 +172,7 @@ export class RedemptionService {
           reason: failure.reason,
           retryable: failure.retryable,
         }))
-        return this.database.completeAttemptFailure(
+        return await this.database.completeAttemptFailure(
           id,
           attemptState.attempt,
           failure,
@@ -172,7 +185,7 @@ export class RedemptionService {
   }
 
   async retry(id, actor) {
-    const queued = this.database.forceRetry(id, actor)
+    const queued = await this.database.forceRetry(id, actor)
     if (queued.kind === 'not_found') {
       throw new AppError(404, 'REDEMPTION_NOT_FOUND', '兑换记录不存在')
     }
@@ -181,7 +194,7 @@ export class RedemptionService {
   }
 
   async runRetries() {
-    for (const id of this.database.dueRetries(10)) {
+    for (const id of await this.database.dueRetries(10)) {
       await this.fulfill(id)
     }
   }

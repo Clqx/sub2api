@@ -7,10 +7,12 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-COPY package.json ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 COPY migrations ./migrations
 COPY public ./public
 COPY src ./src
+COPY test ./test
 
 RUN mkdir -p /app/data && chown -R node:node /app
 

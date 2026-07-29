@@ -6,7 +6,8 @@ import { RedemptionService } from './redemption-service.mjs'
 import { DemoSub2APIClient, Sub2APIClient } from './sub2api-client.mjs'
 
 const config = loadConfig()
-const database = new RedeemDatabase(config.databasePath, config.migrationDir)
+const database = new RedeemDatabase(config.database, config.migrationDir)
+await database.initialize()
 const sub2api = config.demoMode
   ? new DemoSub2APIClient()
   : new Sub2APIClient(config)
@@ -28,9 +29,17 @@ server.listen(config.port, config.host, () => {
 function shutdown(signal) {
   console.info(JSON.stringify({ event: 'redeem_platform_stopping', signal }))
   service.stopRetryWorker()
-  server.close(() => {
-    database.close()
-    process.exit(0)
+  server.close(async () => {
+    try {
+      await database.close()
+      process.exit(0)
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'redeem_platform_shutdown_failed',
+        message: error?.message || 'unknown error',
+      }))
+      process.exit(1)
+    }
   })
   setTimeout(() => process.exit(1), 10000).unref()
 }

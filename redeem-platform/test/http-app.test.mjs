@@ -4,7 +4,7 @@ import test from 'node:test'
 import { createHTTPHandler } from '../src/http-app.mjs'
 import { RedemptionService } from '../src/redemption-service.mjs'
 import { DemoSub2APIClient } from '../src/sub2api-client.mjs'
-import { silentLogger, temporaryDatabase, testConfig } from './helpers.mjs'
+import { databaseTest, silentLogger, temporaryDatabase, testConfig } from './helpers.mjs'
 
 async function jsonRequest(baseURL, path, options = {}) {
   const response = await fetch(`${baseURL}${path}`, options)
@@ -12,9 +12,48 @@ async function jsonRequest(baseURL, path, options = {}) {
   return { response, body }
 }
 
-test('HTTP flow exchanges identity, generates, redeems, and lists records', async (t) => {
+test('manager authentication failures are rate limited per client', async (t) => {
+  const config = testConfig({
+    managerAuthDisabled: false,
+    managerUsername: 'manager',
+    managerPassword: 'manager-password',
+  })
+  const server = http.createServer(createHTTPHandler({
+    config,
+    database: {},
+    service: {},
+    sub2api: {},
+    logger: silentLogger,
+  }))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const address = server.address()
+  const baseURL = `http://127.0.0.1:${address.port}`
+  const invalidAuthorization = `Basic ${Buffer.from('manager:wrong-password').toString('base64')}`
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const response = await fetch(`${baseURL}/admin`, {
+      headers: { Authorization: invalidAuthorization },
+    })
+    assert.equal(response.status, 401)
+  }
+  const limited = await fetch(`${baseURL}/admin`, {
+    headers: { Authorization: invalidAuthorization },
+  })
+  assert.equal(limited.status, 429)
+  assert.equal(limited.headers.get('retry-after'), '60')
+
+  const valid = await fetch(`${baseURL}/admin`, {
+    headers: {
+      Authorization: `Basic ${Buffer.from('manager:manager-password').toString('base64')}`,
+    },
+  })
+  assert.equal(valid.status, 200)
+})
+
+databaseTest('HTTP flow exchanges identity, generates, redeems, and lists records', async (t) => {
   const config = testConfig()
-  const database = temporaryDatabase(t)
+  const database = await temporaryDatabase(t)
   const sub2api = new DemoSub2APIClient()
   const service = new RedemptionService({
     config,
