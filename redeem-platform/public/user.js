@@ -211,13 +211,19 @@ async function loadHistory() {
 
 async function establishSession() {
   const url = new URL(window.location.href)
-  const sourceToken = url.searchParams.get('token') || ''
-  const hintedUserID = url.searchParams.get('user_id') || ''
+  const fragment = new URLSearchParams(url.hash.replace(/^#/, ''))
+  const sourceToken = fragment.get('token') || ''
+  const hintedUserID = fragment.get('user_id') || ''
 
   if (sourceToken) {
-    url.searchParams.delete('token')
-    url.searchParams.delete('user_id')
-    history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+    fragment.delete('token')
+    fragment.delete('user_id')
+    const remainingFragment = fragment.toString()
+    history.replaceState(
+      null,
+      '',
+      `${url.pathname}${url.search}${remainingFragment ? `#${remainingFragment}` : ''}`,
+    )
     const exchanged = await request('/api/session/exchange', {
       method: 'POST',
       body: JSON.stringify({

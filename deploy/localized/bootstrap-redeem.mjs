@@ -13,6 +13,9 @@ const redeemMenuIcon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 
 if (!baseURL || !email || !password || !outputFile) {
   throw new Error('SUB2API_BASE_URL, ADMIN_EMAIL, ADMIN_PASSWORD, and SUB2API_ADMIN_API_KEY_FILE are required')
 }
+if (/(?:change[-_ ]?me|replace[-_ ]?with)/i.test(password)) {
+  throw new Error('ADMIN_PASSWORD must not use an example placeholder value')
+}
 
 async function request(route, options = {}) {
   const response = await fetch(`${baseURL}${route}`, {

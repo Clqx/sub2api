@@ -16,18 +16,31 @@ function integerValue(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER 
   return parsed
 }
 
+function isPlaceholder(value) {
+  return /(?:change[-_ ]?me|replace[-_ ]?with|demo-password-only)/i.test(String(value || ''))
+}
+
 function requiredSecret(env, name, demoMode) {
   const value = String(env[name] || '')
   if (!demoMode && value.length < 32) {
     throw new Error(`${name} must contain at least 32 characters`)
+  }
+  if (!demoMode && isPlaceholder(value)) {
+    throw new Error(`${name} must not use an example placeholder value`)
   }
   return value || `demo-${name.toLowerCase()}-0123456789abcdef0123456789abcdef`
 }
 
 function normalizedBaseURL(value) {
   const url = new URL(value)
-  if (!['http:', 'https:'].includes(url.protocol)) {
-    throw new Error('SUB2API_BASE_URL must use http or https')
+  if (
+    !['http:', 'https:'].includes(url.protocol)
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+  ) {
+    throw new Error('SUB2API_BASE_URL must be an HTTP(S) origin or base path without credentials, query, or fragment')
   }
   return url.toString().replace(/\/+$/, '')
 }
@@ -132,6 +145,12 @@ export function loadConfig(env = process.env) {
   const managerPassword = String(env.REDEEM_MANAGER_PASSWORD || '')
   if (!managerAuthDisabled && (!managerUsername || managerPassword.length < 12)) {
     throw new Error('manager username and a 12+ character password are required')
+  }
+  if (nodeEnv === 'production' && isPlaceholder(managerPassword)) {
+    throw new Error('REDEEM_MANAGER_PASSWORD must not use an example placeholder value')
+  }
+  if (nodeEnv === 'production' && isPlaceholder(env.REDEEM_DATABASE_PASSWORD)) {
+    throw new Error('REDEEM_DATABASE_PASSWORD must not use an example placeholder value')
   }
 
   const moduleRoot = fileURLToPath(new URL('../', import.meta.url))

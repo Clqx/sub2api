@@ -29,7 +29,9 @@ REDEEM_PUBLIC_URL=https://redeem.example.com
 REDEEM_FRAME_ANCESTORS="'self',https://sub2api.example.com"
 ```
 
-管理员 Basic Auth、用户 JWT 和兑换会话都必须经 HTTPS 传输。Admin API Key 仅保存在 Docker 私有卷中，由兑换服务以只读方式挂载。
+管理员 Basic Auth、用户 JWT 和兑换会话都必须经 HTTPS 传输。用户 JWT 由主站通过 URL fragment 传给兑换页，不会进入代理访问日志。Admin API Key 仅保存在 Docker 私有卷中，由只读、无 Linux capabilities 的兑换容器挂载。
+
+启用 `REDEEM_TRUST_PROXY=true` 时，只支持一个直接连接的反向代理，并且必须在防火墙或容器网络层阻止客户端绕过该代理直连兑换服务。
 
 ## 测试
 

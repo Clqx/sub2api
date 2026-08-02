@@ -50,6 +50,40 @@ test('database TLS mode rejects unknown values', () => {
   }), /invalid REDEEM_DATABASE_SSLMODE/)
 })
 
+test('production configuration rejects example placeholder credentials', () => {
+  assert.throws(() => loadConfig({
+    ...productionEnvironment,
+    SUB2API_ADMIN_API_KEY: 'scoped-admin-api-key',
+    REDEEM_CODE_PEPPER: 'change-me-with-a-32-character-random-pepper',
+  }), /REDEEM_CODE_PEPPER must not use an example placeholder value/)
+
+  assert.throws(() => loadConfig({
+    ...productionEnvironment,
+    SUB2API_ADMIN_API_KEY: 'scoped-admin-api-key',
+    REDEEM_MANAGER_PASSWORD: 'replace-with-a-long-unique-password',
+  }), /REDEEM_MANAGER_PASSWORD must not use an example placeholder value/)
+
+  assert.throws(() => loadConfig({
+    ...productionEnvironment,
+    SUB2API_ADMIN_API_KEY: 'scoped-admin-api-key',
+    REDEEM_DATABASE_PASSWORD: 'change-me-redeem-database-password',
+  }), /REDEEM_DATABASE_PASSWORD must not use an example placeholder value/)
+})
+
+test('Sub2API base URL rejects credentials, query parameters, and fragments', () => {
+  for (const baseURL of [
+    'https://user:password@sub2api.example.com',
+    'https://sub2api.example.com?token=secret',
+    'https://sub2api.example.com/#private',
+  ]) {
+    assert.throws(() => loadConfig({
+      ...productionEnvironment,
+      SUB2API_ADMIN_API_KEY: 'scoped-admin-api-key',
+      SUB2API_BASE_URL: baseURL,
+    }), /SUB2API_BASE_URL must be an HTTP\(S\) origin or base path/)
+  }
+})
+
 test('administrator JWT is used only when an API key is absent', () => {
   const config = loadConfig({
     ...productionEnvironment,

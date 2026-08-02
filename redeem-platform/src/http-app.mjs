@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { isIP } from 'node:net'
 import path from 'node:path'
 import { AppError, asAppError } from './errors.mjs'
 import {
@@ -154,31 +155,45 @@ function requireManager(req, res, config, limiter) {
 
 function clientIP(req, config) {
   if (config.trustProxy) {
-    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
-    if (forwarded) return forwarded
+    // REDEEM_TRUST_PROXY trusts one directly connected reverse proxy. The
+    // right-most value is the address that proxy appended and cannot be
+    // replaced by a client-supplied left-most value.
+    const forwarded = String(req.headers['x-forwarded-for'] || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+    const candidate = forwarded.at(-1) || ''
+    if (isIP(candidate)) return candidate
   }
   return req.socket.remoteAddress || 'unknown'
 }
 
-class FixedWindowLimiter {
-  constructor() {
+export class FixedWindowLimiter {
+  constructor(maxEntries = 10000) {
     this.entries = new Map()
+    this.maxEntries = maxEntries
+  }
+
+  removeExpired(now) {
+    for (const [entryKey, value] of this.entries) {
+      if (value.resetAt <= now) this.entries.delete(entryKey)
+    }
   }
 
   check(key, limit, windowMs) {
     const now = Date.now()
     const existing = this.entries.get(key)
     if (!existing || existing.resetAt <= now) {
+      if (!existing && this.entries.size >= this.maxEntries) {
+        this.removeExpired(now)
+        // Keep memory bounded and fail closed while an identity-flood is active.
+        if (this.entries.size >= this.maxEntries) return false
+      }
       this.entries.set(key, { count: 1, resetAt: now + windowMs })
       return true
     }
     if (existing.count >= limit) return false
     existing.count += 1
-    if (this.entries.size > 10000) {
-      for (const [entryKey, value] of this.entries) {
-        if (value.resetAt <= now) this.entries.delete(entryKey)
-      }
-    }
     return true
   }
 }
@@ -271,6 +286,13 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
       }
 
       if (method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+        if (url.searchParams.has('token') || url.searchParams.has('access_token')) {
+          throw new AppError(
+            400,
+            'UNSAFE_TOKEN_TRANSPORT',
+            '登录凭证不能放在 URL 查询参数中，请从 Sub2API 用户中心重新进入',
+          )
+        }
         const body = fs.readFileSync(path.join(config.publicDir, 'index.html'))
         return send(res, 200, {
           ...securityHeaders(config),

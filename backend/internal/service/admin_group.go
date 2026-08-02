@@ -523,7 +523,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	return group, nil
 }
 
-// normalizeLimit 将负数转换为 nil（表示无限制），0 保留（表示限额为零）
+// normalizeLimit 将负数转换为 nil。0 是清空限额的兼容哨兵，Has*Limit 会将其视为无限制。
 func normalizeLimit(limit *float64) *float64 {
 	if limit == nil || *limit < 0 {
 		return nil

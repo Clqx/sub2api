@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import test from 'node:test'
-import { createHTTPHandler } from '../src/http-app.mjs'
+import { createHTTPHandler, FixedWindowLimiter } from '../src/http-app.mjs'
 import { RedemptionService } from '../src/redemption-service.mjs'
 import { DemoSub2APIClient } from '../src/sub2api-client.mjs'
 import { databaseTest, silentLogger, temporaryDatabase, testConfig } from './helpers.mjs'
@@ -11,6 +11,17 @@ async function jsonRequest(baseURL, path, options = {}) {
   const body = await response.json()
   return { response, body }
 }
+
+test('fixed-window limiter bounds identities and fails closed at capacity', () => {
+  const limiter = new FixedWindowLimiter(2)
+
+  assert.equal(limiter.check('first', 2, 60000), true)
+  assert.equal(limiter.check('second', 2, 60000), true)
+  assert.equal(limiter.check('third', 2, 60000), false)
+  assert.equal(limiter.entries.size, 2)
+  assert.equal(limiter.check('first', 2, 60000), true)
+  assert.equal(limiter.check('first', 2, 60000), false)
+})
 
 test('manager authentication failures are rate limited per client', async (t) => {
   const config = testConfig({
@@ -49,6 +60,59 @@ test('manager authentication failures are rate limited per client', async (t) =>
     },
   })
   assert.equal(valid.status, 200)
+})
+
+test('trusted proxy rate limiting ignores spoofed left-most forwarded addresses', async (t) => {
+  const config = testConfig({
+    trustProxy: true,
+    managerAuthDisabled: false,
+    managerUsername: 'manager',
+    managerPassword: 'manager-password',
+  })
+  const server = http.createServer(createHTTPHandler({
+    config,
+    database: {},
+    service: {},
+    sub2api: {},
+    logger: silentLogger,
+  }))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const address = server.address()
+  const baseURL = `http://127.0.0.1:${address.port}`
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const response = await fetch(`${baseURL}/admin`, {
+      headers: { 'X-Forwarded-For': `203.0.113.${attempt + 1}, 198.51.100.10` },
+    })
+    assert.equal(response.status, 401)
+  }
+  const limited = await fetch(`${baseURL}/admin`, {
+    headers: { 'X-Forwarded-For': '203.0.113.200, 198.51.100.10' },
+  })
+  assert.equal(limited.status, 429)
+})
+
+test('user page rejects credentials in URL query parameters', async (t) => {
+  const config = testConfig()
+  const server = http.createServer(createHTTPHandler({
+    config,
+    database: {},
+    service: {},
+    sub2api: {},
+    logger: silentLogger,
+  }))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const address = server.address()
+
+  const result = await jsonRequest(
+    `http://127.0.0.1:${address.port}`,
+    '/?token=must-not-appear-in-logs',
+  )
+  assert.equal(result.response.status, 400)
+  assert.equal(result.body.reason, 'UNSAFE_TOKEN_TRANSPORT')
+  assert.equal(result.response.headers.get('cache-control'), 'no-store')
 })
 
 databaseTest('HTTP flow exchanges identity, generates, redeems, and lists records', async (t) => {

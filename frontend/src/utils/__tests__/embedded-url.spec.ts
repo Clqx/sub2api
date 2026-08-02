@@ -56,6 +56,26 @@ describe('embedded-url', () => {
     expect(url.searchParams.has('lang')).toBe(false)
   })
 
+  it('can keep authentication data out of HTTP query parameters', () => {
+    const result = buildEmbeddedUrl(
+      'https://redeem.example.com/?campaign=summer',
+      42,
+      'token-123',
+      'dark',
+      'zh-CN',
+      'fragment',
+    )
+
+    const url = new URL(result)
+    const fragment = new URLSearchParams(url.hash.slice(1))
+    expect(url.searchParams.has('token')).toBe(false)
+    expect(url.searchParams.has('user_id')).toBe(false)
+    expect(fragment.get('token')).toBe('token-123')
+    expect(fragment.get('user_id')).toBe('42')
+    expect(url.searchParams.get('campaign')).toBe('summer')
+    expect(url.searchParams.get('ui_mode')).toBe('embedded')
+  })
+
   it('returns original string for invalid url input', () => {
     expect(buildEmbeddedUrl('not a url', 1, 'token')).toBe('not a url')
   })

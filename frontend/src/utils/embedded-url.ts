@@ -19,15 +19,22 @@ export function buildEmbeddedUrl(
   authToken?: string | null,
   theme: 'light' | 'dark' = 'light',
   lang?: string,
+  authTransport: 'query' | 'fragment' = 'query',
 ): string {
   if (!baseUrl) return baseUrl
   try {
     const url = new URL(baseUrl)
+    const authParams = authTransport === 'fragment'
+      ? new URLSearchParams(url.hash.replace(/^#/, ''))
+      : url.searchParams
     if (userId) {
-      url.searchParams.set(EMBEDDED_USER_ID_QUERY_KEY, String(userId))
+      authParams.set(EMBEDDED_USER_ID_QUERY_KEY, String(userId))
     }
     if (authToken) {
-      url.searchParams.set(EMBEDDED_AUTH_TOKEN_QUERY_KEY, authToken)
+      authParams.set(EMBEDDED_AUTH_TOKEN_QUERY_KEY, authToken)
+    }
+    if (authTransport === 'fragment') {
+      url.hash = authParams.toString()
     }
     url.searchParams.set(EMBEDDED_THEME_QUERY_KEY, theme)
     if (lang) {

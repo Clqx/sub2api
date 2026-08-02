@@ -144,6 +144,13 @@ services:
       dockerfile: Dockerfile
     container_name: sub2api-loc-redeem
     restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=16m,mode=1777
     ports:
       - "${BIND_HOST:-127.0.0.1}:${REDEEM_PORT:-8090}:8090"
     environment:

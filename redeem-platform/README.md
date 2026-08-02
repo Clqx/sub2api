@@ -14,7 +14,7 @@ GET  /api/v1/admin/groups/all
 POST /api/v1/admin/redeem-codes/create-and-redeem
 ```
 
-用户从 Sub2API 菜单进入时，平台使用 URL 中的用户 JWT 调用 `/api/v1/auth/me`，然后签发 15 分钟的平台会话。浏览器读取参数后会立即从地址栏和历史记录中移除 `token`。
+用户从 Sub2API 菜单进入时，主站只把用户 JWT 放在 URL fragment（`#token=...`）中；fragment 不会发送给反向代理或兑换平台。浏览器读取后会立即从地址栏和历史记录中移除凭证，再由平台调用 `/api/v1/auth/me` 并签发 15 分钟的短会话。查询参数形式的令牌会被拒绝。
 
 ## 统一 Docker Compose
 
@@ -120,7 +120,7 @@ user_id, token, theme, lang, ui_mode=embedded, src_host, src_url
 | `REDEEM_MANAGER_USERNAME` | 运营台用户名 |
 | `REDEEM_MANAGER_PASSWORD` | 运营台密码，至少 12 字符 |
 | `REDEEM_FRAME_ANCESTORS` | 允许嵌入兑换页的 Sub2API origins |
-| `REDEEM_TRUST_PROXY` | 是否信任反向代理传入的客户端 IP |
+| `REDEEM_TRUST_PROXY` | 是否信任一个直接连接的反向代理所追加的客户端 IP；启用时必须阻止客户端绕过代理直连 |
 
 完整配置见 [`.env.example`](./.env.example)。
 
@@ -138,7 +138,7 @@ npm start
 模拟从 Sub2API 菜单进入：
 
 ```text
-http://127.0.0.1:8090/?token=demo-user-10001&user_id=10001&ui_mode=embedded
+http://127.0.0.1:8090/?ui_mode=embedded#token=demo-user-10001&user_id=10001
 ```
 
 生产环境无法启用演示模式或关闭管理认证。

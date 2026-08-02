@@ -181,6 +181,7 @@ const embeddedUrl = computed(() => {
     authStore.token,
     pageTheme.value,
     locale.value,
+    menuItem.value.id === 'redeem-center' ? 'fragment' : 'query',
   )
 })
 
