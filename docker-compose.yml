@@ -68,6 +68,8 @@ services:
         NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}
     container_name: sub2api-loc
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "${BIND_HOST:-127.0.0.1}:${SUB2API_LOC_PORT:-18080}:8080"
     volumes:
