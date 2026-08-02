@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	basemiddleware "github.com/Wei-Shaw/sub2api/internal/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -181,4 +184,54 @@ func TestOllamaCloudUsageSessionRouteOmitsAuditBody(t *testing.T) {
 	require.Len(t, logs, 1)
 	require.Equal(t, "<credential-bearing body omitted>", logs[0].RequestBody)
 	require.NotContains(t, logs[0].RequestBody, "audit-canary")
+}
+
+func TestLoginAuditSuppressesOnlyRepeatedRateLimitRejections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repository := &auditCaptureRepository{}
+	auditService := service.NewAuditLogService(repository, nil)
+	auditService.Start()
+
+	redisServer := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	rateLimiter := basemiddleware.NewRateLimiter(redisClient)
+
+	router := gin.New()
+	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
+	router.POST("/api/v1/auth/login", rateLimiter.Limit("auth-login-audit-test", 2, time.Minute), func(c *gin.Context) {
+		c.Status(http.StatusUnauthorized)
+	})
+
+	statuses := make([]int, 0, 5)
+	for i := 0; i < 5; i++ {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"email":"scan@example.com","password":"guess"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "203.0.113.10:12345"
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		statuses = append(statuses, recorder.Code)
+	}
+	auditService.Stop()
+
+	require.Equal(t, []int{
+		http.StatusUnauthorized,
+		http.StatusUnauthorized,
+		http.StatusTooManyRequests,
+		http.StatusTooManyRequests,
+		http.StatusTooManyRequests,
+	}, statuses)
+
+	repository.mu.Lock()
+	logs := append([]*service.AuditLog(nil), repository.logs...)
+	repository.mu.Unlock()
+	require.Len(t, logs, 3)
+	require.Equal(t, []int{
+		http.StatusUnauthorized,
+		http.StatusUnauthorized,
+		http.StatusTooManyRequests,
+	}, []int{logs[0].StatusCode, logs[1].StatusCode, logs[2].StatusCode})
+	for _, entry := range logs {
+		require.Equal(t, service.AuditActionLogin, entry.Action)
+	}
 }

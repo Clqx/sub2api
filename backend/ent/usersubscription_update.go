@@ -147,6 +147,26 @@ func (_u *UserSubscriptionUpdate) ClearDailyWindowStart() *UserSubscriptionUpdat
 	return _u
 }
 
+// SetHourlyWindowStart sets the "hourly_window_start" field.
+func (_u *UserSubscriptionUpdate) SetHourlyWindowStart(v time.Time) *UserSubscriptionUpdate {
+	_u.mutation.SetHourlyWindowStart(v)
+	return _u
+}
+
+// SetNillableHourlyWindowStart sets the "hourly_window_start" field if the given value is not nil.
+func (_u *UserSubscriptionUpdate) SetNillableHourlyWindowStart(v *time.Time) *UserSubscriptionUpdate {
+	if v != nil {
+		_u.SetHourlyWindowStart(*v)
+	}
+	return _u
+}
+
+// ClearHourlyWindowStart clears the value of the "hourly_window_start" field.
+func (_u *UserSubscriptionUpdate) ClearHourlyWindowStart() *UserSubscriptionUpdate {
+	_u.mutation.ClearHourlyWindowStart()
+	return _u
+}
+
 // SetWeeklyWindowStart sets the "weekly_window_start" field.
 func (_u *UserSubscriptionUpdate) SetWeeklyWindowStart(v time.Time) *UserSubscriptionUpdate {
 	_u.mutation.SetWeeklyWindowStart(v)
@@ -205,6 +225,27 @@ func (_u *UserSubscriptionUpdate) SetNillableDailyUsageUsd(v *float64) *UserSubs
 // AddDailyUsageUsd adds value to the "daily_usage_usd" field.
 func (_u *UserSubscriptionUpdate) AddDailyUsageUsd(v float64) *UserSubscriptionUpdate {
 	_u.mutation.AddDailyUsageUsd(v)
+	return _u
+}
+
+// SetHourlyUsageUsd sets the "hourly_usage_usd" field.
+func (_u *UserSubscriptionUpdate) SetHourlyUsageUsd(v float64) *UserSubscriptionUpdate {
+	_u.mutation.ResetHourlyUsageUsd()
+	_u.mutation.SetHourlyUsageUsd(v)
+	return _u
+}
+
+// SetNillableHourlyUsageUsd sets the "hourly_usage_usd" field if the given value is not nil.
+func (_u *UserSubscriptionUpdate) SetNillableHourlyUsageUsd(v *float64) *UserSubscriptionUpdate {
+	if v != nil {
+		_u.SetHourlyUsageUsd(*v)
+	}
+	return _u
+}
+
+// AddHourlyUsageUsd adds value to the "hourly_usage_usd" field.
+func (_u *UserSubscriptionUpdate) AddHourlyUsageUsd(v float64) *UserSubscriptionUpdate {
+	_u.mutation.AddHourlyUsageUsd(v)
 	return _u
 }
 
@@ -486,6 +527,12 @@ func (_u *UserSubscriptionUpdate) sqlSave(ctx context.Context) (_node int, err e
 	if _u.mutation.DailyWindowStartCleared() {
 		_spec.ClearField(usersubscription.FieldDailyWindowStart, field.TypeTime)
 	}
+	if value, ok := _u.mutation.HourlyWindowStart(); ok {
+		_spec.SetField(usersubscription.FieldHourlyWindowStart, field.TypeTime, value)
+	}
+	if _u.mutation.HourlyWindowStartCleared() {
+		_spec.ClearField(usersubscription.FieldHourlyWindowStart, field.TypeTime)
+	}
 	if value, ok := _u.mutation.WeeklyWindowStart(); ok {
 		_spec.SetField(usersubscription.FieldWeeklyWindowStart, field.TypeTime, value)
 	}
@@ -503,6 +550,12 @@ func (_u *UserSubscriptionUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if value, ok := _u.mutation.AddedDailyUsageUsd(); ok {
 		_spec.AddField(usersubscription.FieldDailyUsageUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.HourlyUsageUsd(); ok {
+		_spec.SetField(usersubscription.FieldHourlyUsageUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedHourlyUsageUsd(); ok {
+		_spec.AddField(usersubscription.FieldHourlyUsageUsd, field.TypeFloat64, value)
 	}
 	if value, ok := _u.mutation.WeeklyUsageUsd(); ok {
 		_spec.SetField(usersubscription.FieldWeeklyUsageUsd, field.TypeFloat64, value)
@@ -793,6 +846,26 @@ func (_u *UserSubscriptionUpdateOne) ClearDailyWindowStart() *UserSubscriptionUp
 	return _u
 }
 
+// SetHourlyWindowStart sets the "hourly_window_start" field.
+func (_u *UserSubscriptionUpdateOne) SetHourlyWindowStart(v time.Time) *UserSubscriptionUpdateOne {
+	_u.mutation.SetHourlyWindowStart(v)
+	return _u
+}
+
+// SetNillableHourlyWindowStart sets the "hourly_window_start" field if the given value is not nil.
+func (_u *UserSubscriptionUpdateOne) SetNillableHourlyWindowStart(v *time.Time) *UserSubscriptionUpdateOne {
+	if v != nil {
+		_u.SetHourlyWindowStart(*v)
+	}
+	return _u
+}
+
+// ClearHourlyWindowStart clears the value of the "hourly_window_start" field.
+func (_u *UserSubscriptionUpdateOne) ClearHourlyWindowStart() *UserSubscriptionUpdateOne {
+	_u.mutation.ClearHourlyWindowStart()
+	return _u
+}
+
 // SetWeeklyWindowStart sets the "weekly_window_start" field.
 func (_u *UserSubscriptionUpdateOne) SetWeeklyWindowStart(v time.Time) *UserSubscriptionUpdateOne {
 	_u.mutation.SetWeeklyWindowStart(v)
@@ -851,6 +924,27 @@ func (_u *UserSubscriptionUpdateOne) SetNillableDailyUsageUsd(v *float64) *UserS
 // AddDailyUsageUsd adds value to the "daily_usage_usd" field.
 func (_u *UserSubscriptionUpdateOne) AddDailyUsageUsd(v float64) *UserSubscriptionUpdateOne {
 	_u.mutation.AddDailyUsageUsd(v)
+	return _u
+}
+
+// SetHourlyUsageUsd sets the "hourly_usage_usd" field.
+func (_u *UserSubscriptionUpdateOne) SetHourlyUsageUsd(v float64) *UserSubscriptionUpdateOne {
+	_u.mutation.ResetHourlyUsageUsd()
+	_u.mutation.SetHourlyUsageUsd(v)
+	return _u
+}
+
+// SetNillableHourlyUsageUsd sets the "hourly_usage_usd" field if the given value is not nil.
+func (_u *UserSubscriptionUpdateOne) SetNillableHourlyUsageUsd(v *float64) *UserSubscriptionUpdateOne {
+	if v != nil {
+		_u.SetHourlyUsageUsd(*v)
+	}
+	return _u
+}
+
+// AddHourlyUsageUsd adds value to the "hourly_usage_usd" field.
+func (_u *UserSubscriptionUpdateOne) AddHourlyUsageUsd(v float64) *UserSubscriptionUpdateOne {
+	_u.mutation.AddHourlyUsageUsd(v)
 	return _u
 }
 
@@ -1162,6 +1256,12 @@ func (_u *UserSubscriptionUpdateOne) sqlSave(ctx context.Context) (_node *UserSu
 	if _u.mutation.DailyWindowStartCleared() {
 		_spec.ClearField(usersubscription.FieldDailyWindowStart, field.TypeTime)
 	}
+	if value, ok := _u.mutation.HourlyWindowStart(); ok {
+		_spec.SetField(usersubscription.FieldHourlyWindowStart, field.TypeTime, value)
+	}
+	if _u.mutation.HourlyWindowStartCleared() {
+		_spec.ClearField(usersubscription.FieldHourlyWindowStart, field.TypeTime)
+	}
 	if value, ok := _u.mutation.WeeklyWindowStart(); ok {
 		_spec.SetField(usersubscription.FieldWeeklyWindowStart, field.TypeTime, value)
 	}
@@ -1179,6 +1279,12 @@ func (_u *UserSubscriptionUpdateOne) sqlSave(ctx context.Context) (_node *UserSu
 	}
 	if value, ok := _u.mutation.AddedDailyUsageUsd(); ok {
 		_spec.AddField(usersubscription.FieldDailyUsageUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.HourlyUsageUsd(); ok {
+		_spec.SetField(usersubscription.FieldHourlyUsageUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedHourlyUsageUsd(); ok {
+		_spec.AddField(usersubscription.FieldHourlyUsageUsd, field.TypeFloat64, value)
 	}
 	if value, ok := _u.mutation.WeeklyUsageUsd(); ok {
 		_spec.SetField(usersubscription.FieldWeeklyUsageUsd, field.TypeFloat64, value)

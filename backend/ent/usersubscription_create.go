@@ -119,6 +119,20 @@ func (_c *UserSubscriptionCreate) SetNillableDailyWindowStart(v *time.Time) *Use
 	return _c
 }
 
+// SetHourlyWindowStart sets the "hourly_window_start" field.
+func (_c *UserSubscriptionCreate) SetHourlyWindowStart(v time.Time) *UserSubscriptionCreate {
+	_c.mutation.SetHourlyWindowStart(v)
+	return _c
+}
+
+// SetNillableHourlyWindowStart sets the "hourly_window_start" field if the given value is not nil.
+func (_c *UserSubscriptionCreate) SetNillableHourlyWindowStart(v *time.Time) *UserSubscriptionCreate {
+	if v != nil {
+		_c.SetHourlyWindowStart(*v)
+	}
+	return _c
+}
+
 // SetWeeklyWindowStart sets the "weekly_window_start" field.
 func (_c *UserSubscriptionCreate) SetWeeklyWindowStart(v time.Time) *UserSubscriptionCreate {
 	_c.mutation.SetWeeklyWindowStart(v)
@@ -157,6 +171,20 @@ func (_c *UserSubscriptionCreate) SetDailyUsageUsd(v float64) *UserSubscriptionC
 func (_c *UserSubscriptionCreate) SetNillableDailyUsageUsd(v *float64) *UserSubscriptionCreate {
 	if v != nil {
 		_c.SetDailyUsageUsd(*v)
+	}
+	return _c
+}
+
+// SetHourlyUsageUsd sets the "hourly_usage_usd" field.
+func (_c *UserSubscriptionCreate) SetHourlyUsageUsd(v float64) *UserSubscriptionCreate {
+	_c.mutation.SetHourlyUsageUsd(v)
+	return _c
+}
+
+// SetNillableHourlyUsageUsd sets the "hourly_usage_usd" field if the given value is not nil.
+func (_c *UserSubscriptionCreate) SetNillableHourlyUsageUsd(v *float64) *UserSubscriptionCreate {
+	if v != nil {
+		_c.SetHourlyUsageUsd(*v)
 	}
 	return _c
 }
@@ -334,6 +362,10 @@ func (_c *UserSubscriptionCreate) defaults() error {
 		v := usersubscription.DefaultDailyUsageUsd
 		_c.mutation.SetDailyUsageUsd(v)
 	}
+	if _, ok := _c.mutation.HourlyUsageUsd(); !ok {
+		v := usersubscription.DefaultHourlyUsageUsd
+		_c.mutation.SetHourlyUsageUsd(v)
+	}
 	if _, ok := _c.mutation.WeeklyUsageUsd(); !ok {
 		v := usersubscription.DefaultWeeklyUsageUsd
 		_c.mutation.SetWeeklyUsageUsd(v)
@@ -382,6 +414,9 @@ func (_c *UserSubscriptionCreate) check() error {
 	}
 	if _, ok := _c.mutation.DailyUsageUsd(); !ok {
 		return &ValidationError{Name: "daily_usage_usd", err: errors.New(`ent: missing required field "UserSubscription.daily_usage_usd"`)}
+	}
+	if _, ok := _c.mutation.HourlyUsageUsd(); !ok {
+		return &ValidationError{Name: "hourly_usage_usd", err: errors.New(`ent: missing required field "UserSubscription.hourly_usage_usd"`)}
 	}
 	if _, ok := _c.mutation.WeeklyUsageUsd(); !ok {
 		return &ValidationError{Name: "weekly_usage_usd", err: errors.New(`ent: missing required field "UserSubscription.weekly_usage_usd"`)}
@@ -453,6 +488,10 @@ func (_c *UserSubscriptionCreate) createSpec() (*UserSubscription, *sqlgraph.Cre
 		_spec.SetField(usersubscription.FieldDailyWindowStart, field.TypeTime, value)
 		_node.DailyWindowStart = &value
 	}
+	if value, ok := _c.mutation.HourlyWindowStart(); ok {
+		_spec.SetField(usersubscription.FieldHourlyWindowStart, field.TypeTime, value)
+		_node.HourlyWindowStart = &value
+	}
 	if value, ok := _c.mutation.WeeklyWindowStart(); ok {
 		_spec.SetField(usersubscription.FieldWeeklyWindowStart, field.TypeTime, value)
 		_node.WeeklyWindowStart = &value
@@ -464,6 +503,10 @@ func (_c *UserSubscriptionCreate) createSpec() (*UserSubscription, *sqlgraph.Cre
 	if value, ok := _c.mutation.DailyUsageUsd(); ok {
 		_spec.SetField(usersubscription.FieldDailyUsageUsd, field.TypeFloat64, value)
 		_node.DailyUsageUsd = value
+	}
+	if value, ok := _c.mutation.HourlyUsageUsd(); ok {
+		_spec.SetField(usersubscription.FieldHourlyUsageUsd, field.TypeFloat64, value)
+		_node.HourlyUsageUsd = value
 	}
 	if value, ok := _c.mutation.WeeklyUsageUsd(); ok {
 		_spec.SetField(usersubscription.FieldWeeklyUsageUsd, field.TypeFloat64, value)
@@ -708,6 +751,24 @@ func (u *UserSubscriptionUpsert) ClearDailyWindowStart() *UserSubscriptionUpsert
 	return u
 }
 
+// SetHourlyWindowStart sets the "hourly_window_start" field.
+func (u *UserSubscriptionUpsert) SetHourlyWindowStart(v time.Time) *UserSubscriptionUpsert {
+	u.Set(usersubscription.FieldHourlyWindowStart, v)
+	return u
+}
+
+// UpdateHourlyWindowStart sets the "hourly_window_start" field to the value that was provided on create.
+func (u *UserSubscriptionUpsert) UpdateHourlyWindowStart() *UserSubscriptionUpsert {
+	u.SetExcluded(usersubscription.FieldHourlyWindowStart)
+	return u
+}
+
+// ClearHourlyWindowStart clears the value of the "hourly_window_start" field.
+func (u *UserSubscriptionUpsert) ClearHourlyWindowStart() *UserSubscriptionUpsert {
+	u.SetNull(usersubscription.FieldHourlyWindowStart)
+	return u
+}
+
 // SetWeeklyWindowStart sets the "weekly_window_start" field.
 func (u *UserSubscriptionUpsert) SetWeeklyWindowStart(v time.Time) *UserSubscriptionUpsert {
 	u.Set(usersubscription.FieldWeeklyWindowStart, v)
@@ -759,6 +820,24 @@ func (u *UserSubscriptionUpsert) UpdateDailyUsageUsd() *UserSubscriptionUpsert {
 // AddDailyUsageUsd adds v to the "daily_usage_usd" field.
 func (u *UserSubscriptionUpsert) AddDailyUsageUsd(v float64) *UserSubscriptionUpsert {
 	u.Add(usersubscription.FieldDailyUsageUsd, v)
+	return u
+}
+
+// SetHourlyUsageUsd sets the "hourly_usage_usd" field.
+func (u *UserSubscriptionUpsert) SetHourlyUsageUsd(v float64) *UserSubscriptionUpsert {
+	u.Set(usersubscription.FieldHourlyUsageUsd, v)
+	return u
+}
+
+// UpdateHourlyUsageUsd sets the "hourly_usage_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsert) UpdateHourlyUsageUsd() *UserSubscriptionUpsert {
+	u.SetExcluded(usersubscription.FieldHourlyUsageUsd)
+	return u
+}
+
+// AddHourlyUsageUsd adds v to the "hourly_usage_usd" field.
+func (u *UserSubscriptionUpsert) AddHourlyUsageUsd(v float64) *UserSubscriptionUpsert {
+	u.Add(usersubscription.FieldHourlyUsageUsd, v)
 	return u
 }
 
@@ -1017,6 +1096,27 @@ func (u *UserSubscriptionUpsertOne) ClearDailyWindowStart() *UserSubscriptionUps
 	})
 }
 
+// SetHourlyWindowStart sets the "hourly_window_start" field.
+func (u *UserSubscriptionUpsertOne) SetHourlyWindowStart(v time.Time) *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetHourlyWindowStart(v)
+	})
+}
+
+// UpdateHourlyWindowStart sets the "hourly_window_start" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertOne) UpdateHourlyWindowStart() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateHourlyWindowStart()
+	})
+}
+
+// ClearHourlyWindowStart clears the value of the "hourly_window_start" field.
+func (u *UserSubscriptionUpsertOne) ClearHourlyWindowStart() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearHourlyWindowStart()
+	})
+}
+
 // SetWeeklyWindowStart sets the "weekly_window_start" field.
 func (u *UserSubscriptionUpsertOne) SetWeeklyWindowStart(v time.Time) *UserSubscriptionUpsertOne {
 	return u.Update(func(s *UserSubscriptionUpsert) {
@@ -1077,6 +1177,27 @@ func (u *UserSubscriptionUpsertOne) AddDailyUsageUsd(v float64) *UserSubscriptio
 func (u *UserSubscriptionUpsertOne) UpdateDailyUsageUsd() *UserSubscriptionUpsertOne {
 	return u.Update(func(s *UserSubscriptionUpsert) {
 		s.UpdateDailyUsageUsd()
+	})
+}
+
+// SetHourlyUsageUsd sets the "hourly_usage_usd" field.
+func (u *UserSubscriptionUpsertOne) SetHourlyUsageUsd(v float64) *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetHourlyUsageUsd(v)
+	})
+}
+
+// AddHourlyUsageUsd adds v to the "hourly_usage_usd" field.
+func (u *UserSubscriptionUpsertOne) AddHourlyUsageUsd(v float64) *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.AddHourlyUsageUsd(v)
+	})
+}
+
+// UpdateHourlyUsageUsd sets the "hourly_usage_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertOne) UpdateHourlyUsageUsd() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateHourlyUsageUsd()
 	})
 }
 
@@ -1515,6 +1636,27 @@ func (u *UserSubscriptionUpsertBulk) ClearDailyWindowStart() *UserSubscriptionUp
 	})
 }
 
+// SetHourlyWindowStart sets the "hourly_window_start" field.
+func (u *UserSubscriptionUpsertBulk) SetHourlyWindowStart(v time.Time) *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetHourlyWindowStart(v)
+	})
+}
+
+// UpdateHourlyWindowStart sets the "hourly_window_start" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertBulk) UpdateHourlyWindowStart() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateHourlyWindowStart()
+	})
+}
+
+// ClearHourlyWindowStart clears the value of the "hourly_window_start" field.
+func (u *UserSubscriptionUpsertBulk) ClearHourlyWindowStart() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearHourlyWindowStart()
+	})
+}
+
 // SetWeeklyWindowStart sets the "weekly_window_start" field.
 func (u *UserSubscriptionUpsertBulk) SetWeeklyWindowStart(v time.Time) *UserSubscriptionUpsertBulk {
 	return u.Update(func(s *UserSubscriptionUpsert) {
@@ -1575,6 +1717,27 @@ func (u *UserSubscriptionUpsertBulk) AddDailyUsageUsd(v float64) *UserSubscripti
 func (u *UserSubscriptionUpsertBulk) UpdateDailyUsageUsd() *UserSubscriptionUpsertBulk {
 	return u.Update(func(s *UserSubscriptionUpsert) {
 		s.UpdateDailyUsageUsd()
+	})
+}
+
+// SetHourlyUsageUsd sets the "hourly_usage_usd" field.
+func (u *UserSubscriptionUpsertBulk) SetHourlyUsageUsd(v float64) *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetHourlyUsageUsd(v)
+	})
+}
+
+// AddHourlyUsageUsd adds v to the "hourly_usage_usd" field.
+func (u *UserSubscriptionUpsertBulk) AddHourlyUsageUsd(v float64) *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.AddHourlyUsageUsd(v)
+	})
+}
+
+// UpdateHourlyUsageUsd sets the "hourly_usage_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertBulk) UpdateHourlyUsageUsd() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateHourlyUsageUsd()
 	})
 }
 

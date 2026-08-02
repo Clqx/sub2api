@@ -245,6 +245,20 @@ func (_c *GroupCreate) SetNillableDailyLimitUsd(v *float64) *GroupCreate {
 	return _c
 }
 
+// SetHourlyLimitUsd sets the "hourly_limit_usd" field.
+func (_c *GroupCreate) SetHourlyLimitUsd(v float64) *GroupCreate {
+	_c.mutation.SetHourlyLimitUsd(v)
+	return _c
+}
+
+// SetNillableHourlyLimitUsd sets the "hourly_limit_usd" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableHourlyLimitUsd(v *float64) *GroupCreate {
+	if v != nil {
+		_c.SetHourlyLimitUsd(*v)
+	}
+	return _c
+}
+
 // SetWeeklyLimitUsd sets the "weekly_limit_usd" field.
 func (_c *GroupCreate) SetWeeklyLimitUsd(v float64) *GroupCreate {
 	_c.mutation.SetWeeklyLimitUsd(v)
@@ -1247,6 +1261,10 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 		_spec.SetField(group.FieldDailyLimitUsd, field.TypeFloat64, value)
 		_node.DailyLimitUsd = &value
 	}
+	if value, ok := _c.mutation.HourlyLimitUsd(); ok {
+		_spec.SetField(group.FieldHourlyLimitUsd, field.TypeFloat64, value)
+		_node.HourlyLimitUsd = &value
+	}
 	if value, ok := _c.mutation.WeeklyLimitUsd(); ok {
 		_spec.SetField(group.FieldWeeklyLimitUsd, field.TypeFloat64, value)
 		_node.WeeklyLimitUsd = &value
@@ -1748,6 +1766,30 @@ func (u *GroupUpsert) AddDailyLimitUsd(v float64) *GroupUpsert {
 // ClearDailyLimitUsd clears the value of the "daily_limit_usd" field.
 func (u *GroupUpsert) ClearDailyLimitUsd() *GroupUpsert {
 	u.SetNull(group.FieldDailyLimitUsd)
+	return u
+}
+
+// SetHourlyLimitUsd sets the "hourly_limit_usd" field.
+func (u *GroupUpsert) SetHourlyLimitUsd(v float64) *GroupUpsert {
+	u.Set(group.FieldHourlyLimitUsd, v)
+	return u
+}
+
+// UpdateHourlyLimitUsd sets the "hourly_limit_usd" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateHourlyLimitUsd() *GroupUpsert {
+	u.SetExcluded(group.FieldHourlyLimitUsd)
+	return u
+}
+
+// AddHourlyLimitUsd adds v to the "hourly_limit_usd" field.
+func (u *GroupUpsert) AddHourlyLimitUsd(v float64) *GroupUpsert {
+	u.Add(group.FieldHourlyLimitUsd, v)
+	return u
+}
+
+// ClearHourlyLimitUsd clears the value of the "hourly_limit_usd" field.
+func (u *GroupUpsert) ClearHourlyLimitUsd() *GroupUpsert {
+	u.SetNull(group.FieldHourlyLimitUsd)
 	return u
 }
 
@@ -2646,6 +2688,34 @@ func (u *GroupUpsertOne) UpdateDailyLimitUsd() *GroupUpsertOne {
 func (u *GroupUpsertOne) ClearDailyLimitUsd() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.ClearDailyLimitUsd()
+	})
+}
+
+// SetHourlyLimitUsd sets the "hourly_limit_usd" field.
+func (u *GroupUpsertOne) SetHourlyLimitUsd(v float64) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetHourlyLimitUsd(v)
+	})
+}
+
+// AddHourlyLimitUsd adds v to the "hourly_limit_usd" field.
+func (u *GroupUpsertOne) AddHourlyLimitUsd(v float64) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.AddHourlyLimitUsd(v)
+	})
+}
+
+// UpdateHourlyLimitUsd sets the "hourly_limit_usd" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateHourlyLimitUsd() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateHourlyLimitUsd()
+	})
+}
+
+// ClearHourlyLimitUsd clears the value of the "hourly_limit_usd" field.
+func (u *GroupUpsertOne) ClearHourlyLimitUsd() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.ClearHourlyLimitUsd()
 	})
 }
 
@@ -3812,6 +3882,34 @@ func (u *GroupUpsertBulk) UpdateDailyLimitUsd() *GroupUpsertBulk {
 func (u *GroupUpsertBulk) ClearDailyLimitUsd() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.ClearDailyLimitUsd()
+	})
+}
+
+// SetHourlyLimitUsd sets the "hourly_limit_usd" field.
+func (u *GroupUpsertBulk) SetHourlyLimitUsd(v float64) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetHourlyLimitUsd(v)
+	})
+}
+
+// AddHourlyLimitUsd adds v to the "hourly_limit_usd" field.
+func (u *GroupUpsertBulk) AddHourlyLimitUsd(v float64) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.AddHourlyLimitUsd(v)
+	})
+}
+
+// UpdateHourlyLimitUsd sets the "hourly_limit_usd" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateHourlyLimitUsd() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateHourlyLimitUsd()
+	})
+}
+
+// ClearHourlyLimitUsd clears the value of the "hourly_limit_usd" field.
+func (u *GroupUpsertBulk) ClearHourlyLimitUsd() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.ClearHourlyLimitUsd()
 	})
 }
 

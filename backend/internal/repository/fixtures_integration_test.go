@@ -93,6 +93,9 @@ func mustCreateGroup(t *testing.T, client *dbent.Client, g *service.Group) *serv
 	if g.Description != "" {
 		create.SetDescription(g.Description)
 	}
+	if g.HourlyLimitUSD != nil {
+		create.SetHourlyLimitUsd(*g.HourlyLimitUSD)
+	}
 	if g.DailyLimitUSD != nil {
 		create.SetDailyLimitUsd(*g.DailyLimitUSD)
 	}

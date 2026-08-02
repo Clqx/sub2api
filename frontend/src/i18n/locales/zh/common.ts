@@ -197,6 +197,7 @@ export default {
     contentModeration: '内容审核',
     promptAudit: '提示词审计',
     auditLogs: '操作日志',
+    loginSecurity: '登录验证 IP',
   },
 
   // Auth

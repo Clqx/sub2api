@@ -176,7 +176,7 @@ function renderProducts(items) {
           : '<button class="secondary-button product-buy" type="button" disabled>暂未开放</button>'}
       </div>
     `
-    const icon = $('img', article)
+    const icon = article.querySelector('img')
     if (icon) icon.addEventListener('error', () => icon.remove(), { once: true })
     productList.append(article)
   }

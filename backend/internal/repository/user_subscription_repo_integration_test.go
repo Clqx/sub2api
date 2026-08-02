@@ -428,6 +428,7 @@ func (s *UserSubscriptionRepoSuite) TestIncrementUsage() {
 
 	got, err := s.repo.GetByID(s.ctx, sub.ID)
 	s.Require().NoError(err)
+	s.Require().InDelta(1.25, got.HourlyUsageUSD, 1e-6)
 	s.Require().InDelta(1.25, got.DailyUsageUSD, 1e-6)
 	s.Require().InDelta(1.25, got.WeeklyUsageUSD, 1e-6)
 	s.Require().InDelta(1.25, got.MonthlyUsageUSD, 1e-6)
@@ -461,6 +462,22 @@ func (s *UserSubscriptionRepoSuite) TestActivateWindows() {
 	s.Require().NotNil(got.WeeklyWindowStart)
 	s.Require().NotNil(got.MonthlyWindowStart)
 	s.Require().WithinDuration(activateAt, *got.DailyWindowStart, time.Microsecond)
+}
+
+func (s *UserSubscriptionRepoSuite) TestActivateWindowsWithHourly() {
+	user := s.mustCreateUser("activate-hourly@test.com", service.RoleUser)
+	group := s.mustCreateGroup("g-activate-hourly")
+	sub := s.mustCreateSubscription(user.ID, group.ID, nil)
+
+	hourlyStart := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	dailyStart := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.Require().NoError(s.repo.ActivateWindowsWithHourly(s.ctx, sub.ID, hourlyStart, dailyStart))
+
+	got, err := s.repo.GetByID(s.ctx, sub.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(got.HourlyWindowStart)
+	s.Require().WithinDuration(hourlyStart, *got.HourlyWindowStart, time.Microsecond)
+	s.Require().WithinDuration(dailyStart, *got.DailyWindowStart, time.Microsecond)
 }
 
 func (s *UserSubscriptionRepoSuite) TestResetDailyUsage() {

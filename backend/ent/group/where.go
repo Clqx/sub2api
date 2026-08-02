@@ -135,6 +135,11 @@ func DailyLimitUsd(v float64) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldDailyLimitUsd, v))
 }
 
+// HourlyLimitUsd applies equality check predicate on the "hourly_limit_usd" field. It's identical to HourlyLimitUsdEQ.
+func HourlyLimitUsd(v float64) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldHourlyLimitUsd, v))
+}
+
 // WeeklyLimitUsd applies equality check predicate on the "weekly_limit_usd" field. It's identical to WeeklyLimitUsdEQ.
 func WeeklyLimitUsd(v float64) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldWeeklyLimitUsd, v))
@@ -1108,6 +1113,56 @@ func DailyLimitUsdIsNil() predicate.Group {
 // DailyLimitUsdNotNil applies the NotNil predicate on the "daily_limit_usd" field.
 func DailyLimitUsdNotNil() predicate.Group {
 	return predicate.Group(sql.FieldNotNull(FieldDailyLimitUsd))
+}
+
+// HourlyLimitUsdEQ applies the EQ predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdEQ(v float64) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldHourlyLimitUsd, v))
+}
+
+// HourlyLimitUsdNEQ applies the NEQ predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdNEQ(v float64) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldHourlyLimitUsd, v))
+}
+
+// HourlyLimitUsdIn applies the In predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdIn(vs ...float64) predicate.Group {
+	return predicate.Group(sql.FieldIn(FieldHourlyLimitUsd, vs...))
+}
+
+// HourlyLimitUsdNotIn applies the NotIn predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdNotIn(vs ...float64) predicate.Group {
+	return predicate.Group(sql.FieldNotIn(FieldHourlyLimitUsd, vs...))
+}
+
+// HourlyLimitUsdGT applies the GT predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdGT(v float64) predicate.Group {
+	return predicate.Group(sql.FieldGT(FieldHourlyLimitUsd, v))
+}
+
+// HourlyLimitUsdGTE applies the GTE predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdGTE(v float64) predicate.Group {
+	return predicate.Group(sql.FieldGTE(FieldHourlyLimitUsd, v))
+}
+
+// HourlyLimitUsdLT applies the LT predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdLT(v float64) predicate.Group {
+	return predicate.Group(sql.FieldLT(FieldHourlyLimitUsd, v))
+}
+
+// HourlyLimitUsdLTE applies the LTE predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdLTE(v float64) predicate.Group {
+	return predicate.Group(sql.FieldLTE(FieldHourlyLimitUsd, v))
+}
+
+// HourlyLimitUsdIsNil applies the IsNil predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdIsNil() predicate.Group {
+	return predicate.Group(sql.FieldIsNull(FieldHourlyLimitUsd))
+}
+
+// HourlyLimitUsdNotNil applies the NotNil predicate on the "hourly_limit_usd" field.
+func HourlyLimitUsdNotNil() predicate.Group {
+	return predicate.Group(sql.FieldNotNull(FieldHourlyLimitUsd))
 }
 
 // WeeklyLimitUsdEQ applies the EQ predicate on the "weekly_limit_usd" field.

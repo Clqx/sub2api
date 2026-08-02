@@ -37,3 +37,11 @@ type UserSubscriptionRepository interface {
 
 	BatchUpdateExpiredStatus(ctx context.Context) (int64, error)
 }
+
+// HourlyUserSubscriptionRepository extends the historical repository contract
+// without breaking alternate implementations that only support daily/weekly/monthly windows.
+type HourlyUserSubscriptionRepository interface {
+	ActivateWindowsWithHourly(ctx context.Context, id int64, hourlyStart, dailyStart time.Time) error
+	ResetUsageWindowsWithHourly(ctx context.Context, id int64, resetHourly, resetDaily, resetWeekly, resetMonthly bool, hourlyStart, dailyStart time.Time) error
+	ResetHourlyUsage(ctx context.Context, id int64, expectedWindowStart *time.Time, newWindowStart time.Time) error
+}

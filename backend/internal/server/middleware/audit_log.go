@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	basemiddleware "github.com/Wei-Shaw/sub2api/internal/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -122,25 +123,26 @@ var auditSensitiveReads = map[string]string{
 
 // auditActionOverrides 变更类请求的动作名精确映射（未命中时自动推导）。
 var auditActionOverrides = map[string]string{
-	"POST /api/v1/auth/login":                                 service.AuditActionLogin,
-	"POST /api/v1/auth/login/2fa":                             service.AuditActionLogin2FA,
-	"POST /api/v1/auth/register":                              service.AuditActionRegister,
-	"POST /api/v1/auth/refresh":                               service.AuditActionTokenRefresh,
-	"POST /api/v1/user/totp/step-up":                          service.AuditActionStepUpVerify,
-	"POST /api/v1/admin/audit-logs/clear":                     service.AuditActionAuditLogClear,
-	"POST /api/v1/admin/accounts/data":                        "admin.accounts.import",
-	"POST /api/v1/admin/backups":                              "admin.backups.create",
-	"POST /api/v1/admin/backups/:id/restore":                  "admin.backups.restore",
-	"DELETE /api/v1/admin/backups/:id":                        "admin.backups.delete",
-	"PUT /api/v1/admin/backups/s3-config":                     "admin.backups.s3_config.update",
-	"POST /api/v1/admin/settings/admin-api-key/regenerate":    "admin.admin_api_key.regenerate",
-	"DELETE /api/v1/admin/settings/admin-api-key":             "admin.admin_api_key.delete",
-	"PUT /api/v1/admin/prompt-audit/config":                   "admin.prompt_audit.config.update",
-	"POST /api/v1/admin/prompt-audit/endpoints/probe":         "admin.prompt_audit.endpoint.probe",
-	"DELETE /api/v1/admin/prompt-audit/events/:id":            "admin.prompt_audit.event.delete",
-	"POST /api/v1/admin/prompt-audit/events/batch-delete":     "admin.prompt_audit.events.batch_delete",
-	"POST /api/v1/admin/prompt-audit/events/delete-preview":   "admin.prompt_audit.events.delete_preview",
-	"POST /api/v1/admin/prompt-audit/events/delete-by-filter": "admin.prompt_audit.events.filter_delete",
+	"POST /api/v1/auth/login":                                  service.AuditActionLogin,
+	"POST /api/v1/auth/login/2fa":                              service.AuditActionLogin2FA,
+	"POST /api/v1/auth/register":                               service.AuditActionRegister,
+	"POST /api/v1/auth/refresh":                                service.AuditActionTokenRefresh,
+	"POST /api/v1/user/totp/step-up":                           service.AuditActionStepUpVerify,
+	"POST /api/v1/admin/audit-logs/clear":                      service.AuditActionAuditLogClear,
+	"POST /api/v1/admin/login-security/ip-records/:id/unblock": "admin.login_security.ip.unblock",
+	"POST /api/v1/admin/accounts/data":                         "admin.accounts.import",
+	"POST /api/v1/admin/backups":                               "admin.backups.create",
+	"POST /api/v1/admin/backups/:id/restore":                   "admin.backups.restore",
+	"DELETE /api/v1/admin/backups/:id":                         "admin.backups.delete",
+	"PUT /api/v1/admin/backups/s3-config":                      "admin.backups.s3_config.update",
+	"POST /api/v1/admin/settings/admin-api-key/regenerate":     "admin.admin_api_key.regenerate",
+	"DELETE /api/v1/admin/settings/admin-api-key":              "admin.admin_api_key.delete",
+	"PUT /api/v1/admin/prompt-audit/config":                    "admin.prompt_audit.config.update",
+	"POST /api/v1/admin/prompt-audit/endpoints/probe":          "admin.prompt_audit.endpoint.probe",
+	"DELETE /api/v1/admin/prompt-audit/events/:id":             "admin.prompt_audit.event.delete",
+	"POST /api/v1/admin/prompt-audit/events/batch-delete":      "admin.prompt_audit.events.batch_delete",
+	"POST /api/v1/admin/prompt-audit/events/delete-preview":    "admin.prompt_audit.events.delete_preview",
+	"POST /api/v1/admin/prompt-audit/events/delete-by-filter":  "admin.prompt_audit.events.filter_delete",
 }
 
 // auditBodyOmittedRoutes 请求体几乎整体由凭证构成的路由（如整块粘贴 auth JSON 的导入接口）。
@@ -211,6 +213,12 @@ func NewAuditLogMiddleware(auditService *service.AuditLogService) AuditLogMiddle
 		status := c.Writer.Status()
 		// token 刷新成功属于高频常规操作，只记录失败（潜在攻击信号）。
 		if routeKey == "POST /api/v1/auth/refresh" && status < 400 {
+			return
+		}
+		// 登录扫描命中现有 IP 限流后会持续产生相同的 429。保留首次 429 作为
+		// 安全信号，后续重复拒绝不再写入操作日志；窗口内实际处理的登录尝试
+		// 以及成功登录仍然完整留痕。
+		if routeKey == "POST /api/v1/auth/login" && basemiddleware.IsRepeatedRateLimitRejection(c) {
 			return
 		}
 

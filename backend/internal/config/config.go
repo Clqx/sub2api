@@ -1510,7 +1510,10 @@ type TotpConfig struct {
 }
 
 type TurnstileConfig struct {
-	Required bool `mapstructure:"required"`
+	Required             bool `mapstructure:"required"`
+	FailureThreshold     int  `mapstructure:"failure_threshold"`
+	FailureWindowMinutes int  `mapstructure:"failure_window_minutes"`
+	BlockMinutes         int  `mapstructure:"block_minutes"`
 }
 
 type DefaultConfig struct {
@@ -1912,6 +1915,9 @@ func setDefaults() {
 
 	// Turnstile
 	viper.SetDefault("turnstile.required", false)
+	viper.SetDefault("turnstile.failure_threshold", 5)
+	viper.SetDefault("turnstile.failure_window_minutes", 10)
+	viper.SetDefault("turnstile.block_minutes", 1440)
 
 	// LinuxDo Connect OAuth 登录
 	viper.SetDefault("linuxdo_connect.enabled", false)

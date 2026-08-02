@@ -40,7 +40,7 @@ func newAuthServiceForRegisterTurnstileTest(settings map[string]string, verifier
 	}
 
 	settingService := NewSettingService(&settingRepoStub{values: settings}, cfg)
-	turnstileService := NewTurnstileService(settingService, verifier)
+	turnstileService := NewTurnstileService(settingService, verifier, nil, cfg)
 
 	return NewAuthService(
 		nil, // entClient

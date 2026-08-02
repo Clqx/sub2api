@@ -610,6 +610,7 @@ export default {
       allStatus: '全部状态',
       allGroups: '全部分组',
       allPlatforms: '全部平台',
+      hourly: '每小时',
       daily: '每日',
       weekly: '每周',
       monthly: '每月',
@@ -662,7 +663,7 @@ export default {
       restore: '恢复',
       resetQuota: '重置配额',
       resetQuotaTitle: '重置用量配额',
-      resetQuotaConfirm: "确定要重置 '{user}' 的每日、每周和每月用量配额吗？用量将归零并从今天开始重新计算。",
+      resetQuotaConfirm: "确定要重置 '{user}' 的每小时、每日、每周和每月用量配额吗？用量将归零并从当前时段重新计算。",
       quotaResetSuccess: '配额重置成功',
       failedToResetQuota: '重置配额失败',
       noSubscriptionsYet: '暂无订阅',
@@ -685,12 +686,12 @@ export default {
       restoreConfirm: "确定要恢复 '{user}' 的订阅吗？如果原订阅已过期，恢复后将显示为已过期。",
       guide: {
         title: '订阅管理教程',
-        subtitle: '订阅模式允许你按时间周期为用户分配使用额度，支持日/周/月配额限制。按照以下步骤即可完成配置。',
+        subtitle: '订阅模式允许你按时间周期为用户分配使用额度，支持小时/日/周/月配额限制。按照以下步骤即可完成配置。',
         showGuide: '使用指南',
         step1: {
           title: '创建订阅分组',
           line1: '前往「分组管理」页面，点击「创建分组」',
-          line2: '将计费类型设为「订阅」，配置日/周/月额度限制',
+          line2: '将计费类型设为「订阅」，配置小时/日/周/月额度限制',
           line3: '保存分组，确保状态为「正常」',
           link: '前往分组管理'
         },
@@ -707,7 +708,7 @@ export default {
           adjust: '调整',
           adjustDesc: '延长或缩短订阅有效期',
           resetQuota: '重置配额',
-          resetQuotaDesc: '将日/周/月用量归零，重新开始计算',
+          resetQuotaDesc: '将小时/日/周/月用量归零，重新开始计算',
           revoke: '撤销',
           revokeDesc: '立即终止该用户的订阅，可在已撤销列表中恢复'
         },

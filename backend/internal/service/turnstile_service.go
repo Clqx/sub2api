@@ -2,8 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
@@ -12,6 +17,7 @@ var (
 	ErrTurnstileVerificationFailed = infraerrors.BadRequest("TURNSTILE_VERIFICATION_FAILED", "turnstile verification failed")
 	ErrTurnstileNotConfigured      = infraerrors.ServiceUnavailable("TURNSTILE_NOT_CONFIGURED", "turnstile not configured")
 	ErrTurnstileInvalidSecretKey   = infraerrors.BadRequest("TURNSTILE_INVALID_SECRET_KEY", "invalid turnstile secret key")
+	ErrLoginCaptchaIPBlocked       = infraerrors.TooManyRequests("LOGIN_CAPTCHA_IP_BLOCKED", "too many failed login verifications; this IP is temporarily blocked")
 )
 
 // TurnstileVerifier 验证 Turnstile token 的接口
@@ -23,6 +29,11 @@ type TurnstileVerifier interface {
 type TurnstileService struct {
 	settingService *SettingService
 	verifier       TurnstileVerifier
+	ipRepository   LoginCaptchaIPRepository
+	threshold      int
+	failureWindow  time.Duration
+	blockDuration  time.Duration
+	now            func() time.Time
 }
 
 // TurnstileVerifyResponse Cloudflare Turnstile 验证响应
@@ -36,11 +47,101 @@ type TurnstileVerifyResponse struct {
 }
 
 // NewTurnstileService 创建 Turnstile 服务实例
-func NewTurnstileService(settingService *SettingService, verifier TurnstileVerifier) *TurnstileService {
+func NewTurnstileService(settingService *SettingService, verifier TurnstileVerifier, ipRepository LoginCaptchaIPRepository, cfg *config.Config) *TurnstileService {
+	threshold := 5
+	failureWindow := 10 * time.Minute
+	blockDuration := 24 * time.Hour
+	if cfg != nil {
+		if cfg.Turnstile.FailureThreshold > 0 {
+			threshold = cfg.Turnstile.FailureThreshold
+		}
+		if cfg.Turnstile.FailureWindowMinutes > 0 {
+			failureWindow = time.Duration(cfg.Turnstile.FailureWindowMinutes) * time.Minute
+		}
+		if cfg.Turnstile.BlockMinutes > 0 {
+			blockDuration = time.Duration(cfg.Turnstile.BlockMinutes) * time.Minute
+		}
+	}
 	return &TurnstileService{
 		settingService: settingService,
 		verifier:       verifier,
+		ipRepository:   ipRepository,
+		threshold:      threshold,
+		failureWindow:  failureWindow,
+		blockDuration:  blockDuration,
+		now:            time.Now,
 	}
+}
+
+// VerifyLoginToken applies persistent IP protection around login challenges.
+// Only challenge failures count; provider and configuration errors do not.
+func (s *TurnstileService) VerifyLoginToken(ctx context.Context, token, remoteIP, userAgent string) error {
+	if s == nil {
+		return ErrTurnstileNotConfigured
+	}
+	if !s.IsEnabled(ctx) {
+		return nil
+	}
+	remoteIP = strings.TrimSpace(remoteIP)
+	now := s.now().UTC()
+	if s.ipRepository != nil && remoteIP != "" {
+		record, err := s.ipRepository.GetBlocked(ctx, remoteIP, now)
+		if err != nil {
+			return fmt.Errorf("check login captcha IP block: %w", err)
+		}
+		if record != nil && record.BlockedUntil != nil && record.BlockedUntil.After(now) {
+			return loginCaptchaBlockedError(record.BlockedUntil.Sub(now), true)
+		}
+	}
+
+	err := s.VerifyToken(ctx, token, remoteIP)
+	if err != nil {
+		if !errors.Is(err, ErrTurnstileVerificationFailed) || s.ipRepository == nil || remoteIP == "" {
+			return err
+		}
+		record, recordErr := s.ipRepository.RecordFailure(ctx, remoteIP, userAgent, now, s.threshold, s.failureWindow, s.blockDuration)
+		if recordErr != nil {
+			logger.LegacyPrintf("service.turnstile", "[Turnstile] Failed to persist login verification failure for IP %s: %v", remoteIP, recordErr)
+			return err
+		}
+		if record != nil && record.BlockedUntil != nil && record.BlockedUntil.After(now) {
+			return loginCaptchaBlockedError(record.BlockedUntil.Sub(now), false)
+		}
+		return err
+	}
+
+	if s.ipRepository != nil && remoteIP != "" {
+		if err := s.ipRepository.RecordSuccess(ctx, remoteIP, now); err != nil {
+			logger.LegacyPrintf("service.turnstile", "[Turnstile] Failed to persist login verification success for IP %s: %v", remoteIP, err)
+		}
+	}
+	return nil
+}
+
+func loginCaptchaBlockedError(retryAfter time.Duration, repeated bool) error {
+	seconds := int64(retryAfter.Round(time.Second) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	metadata := map[string]string{"retry_after_seconds": strconv.FormatInt(seconds, 10)}
+	if repeated {
+		metadata["repeated"] = "true"
+	}
+	return ErrLoginCaptchaIPBlocked.WithMetadata(metadata)
+}
+
+func (s *TurnstileService) ListLoginCaptchaIPs(ctx context.Context, filter *LoginCaptchaIPFilter) (*LoginCaptchaIPList, error) {
+	if s == nil || s.ipRepository == nil {
+		return nil, fmt.Errorf("login captcha IP repository unavailable")
+	}
+	return s.ipRepository.List(ctx, filter, s.now().UTC(), s.failureWindow)
+}
+
+func (s *TurnstileService) UnblockLoginCaptchaIP(ctx context.Context, id, actorUserID int64, note string) (*LoginCaptchaIPRecord, error) {
+	if s == nil || s.ipRepository == nil {
+		return nil, fmt.Errorf("login captcha IP repository unavailable")
+	}
+	return s.ipRepository.Unblock(ctx, id, actorUserID, strings.TrimSpace(note), s.now().UTC())
 }
 
 // VerifyToken 验证 Turnstile token

@@ -1154,6 +1154,11 @@ turnstile:
   # Require Turnstile in release mode (when enabled, login/register will fail if not configured)
   # 在 release 模式下要求 Turnstile 验证（启用后，若未配置则登录/注册会失败）
   required: false
+  # Failed login challenge policy: 5 failures within 10 minutes blocks the IP for 24 hours.
+  # 登录验证码失败策略：10 分钟内失败 5 次，自动封禁该 IP 24 小时。
+  failure_threshold: 5
+  failure_window_minutes: 10
+  block_minutes: 1440
 
 # =============================================================================
 # Gemini OAuth (Required for Gemini accounts)

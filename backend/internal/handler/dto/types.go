@@ -97,6 +97,7 @@ type Group struct {
 	Status         string  `json:"status"`
 
 	SubscriptionType string   `json:"subscription_type"`
+	HourlyLimitUSD   *float64 `json:"hourly_limit_usd"`
 	DailyLimitUSD    *float64 `json:"daily_limit_usd"`
 	WeeklyLimitUSD   *float64 `json:"weekly_limit_usd"`
 	MonthlyLimitUSD  *float64 `json:"monthly_limit_usd"`
@@ -619,10 +620,12 @@ type UserSubscription struct {
 	ExpiresAt time.Time `json:"expires_at"`
 	Status    string    `json:"status"`
 
+	HourlyWindowStart  *time.Time `json:"hourly_window_start"`
 	DailyWindowStart   *time.Time `json:"daily_window_start"`
 	WeeklyWindowStart  *time.Time `json:"weekly_window_start"`
 	MonthlyWindowStart *time.Time `json:"monthly_window_start"`
 
+	HourlyUsageUSD  float64 `json:"hourly_usage_usd"`
 	DailyUsageUSD   float64 `json:"daily_usage_usd"`
 	WeeklyUsageUSD  float64 `json:"weekly_usage_usd"`
 	MonthlyUsageUSD float64 `json:"monthly_usage_usd"`

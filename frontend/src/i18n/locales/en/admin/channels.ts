@@ -610,6 +610,7 @@ export default {
       allStatus: 'All Status',
       allGroups: 'All Groups',
       allPlatforms: 'All Platforms',
+      hourly: 'Hourly',
       daily: 'Daily',
       weekly: 'Weekly',
       monthly: 'Monthly',
@@ -662,7 +663,7 @@ export default {
       restore: 'Restore',
       resetQuota: 'Reset Quota',
       resetQuotaTitle: 'Reset Usage Quota',
-      resetQuotaConfirm: "Reset the daily, weekly, and monthly usage quota for '{user}'? Usage will be zeroed and windows restarted from today.",
+      resetQuotaConfirm: "Reset the hourly, daily, weekly, and monthly usage quota for '{user}'? Usage will be zeroed and windows restarted now.",
       quotaResetSuccess: 'Quota reset successfully',
       failedToResetQuota: 'Failed to reset quota',
       noSubscriptionsYet: 'No subscriptions yet',
@@ -687,12 +688,12 @@ export default {
         "Restore the subscription for '{user}'? If the original subscription has expired, it will be restored as expired.",
       guide: {
         title: 'Subscription Management Guide',
-        subtitle: 'Subscription mode lets you assign time-based usage quotas to users, with daily/weekly/monthly limits. Follow these steps to get started.',
+        subtitle: 'Subscription mode lets you assign time-based usage quotas to users, with hourly/daily/weekly/monthly limits. Follow these steps to get started.',
         showGuide: 'Usage Guide',
         step1: {
           title: 'Create a Subscription Group',
           line1: 'Go to "Group Management" page, click "Create Group"',
-          line2: 'Set billing type to "Subscription", configure daily/weekly/monthly quota limits',
+          line2: 'Set billing type to "Subscription", configure hourly/daily/weekly/monthly quota limits',
           line3: 'Save the group and ensure its status is "Active"',
           link: 'Go to Group Management'
         },
@@ -709,7 +710,7 @@ export default {
           adjust: 'Adjust',
           adjustDesc: 'Extend or shorten the subscription validity period',
           resetQuota: 'Reset Quota',
-          resetQuotaDesc: 'Reset daily/weekly/monthly usage to zero',
+          resetQuotaDesc: 'Reset hourly/daily/weekly/monthly usage to zero',
           revoke: 'Revoke',
           revokeDesc: 'Immediately terminate the subscription (restorable from the revoked list)'
         },

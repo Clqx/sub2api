@@ -46,6 +46,7 @@ func cloneGroupForDuplicateTest(group *Group) *Group {
 		return nil
 	}
 	cloned := *group
+	cloned.HourlyLimitUSD = cloneGroupValuePointer(group.HourlyLimitUSD)
 	cloned.DailyLimitUSD = cloneGroupValuePointer(group.DailyLimitUSD)
 	cloned.WeeklyLimitUSD = cloneGroupValuePointer(group.WeeklyLimitUSD)
 	cloned.MonthlyLimitUSD = cloneGroupValuePointer(group.MonthlyLimitUSD)
@@ -134,6 +135,7 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 		Status:                          StatusActive,
 		Hydrated:                        true,
 		SubscriptionType:                SubscriptionTypeSubscription,
+		HourlyLimitUSD:                  groupDuplicateTestPointer(4.0),
 		DailyLimitUSD:                   groupDuplicateTestPointer(11.0),
 		WeeklyLimitUSD:                  groupDuplicateTestPointer(22.0),
 		MonthlyLimitUSD:                 groupDuplicateTestPointer(33.0),
@@ -226,12 +228,14 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 	duplicate.MessagesDispatchModelConfig.ExactModelMappings["claude-special"] = "changed"
 	duplicate.ModelsListConfig.Models[0] = "changed"
 	duplicate.ReasoningEffortMappings[0].To = "changed"
+	*duplicate.HourlyLimitUSD = 999
 	*duplicate.DailyLimitUSD = 999
 	require.Equal(t, int64(13), source.ModelRouting["gpt-*"][0])
 	require.Equal(t, "claude", source.SupportedModelScopes[0])
 	require.Equal(t, "gpt-special", source.MessagesDispatchModelConfig.ExactModelMappings["claude-special"])
 	require.Equal(t, "gpt-5.4", source.ModelsListConfig.Models[0])
 	require.Equal(t, "xhigh", source.ReasoningEffortMappings[0].To)
+	require.Equal(t, 4.0, *source.HourlyLimitUSD)
 	require.Equal(t, 11.0, *source.DailyLimitUSD)
 }
 

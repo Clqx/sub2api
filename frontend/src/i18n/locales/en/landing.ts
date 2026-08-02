@@ -181,6 +181,7 @@ export default {
     // Ring card titles
     totalQuota: 'Total Quota',
     limit5h: '5-Hour Limit',
+    limitHourly: 'Hourly Limit',
     limitDaily: 'Daily Limit',
     limit7d: '7-Day Limit',
     limitWeekly: 'Weekly Limit',

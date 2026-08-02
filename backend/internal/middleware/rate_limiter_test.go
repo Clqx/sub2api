@@ -73,7 +73,9 @@ func TestRateLimiterDifferentIPsIndependent(t *testing.T) {
 		rateLimitRun = originalRun
 	})
 
-	limiter := NewRateLimiter(redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"}))
+	redisClient := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	limiter := NewRateLimiter(redisClient)
 
 	router := gin.New()
 	router.Use(limiter.Limit("api", 1, time.Second))
@@ -140,4 +142,37 @@ func TestRateLimiterSuccessAndLimit(t *testing.T) {
 	recorder = httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+}
+
+func TestRateLimiterMarksOnlyRepeatedRejections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	originalRun := rateLimitRun
+	var count int64
+	rateLimitRun = func(context.Context, *redis.Client, string, int64) (int64, bool, error) {
+		count++
+		return count, false, nil
+	}
+	t.Cleanup(func() {
+		rateLimitRun = originalRun
+	})
+
+	limiter := NewRateLimiter(redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"}))
+	repeated := make([]bool, 0, 3)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Next()
+		repeated = append(repeated, IsRepeatedRateLimitRejection(c))
+	})
+	router.Use(limiter.Limit("test", 1, time.Minute))
+	router.GET("/test", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	for i := 0; i < 3; i++ {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/test", nil))
+	}
+
+	require.Equal(t, []bool{false, false, true}, repeated)
 }

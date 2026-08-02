@@ -225,7 +225,18 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	// Turnstile 验证
-	if err := h.authService.VerifyTurnstile(c.Request.Context(), req.TurnstileToken, ip.GetClientIP(c)); err != nil {
+	if err := h.authService.VerifyLoginTurnstile(c.Request.Context(), req.TurnstileToken, middleware2.SecurityClientIP(c), c.Request.UserAgent()); err != nil {
+		if infraerrors.Reason(err) == "LOGIN_CAPTCHA_IP_BLOCKED" {
+			metadata := infraerrors.FromError(err).Metadata
+			if retryAfter := metadata["retry_after_seconds"]; retryAfter != "" {
+				c.Header("Retry-After", retryAfter)
+			}
+			// The threshold-crossing request remains in the audit log. Requests
+			// rejected by an already-active block are redundant scan noise.
+			if metadata["repeated"] == "true" {
+				middleware2.SkipAudit(c)
+			}
+		}
 		response.ErrorFrom(c, err)
 		return
 	}

@@ -416,6 +416,24 @@ func (s *AuthService) VerifyTurnstile(ctx context.Context, token string, remoteI
 	return s.turnstileService.VerifyToken(ctx, token, remoteIP)
 }
 
+// VerifyLoginTurnstile verifies login challenges and applies persistent IP
+// failure tracking when Turnstile is enabled.
+func (s *AuthService) VerifyLoginTurnstile(ctx context.Context, token, remoteIP, userAgent string) error {
+	required := s.cfg != nil && s.cfg.Server.Mode == "release" && s.cfg.Turnstile.Required
+	if required {
+		if s.settingService == nil || !s.settingService.IsTurnstileEnabled(ctx) || s.settingService.GetTurnstileSecretKey(ctx) == "" {
+			return ErrTurnstileNotConfigured
+		}
+	}
+	if s.turnstileService == nil {
+		if required {
+			return ErrTurnstileNotConfigured
+		}
+		return nil
+	}
+	return s.turnstileService.VerifyLoginToken(ctx, token, remoteIP, userAgent)
+}
+
 // IsTurnstileEnabled 检查是否启用Turnstile验证
 func (s *AuthService) IsTurnstileEnabled(ctx context.Context) bool {
 	if s.turnstileService == nil {

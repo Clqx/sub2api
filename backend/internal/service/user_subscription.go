@@ -13,10 +13,12 @@ type UserSubscription struct {
 	ExpiresAt time.Time
 	Status    string
 
+	HourlyWindowStart  *time.Time
 	DailyWindowStart   *time.Time
 	WeeklyWindowStart  *time.Time
 	MonthlyWindowStart *time.Time
 
+	HourlyUsageUSD  float64
 	DailyUsageUSD   float64
 	WeeklyUsageUSD  float64
 	MonthlyUsageUSD float64
@@ -60,7 +62,14 @@ func (s *UserSubscription) daysRemainingAt(now time.Time) int {
 }
 
 func (s *UserSubscription) IsWindowActivated() bool {
-	return s.DailyWindowStart != nil || s.WeeklyWindowStart != nil || s.MonthlyWindowStart != nil
+	return s.HourlyWindowStart != nil || s.DailyWindowStart != nil || s.WeeklyWindowStart != nil || s.MonthlyWindowStart != nil
+}
+
+func (s *UserSubscription) NeedsHourlyReset() bool {
+	if s.HourlyWindowStart == nil {
+		return false
+	}
+	return time.Since(*s.HourlyWindowStart) >= time.Hour
 }
 
 func (s *UserSubscription) HasOneTimeDailyQuota() bool {
@@ -110,6 +119,14 @@ func (s *UserSubscription) DailyResetTime() *time.Time {
 	return &t
 }
 
+func (s *UserSubscription) HourlyResetTime() *time.Time {
+	if s.HourlyWindowStart == nil {
+		return nil
+	}
+	t := s.HourlyWindowStart.Add(time.Hour)
+	return &t
+}
+
 func (s *UserSubscription) WeeklyResetTime() *time.Time {
 	if s.WeeklyWindowStart == nil {
 		return nil
@@ -133,6 +150,13 @@ func (s *UserSubscription) CheckDailyLimit(group *Group, additionalCost float64)
 	return s.DailyUsageUSD+additionalCost <= *group.DailyLimitUSD
 }
 
+func (s *UserSubscription) CheckHourlyLimit(group *Group, additionalCost float64) bool {
+	if !group.HasHourlyLimit() {
+		return true
+	}
+	return s.HourlyUsageUSD+additionalCost <= *group.HourlyLimitUSD
+}
+
 func (s *UserSubscription) CheckWeeklyLimit(group *Group, additionalCost float64) bool {
 	if !group.HasWeeklyLimit() {
 		return true
@@ -147,7 +171,8 @@ func (s *UserSubscription) CheckMonthlyLimit(group *Group, additionalCost float6
 	return s.MonthlyUsageUSD+additionalCost <= *group.MonthlyLimitUSD
 }
 
-func (s *UserSubscription) CheckAllLimits(group *Group, additionalCost float64) (daily, weekly, monthly bool) {
+func (s *UserSubscription) CheckAllLimits(group *Group, additionalCost float64) (hourly, daily, weekly, monthly bool) {
+	hourly = s.CheckHourlyLimit(group, additionalCost)
 	daily = s.CheckDailyLimit(group, additionalCost)
 	weekly = s.CheckWeeklyLimit(group, additionalCost)
 	monthly = s.CheckMonthlyLimit(group, additionalCost)

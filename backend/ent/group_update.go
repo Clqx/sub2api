@@ -263,6 +263,33 @@ func (_u *GroupUpdate) ClearDailyLimitUsd() *GroupUpdate {
 	return _u
 }
 
+// SetHourlyLimitUsd sets the "hourly_limit_usd" field.
+func (_u *GroupUpdate) SetHourlyLimitUsd(v float64) *GroupUpdate {
+	_u.mutation.ResetHourlyLimitUsd()
+	_u.mutation.SetHourlyLimitUsd(v)
+	return _u
+}
+
+// SetNillableHourlyLimitUsd sets the "hourly_limit_usd" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableHourlyLimitUsd(v *float64) *GroupUpdate {
+	if v != nil {
+		_u.SetHourlyLimitUsd(*v)
+	}
+	return _u
+}
+
+// AddHourlyLimitUsd adds value to the "hourly_limit_usd" field.
+func (_u *GroupUpdate) AddHourlyLimitUsd(v float64) *GroupUpdate {
+	_u.mutation.AddHourlyLimitUsd(v)
+	return _u
+}
+
+// ClearHourlyLimitUsd clears the value of the "hourly_limit_usd" field.
+func (_u *GroupUpdate) ClearHourlyLimitUsd() *GroupUpdate {
+	_u.mutation.ClearHourlyLimitUsd()
+	return _u
+}
+
 // SetWeeklyLimitUsd sets the "weekly_limit_usd" field.
 func (_u *GroupUpdate) SetWeeklyLimitUsd(v float64) *GroupUpdate {
 	_u.mutation.ResetWeeklyLimitUsd()
@@ -1336,6 +1363,15 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.DailyLimitUsdCleared() {
 		_spec.ClearField(group.FieldDailyLimitUsd, field.TypeFloat64)
 	}
+	if value, ok := _u.mutation.HourlyLimitUsd(); ok {
+		_spec.SetField(group.FieldHourlyLimitUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedHourlyLimitUsd(); ok {
+		_spec.AddField(group.FieldHourlyLimitUsd, field.TypeFloat64, value)
+	}
+	if _u.mutation.HourlyLimitUsdCleared() {
+		_spec.ClearField(group.FieldHourlyLimitUsd, field.TypeFloat64)
+	}
 	if value, ok := _u.mutation.WeeklyLimitUsd(); ok {
 		_spec.SetField(group.FieldWeeklyLimitUsd, field.TypeFloat64, value)
 	}
@@ -2082,6 +2118,33 @@ func (_u *GroupUpdateOne) AddDailyLimitUsd(v float64) *GroupUpdateOne {
 // ClearDailyLimitUsd clears the value of the "daily_limit_usd" field.
 func (_u *GroupUpdateOne) ClearDailyLimitUsd() *GroupUpdateOne {
 	_u.mutation.ClearDailyLimitUsd()
+	return _u
+}
+
+// SetHourlyLimitUsd sets the "hourly_limit_usd" field.
+func (_u *GroupUpdateOne) SetHourlyLimitUsd(v float64) *GroupUpdateOne {
+	_u.mutation.ResetHourlyLimitUsd()
+	_u.mutation.SetHourlyLimitUsd(v)
+	return _u
+}
+
+// SetNillableHourlyLimitUsd sets the "hourly_limit_usd" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableHourlyLimitUsd(v *float64) *GroupUpdateOne {
+	if v != nil {
+		_u.SetHourlyLimitUsd(*v)
+	}
+	return _u
+}
+
+// AddHourlyLimitUsd adds value to the "hourly_limit_usd" field.
+func (_u *GroupUpdateOne) AddHourlyLimitUsd(v float64) *GroupUpdateOne {
+	_u.mutation.AddHourlyLimitUsd(v)
+	return _u
+}
+
+// ClearHourlyLimitUsd clears the value of the "hourly_limit_usd" field.
+func (_u *GroupUpdateOne) ClearHourlyLimitUsd() *GroupUpdateOne {
+	_u.mutation.ClearHourlyLimitUsd()
 	return _u
 }
 
@@ -3187,6 +3250,15 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if _u.mutation.DailyLimitUsdCleared() {
 		_spec.ClearField(group.FieldDailyLimitUsd, field.TypeFloat64)
+	}
+	if value, ok := _u.mutation.HourlyLimitUsd(); ok {
+		_spec.SetField(group.FieldHourlyLimitUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedHourlyLimitUsd(); ok {
+		_spec.AddField(group.FieldHourlyLimitUsd, field.TypeFloat64, value)
+	}
+	if _u.mutation.HourlyLimitUsdCleared() {
+		_spec.ClearField(group.FieldHourlyLimitUsd, field.TypeFloat64)
 	}
 	if value, ok := _u.mutation.WeeklyLimitUsd(); ok {
 		_spec.SetField(group.FieldWeeklyLimitUsd, field.TypeFloat64, value)

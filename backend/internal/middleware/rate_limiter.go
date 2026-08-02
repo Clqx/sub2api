@@ -25,6 +25,28 @@ type RateLimitOptions struct {
 	FailureMode RateLimitFailureMode
 }
 
+const rateLimitRejectionContextKey = "rate_limit_rejection"
+
+type rateLimitRejection struct {
+	count int64
+	limit int64
+}
+
+// IsRepeatedRateLimitRejection reports whether this request was rejected after
+// the first over-limit request in the current window. Consumers can use this
+// to suppress redundant telemetry while still retaining the first 429 event.
+func IsRepeatedRateLimitRejection(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	value, ok := c.Get(rateLimitRejectionContextKey)
+	if !ok {
+		return false
+	}
+	rejection, ok := value.(rateLimitRejection)
+	return ok && rejection.count > rejection.limit+1
+}
+
 var rateLimitScript = redis.NewScript(`
 local current = redis.call('INCR', KEYS[1])
 local ttl = redis.call('PTTL', KEYS[1])
@@ -113,6 +135,10 @@ func (r *RateLimiter) LimitWithOptions(key string, limit int, window time.Durati
 
 		// 超过限制
 		if count > int64(limit) {
+			c.Set(rateLimitRejectionContextKey, rateLimitRejection{
+				count: count,
+				limit: int64(limit),
+			})
 			abortRateLimit(c)
 			return
 		}

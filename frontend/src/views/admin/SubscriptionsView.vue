@@ -213,6 +213,28 @@
 
           <template #cell-usage="{ row }">
             <div class="min-w-[280px] space-y-2">
+              <!-- Hourly Usage -->
+              <div v-if="row.group?.hourly_limit_usd" class="usage-row">
+                <div class="flex items-center gap-2">
+                  <span class="usage-label">{{ t('admin.subscriptions.hourly') }}</span>
+                  <div class="h-1.5 flex-1 rounded-full bg-gray-200 dark:bg-dark-600">
+                    <div
+                      class="h-1.5 rounded-full transition-all"
+                      :class="getProgressClass(row.hourly_usage_usd ?? 0, row.group.hourly_limit_usd)"
+                      :style="{ width: getProgressWidth(row.hourly_usage_usd ?? 0, row.group.hourly_limit_usd) }"
+                    ></div>
+                  </div>
+                  <span class="usage-amount">
+                    ${{ row.hourly_usage_usd?.toFixed(2) || '0.00' }}
+                    <span class="text-gray-400">/</span>
+                    ${{ row.group.hourly_limit_usd.toFixed(2) }}
+                  </span>
+                </div>
+                <div class="reset-info" v-if="row.hourly_window_start">
+                  <span>{{ formatResetTime(row.hourly_window_start, 'hourly') }}</span>
+                </div>
+              </div>
+
               <!-- Daily Usage -->
               <div v-if="row.group?.daily_limit_usd" class="usage-row">
                 <div class="flex items-center gap-2">
@@ -327,6 +349,7 @@
               <!-- No Limits - Unlimited badge -->
               <div
                 v-if="
+                  !row.group?.hourly_limit_usd &&
                   !row.group?.daily_limit_usd &&
                   !row.group?.weekly_limit_usd &&
                   !row.group?.monthly_limit_usd
@@ -1312,7 +1335,7 @@ const confirmResetQuota = async () => {
   if (resettingQuota.value) return
   resettingQuota.value = true
   try {
-    await adminAPI.subscriptions.resetQuota(resettingSubscription.value.id, { daily: true, weekly: true, monthly: true })
+    await adminAPI.subscriptions.resetQuota(resettingSubscription.value.id, { hourly: true, daily: true, weekly: true, monthly: true })
     appStore.showSuccess(t('admin.subscriptions.quotaResetSuccess'))
     showResetQuotaConfirm.value = false
     resettingSubscription.value = null
@@ -1389,7 +1412,7 @@ const formatDailyUsageWindow = (subscription: UserSubscription): string => {
 }
 
 // Format reset time based on window start and period type
-const formatResetTime = (windowStart: string | null, period: 'daily' | 'weekly' | 'monthly'): string => {
+const formatResetTime = (windowStart: string | null, period: 'hourly' | 'daily' | 'weekly' | 'monthly'): string => {
   if (!windowStart) return t('admin.subscriptions.windowNotActive')
 
   const start = new Date(windowStart)
@@ -1398,6 +1421,9 @@ const formatResetTime = (windowStart: string | null, period: 'daily' | 'weekly' 
   // Calculate reset time based on period
   let resetTime: Date
   switch (period) {
+    case 'hourly':
+      resetTime = new Date(start.getTime() + 60 * 60 * 1000)
+      break
     case 'daily':
       resetTime = new Date(start.getTime() + 24 * 60 * 60 * 1000)
       break

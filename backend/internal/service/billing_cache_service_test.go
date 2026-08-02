@@ -14,6 +14,7 @@ import (
 type billingCacheWorkerStub struct {
 	balanceUpdates      int64
 	subscriptionUpdates int64
+	subscription        *SubscriptionCacheData
 }
 
 func (b *billingCacheWorkerStub) GetUserBalance(ctx context.Context, userID int64) (float64, error) {
@@ -35,6 +36,9 @@ func (b *billingCacheWorkerStub) InvalidateUserBalance(ctx context.Context, user
 }
 
 func (b *billingCacheWorkerStub) GetSubscriptionCache(ctx context.Context, userID, groupID int64) (*SubscriptionCacheData, error) {
+	if b.subscription != nil {
+		return b.subscription, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
@@ -116,6 +120,23 @@ func TestBillingCacheServiceQueueHighLoad(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return atomic.LoadInt64(&cache.subscriptionUpdates) > 0
 	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestBillingCacheServiceRejectsExhaustedHourlyQuota(t *testing.T) {
+	cache := &billingCacheWorkerStub{subscription: &SubscriptionCacheData{
+		Status:      SubscriptionStatusActive,
+		ExpiresAt:   time.Now().Add(time.Hour),
+		HourlyUsage: 2,
+	}}
+	svc := NewBillingCacheService(cache, nil, nil, nil, nil, nil, &config.Config{}, nil)
+	t.Cleanup(svc.Stop)
+	hourlyLimit := 2.0
+
+	err := svc.checkSubscriptionEligibility(context.Background(), 1, &Group{
+		ID:             2,
+		HourlyLimitUSD: &hourlyLimit,
+	}, &UserSubscription{})
+	require.ErrorIs(t, err, ErrHourlyLimitExceeded)
 }
 
 func TestBillingCacheServiceEnqueueAfterStopReturnsFalse(t *testing.T) {

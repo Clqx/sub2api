@@ -21,6 +21,7 @@ const i18n = createI18n({
         planCard: {
           quota: "Quota",
           rate: "Rate",
+          hourlyLimit: "Hourly",
           unlimited: "Unlimited",
         },
         subscribeNow: "Subscribe now",
@@ -85,5 +86,12 @@ describe("SubscriptionPlanCard", () => {
     expect(cnyPlan).toContain("¥20CNY");
     expect(mountPlanCard("openai", { currency: "USD" }).text()).toContain("$10USD");
     expect(mountPlanCard("openai", { currency: "" }).text()).toContain("$10");
+  });
+
+  it("renders an hourly quota as a limited plan", () => {
+    const text = mountPlanCard("openai", { hourly_limit_usd: 2.5 }).text();
+
+    expect(text).toContain("$2.5");
+    expect(text).not.toContain("Unlimited");
   });
 });

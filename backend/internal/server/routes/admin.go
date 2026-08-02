@@ -116,6 +116,17 @@ func RegisterAdminRoutes(
 
 		// 操作审计日志
 		registerAuditLogRoutes(admin, h, stepUpAuth)
+
+		// 登录验证码 IP 风控记录
+		registerLoginSecurityRoutes(admin, h)
+	}
+}
+
+func registerLoginSecurityRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	loginSecurity := admin.Group("/login-security")
+	{
+		loginSecurity.GET("/ip-records", h.Admin.LoginSecurity.ListLoginCaptchaIPs)
+		loginSecurity.POST("/ip-records/:id/unblock", h.Admin.LoginSecurity.UnblockLoginCaptchaIP)
 	}
 }
 

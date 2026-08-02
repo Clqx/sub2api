@@ -15,6 +15,8 @@ type SubscriptionSummaryItem struct {
 	GroupID         int64   `json:"group_id"`
 	GroupName       string  `json:"group_name"`
 	Status          string  `json:"status"`
+	HourlyUsedUSD   float64 `json:"hourly_used_usd,omitempty"`
+	HourlyLimitUSD  float64 `json:"hourly_limit_usd,omitempty"`
 	DailyUsedUSD    float64 `json:"daily_used_usd,omitempty"`
 	DailyLimitUSD   float64 `json:"daily_limit_usd,omitempty"`
 	WeeklyUsedUSD   float64 `json:"weekly_used_usd,omitempty"`
@@ -143,6 +145,7 @@ func (h *SubscriptionHandler) GetSummary(c *gin.Context) {
 			ID:             sub.ID,
 			GroupID:        sub.GroupID,
 			Status:         sub.Status,
+			HourlyUsedUSD:  sub.HourlyUsageUSD,
 			DailyUsedUSD:   sub.DailyUsageUSD,
 			WeeklyUsedUSD:  sub.WeeklyUsageUSD,
 			MonthlyUsedUSD: sub.MonthlyUsageUSD,
@@ -151,6 +154,9 @@ func (h *SubscriptionHandler) GetSummary(c *gin.Context) {
 		// Add group info if preloaded
 		if sub.Group != nil {
 			item.GroupName = sub.Group.Name
+			if sub.Group.HourlyLimitUSD != nil {
+				item.HourlyLimitUSD = *sub.Group.HourlyLimitUSD
+			}
 			if sub.Group.DailyLimitUSD != nil {
 				item.DailyLimitUSD = *sub.Group.DailyLimitUSD
 			}

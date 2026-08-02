@@ -52,6 +52,7 @@ func billingSubKey(userID, groupID int64) string {
 const (
 	subFieldStatus       = "status"
 	subFieldExpiresAt    = "expires_at"
+	subFieldHourlyUsage  = "hourly_usage"
 	subFieldDailyUsage   = "daily_usage"
 	subFieldWeeklyUsage  = "weekly_usage"
 	subFieldMonthlyUsage = "monthly_usage"
@@ -90,6 +91,7 @@ var (
 			return 0
 		end
 		local cost = tonumber(ARGV[1])
+		redis.call('HINCRBYFLOAT', KEYS[1], 'hourly_usage', cost)
 		redis.call('HINCRBYFLOAT', KEYS[1], 'daily_usage', cost)
 		redis.call('HINCRBYFLOAT', KEYS[1], 'weekly_usage', cost)
 		redis.call('HINCRBYFLOAT', KEYS[1], 'monthly_usage', cost)
@@ -204,6 +206,10 @@ func (c *billingCache) parseSubscriptionCache(data map[string]string) (*service.
 		result.DailyUsage, _ = strconv.ParseFloat(dailyStr, 64)
 	}
 
+	if hourlyStr, ok := data[subFieldHourlyUsage]; ok {
+		result.HourlyUsage, _ = strconv.ParseFloat(hourlyStr, 64)
+	}
+
 	if weeklyStr, ok := data[subFieldWeeklyUsage]; ok {
 		result.WeeklyUsage, _ = strconv.ParseFloat(weeklyStr, 64)
 	}
@@ -229,6 +235,7 @@ func (c *billingCache) SetSubscriptionCache(ctx context.Context, userID, groupID
 	fields := map[string]any{
 		subFieldStatus:       data.Status,
 		subFieldExpiresAt:    data.ExpiresAt.Unix(),
+		subFieldHourlyUsage:  data.HourlyUsage,
 		subFieldDailyUsage:   data.DailyUsage,
 		subFieldWeeklyUsage:  data.WeeklyUsage,
 		subFieldMonthlyUsage: data.MonthlyUsage,

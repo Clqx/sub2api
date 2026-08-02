@@ -17,7 +17,7 @@ import (
 
 // 错误定义
 // 注：ErrInsufficientBalance在redeem_service.go中定义
-// 注：ErrDailyLimitExceeded/ErrWeeklyLimitExceeded/ErrMonthlyLimitExceeded在subscription_service.go中定义
+// Subscription window limit errors are defined in subscription_service.go.
 // errBillingCacheUnavailable 内部哨兵：用于 quota 校验路径在 cache==nil 时
 // 与"Redis 故障"走同一条 fail-open + DB 一次性检查的分支。
 var errBillingCacheUnavailable = fmt.Errorf("billing cache unavailable")
@@ -42,6 +42,7 @@ var (
 type subscriptionCacheData struct {
 	Status       string
 	ExpiresAt    time.Time
+	HourlyUsage  float64
 	DailyUsage   float64
 	WeeklyUsage  float64
 	MonthlyUsage float64
@@ -444,6 +445,7 @@ func (s *BillingCacheService) convertFromPortsData(data *SubscriptionCacheData) 
 	return &subscriptionCacheData{
 		Status:       data.Status,
 		ExpiresAt:    data.ExpiresAt,
+		HourlyUsage:  data.HourlyUsage,
 		DailyUsage:   data.DailyUsage,
 		WeeklyUsage:  data.WeeklyUsage,
 		MonthlyUsage: data.MonthlyUsage,
@@ -455,6 +457,7 @@ func (s *BillingCacheService) convertToPortsData(data *subscriptionCacheData) *S
 	return &SubscriptionCacheData{
 		Status:       data.Status,
 		ExpiresAt:    data.ExpiresAt,
+		HourlyUsage:  data.HourlyUsage,
 		DailyUsage:   data.DailyUsage,
 		WeeklyUsage:  data.WeeklyUsage,
 		MonthlyUsage: data.MonthlyUsage,
@@ -472,6 +475,7 @@ func (s *BillingCacheService) getSubscriptionFromDB(ctx context.Context, userID,
 	return &subscriptionCacheData{
 		Status:       sub.Status,
 		ExpiresAt:    sub.ExpiresAt,
+		HourlyUsage:  sub.HourlyUsageUSD,
 		DailyUsage:   sub.DailyUsageUSD,
 		WeeklyUsage:  sub.WeeklyUsageUSD,
 		MonthlyUsage: sub.MonthlyUsageUSD,
@@ -922,6 +926,10 @@ func (s *BillingCacheService) checkSubscriptionEligibility(ctx context.Context, 
 	}
 
 	// 检查限额（使用传入的Group限额配置）
+	if group.HasHourlyLimit() && subData.HourlyUsage >= *group.HourlyLimitUSD {
+		return ErrHourlyLimitExceeded
+	}
+
 	if group.HasDailyLimit() && subData.DailyUsage >= *group.DailyLimitUSD {
 		return ErrDailyLimitExceeded
 	}

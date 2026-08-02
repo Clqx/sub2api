@@ -428,6 +428,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/login-security',
+    name: 'AdminLoginSecurity',
+    component: () => import('@/views/admin/LoginSecurityView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Login Verification IPs',
+      titleKey: 'admin.loginSecurity.title',
+      descriptionKey: 'admin.loginSecurity.description'
+    }
+  },
+  {
     path: '/admin/users',
     name: 'AdminUsers',
     component: () => import('@/views/admin/UsersView.vue'),
