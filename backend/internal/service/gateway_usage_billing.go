@@ -832,7 +832,7 @@ func (s *GatewayService) compositeBillableModel(ctx context.Context, apiKey *API
 
 // billableModelWithFallback 在选定计费模型（可能是 composite 公开别名或未定价的映射名）
 // 查不到任何价格（渠道价与全局价均无）时，按序回退到实际转发的具体模型，避免静默 $0 计费。
-// 所有候选都无价时保持原值，走既有的 warn + 零成本路径。
+// 所有候选都无价时保持原值，后续使用保守兜底价计费并记录告警。
 func (s *GatewayService) billableModelWithFallback(ctx context.Context, apiKey *APIKey, billingModel string, fallbacks ...string) string {
 	if s.hasResolvableTokenPricing(ctx, billingModel, apiKey) {
 		return billingModel
@@ -911,8 +911,15 @@ func (s *GatewayService) calculateImageCost(
 			Resolved:       resolved,
 		})
 		if err != nil {
-			logger.LegacyPrintf("service.gateway", "Calculate image token cost failed: %v", err)
-			return &CostBreakdown{ActualCost: 0}
+			cost = s.billingService.CalculateUnpricedTokenCost(tokens, multiplier, "")
+			logger.LegacyPrintf(
+				"service.gateway",
+				"[Billing] image token pricing unavailable for model %q; applied conservative fallback cost %.10f: %v",
+				billingModel,
+				cost.ActualCost,
+				err,
+			)
+			return cost
 		}
 		return cost
 	}
@@ -962,8 +969,15 @@ func (s *GatewayService) calculateTokenCost(
 		cost, err = s.billingService.CalculateCost(billingModel, tokens, multiplier)
 	}
 	if err != nil {
-		logger.LegacyPrintf("service.gateway", "Calculate cost failed: %v", err)
-		return &CostBreakdown{ActualCost: 0}
+		cost = s.billingService.CalculateUnpricedTokenCost(tokens, multiplier, "")
+		logger.LegacyPrintf(
+			"service.gateway",
+			"[Billing] pricing unavailable for model %q; applied conservative fallback cost %.10f: %v",
+			billingModel,
+			cost.ActualCost,
+			err,
+		)
+		return cost
 	}
 	return cost
 }

@@ -18,13 +18,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGetByKeyForAuthCarriesProfitControlProjection(t *testing.T) {
+func TestGetByKeyForAuthCarriesBillingAndProfitControlProjection(t *testing.T) {
 	ctx := context.Background()
 	suffix := time.Now().UnixNano()
+	hourlyLimit := 10.0
 	group := mustCreateGroup(t, integrationEntClient, &service.Group{
 		Name:                 fmt.Sprintf("profit-proj-group-%d", suffix),
 		Platform:             service.PlatformOpenAI,
+		SubscriptionType:     service.SubscriptionTypeSubscription,
 		RateMultiplier:       0.06,
+		HourlyLimitUSD:       &hourlyLimit,
 		ProfitControlEnabled: true,
 		ProfitMinMargin:      0.2,
 		ProfitSafetyBuffer:   0.05,
@@ -54,6 +57,8 @@ func TestGetByKeyForAuthCarriesProfitControlProjection(t *testing.T) {
 
 	require.Equal(t, service.PlatformOpenAI, got.Group.Platform)
 	require.InDelta(t, 0.06, got.Group.RateMultiplier, 1e-9)
+	require.NotNil(t, got.Group.HourlyLimitUSD, "hourly_limit_usd 必须进入认证投影（漏列会让小时限额静默失效）")
+	require.InDelta(t, hourlyLimit, *got.Group.HourlyLimitUSD, 1e-9)
 	require.True(t, got.Group.ProfitControlEnabled, "profit_control_enabled 必须进入认证投影（投影漏列会让门静默失效）")
 	require.InDelta(t, 0.2, got.Group.ProfitMinMargin, 1e-9)
 	require.InDelta(t, 0.05, got.Group.ProfitSafetyBuffer, 1e-9)

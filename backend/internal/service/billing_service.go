@@ -169,6 +169,18 @@ type CostBreakdown struct {
 // sources can price the requested model.
 var ErrModelPricingUnavailable = errors.New("pricing not found")
 
+// unpricedModelFallbackPricing is deliberately conservative. Usage billing runs
+// after the upstream response has completed, so returning a pricing error there
+// cannot revoke the response and would leave the request unbilled. Unknown token
+// models therefore use the highest stable general-purpose fallback tier instead
+// of silently becoming free.
+var unpricedModelFallbackPricing = ModelPricing{
+	InputPricePerToken:         15e-6,    // $15 per MTok
+	OutputPricePerToken:        75e-6,    // $75 per MTok
+	CacheCreationPricePerToken: 18.75e-6, // $18.75 per MTok
+	CacheReadPricePerToken:     15e-6,    // Conservatively treat cache reads as input.
+}
+
 // BillingService 计费服务
 type BillingService struct {
 	cfg            *config.Config
@@ -1166,6 +1178,14 @@ func (s *BillingService) calculatePerRequestCost(resolved *ResolvedPricing, inpu
 // CalculateCost 计算使用费用
 func (s *BillingService) CalculateCost(model string, tokens UsageTokens, rateMultiplier float64) (*CostBreakdown, error) {
 	return s.calculateCostInternal(model, tokens, rateMultiplier, "", nil)
+}
+
+// CalculateUnpricedTokenCost calculates a non-zero conservative charge for a
+// successful token-bearing request whose model has no resolvable price.
+func (s *BillingService) CalculateUnpricedTokenCost(tokens UsageTokens, rateMultiplier float64, serviceTier string) *CostBreakdown {
+	cost := s.computeTokenBreakdown(&unpricedModelFallbackPricing, tokens, rateMultiplier, serviceTier, false)
+	cost.BillingMode = string(BillingModeToken)
+	return cost
 }
 
 func (s *BillingService) CalculateCostWithServiceTier(model string, tokens UsageTokens, rateMultiplier float64, serviceTier string) (*CostBreakdown, error) {

@@ -50,7 +50,7 @@ func TestBillableModelWithFallback(t *testing.T) {
 	require.Equal(t, "claude-sonnet-4",
 		svc.billableModelWithFallback(ctx, apiKey, "claude-sonnet-4", "claude-opus-4"))
 
-	// 所有候选都无价 → 保持原值，走既有 warn + 零成本路径
+	// 所有候选都无价 → 保持原值，后续走保守兜底计费路径
 	require.Equal(t, "team/best",
 		svc.billableModelWithFallback(ctx, apiKey, "team/best", "another/alias", ""))
 
