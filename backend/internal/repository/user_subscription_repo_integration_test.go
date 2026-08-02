@@ -480,6 +480,58 @@ func (s *UserSubscriptionRepoSuite) TestActivateWindowsWithHourly() {
 	s.Require().WithinDuration(dailyStart, *got.DailyWindowStart, time.Microsecond)
 }
 
+func (s *UserSubscriptionRepoSuite) TestActivateWindowsWithHourly_StaleActivationPreservesExistingWindows() {
+	user := s.mustCreateUser("activate-hourly-cas@test.com", service.RoleUser)
+	group := s.mustCreateGroup("g-activate-hourly-cas")
+	sub := s.mustCreateSubscription(user.ID, group.ID, nil)
+	activatedAt := time.Date(2025, 1, 1, 12, 37, 0, 0, time.UTC)
+	manualResetAt := activatedAt.Add(2 * time.Hour)
+
+	s.Require().NoError(s.repo.ActivateWindowsWithHourly(s.ctx, sub.ID, activatedAt, activatedAt))
+	s.Require().NoError(s.repo.ResetUsageWindowsWithHourly(
+		s.ctx,
+		sub.ID,
+		true,
+		true,
+		true,
+		true,
+		manualResetAt,
+		manualResetAt,
+	))
+	s.Require().NoError(s.repo.ActivateWindowsWithHourly(
+		s.ctx,
+		sub.ID,
+		activatedAt.Add(time.Hour),
+		activatedAt.Add(time.Hour),
+	))
+
+	got, err := s.repo.GetByID(s.ctx, sub.ID)
+	s.Require().NoError(err)
+	s.Require().WithinDuration(manualResetAt, *got.HourlyWindowStart, time.Microsecond)
+	s.Require().WithinDuration(manualResetAt, *got.DailyWindowStart, time.Microsecond)
+	s.Require().WithinDuration(manualResetAt, *got.WeeklyWindowStart, time.Microsecond)
+	s.Require().WithinDuration(manualResetAt, *got.MonthlyWindowStart, time.Microsecond)
+}
+
+func (s *UserSubscriptionRepoSuite) TestActivateWindows_StaleActivationPreservesExistingWindows() {
+	user := s.mustCreateUser("activate-cas@test.com", service.RoleUser)
+	group := s.mustCreateGroup("g-activate-cas")
+	sub := s.mustCreateSubscription(user.ID, group.ID, nil)
+	activatedAt := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	manualResetAt := activatedAt.Add(2 * time.Hour)
+
+	s.Require().NoError(s.repo.ActivateWindows(s.ctx, sub.ID, activatedAt))
+	s.Require().NoError(s.repo.ResetUsageWindows(s.ctx, sub.ID, true, true, true, manualResetAt))
+	// Simulate a concurrent request carrying the original unactivated snapshot.
+	s.Require().NoError(s.repo.ActivateWindows(s.ctx, sub.ID, activatedAt.Add(time.Hour)))
+
+	got, err := s.repo.GetByID(s.ctx, sub.ID)
+	s.Require().NoError(err)
+	s.Require().WithinDuration(manualResetAt, *got.DailyWindowStart, time.Microsecond)
+	s.Require().WithinDuration(manualResetAt, *got.WeeklyWindowStart, time.Microsecond)
+	s.Require().WithinDuration(manualResetAt, *got.MonthlyWindowStart, time.Microsecond)
+}
+
 func (s *UserSubscriptionRepoSuite) TestResetDailyUsage() {
 	user := s.mustCreateUser("resetd@test.com", service.RoleUser)
 	group := s.mustCreateGroup("g-resetd")

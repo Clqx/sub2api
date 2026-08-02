@@ -314,19 +314,23 @@ func TestAPIContracts(t *testing.T) {
 			name: "GET /api/v1/groups/available",
 			setup: func(t *testing.T, deps *contractDeps) {
 				t.Helper()
-				// 普通用户可见的分组列表不应包含内部字段（如 model_routing/account_count）。
+				// 普通用户可见的分组列表不应包含内部字段（如 model_routing/account_count），
+				// 也不得包含利润控制配置——它与同响应的 rate_multiplier 相乘即可反推上游成本上限。
 				deps.groupRepo.SetActive([]service.Group{
 					{
-						ID:                  10,
-						Name:                "Group One",
-						Description:         "desc",
-						Platform:            service.PlatformAnthropic,
-						RateMultiplier:      1.5,
-						PeakRateMultiplier:  1.0,
-						IsExclusive:         false,
-						Status:              service.StatusActive,
-						SubscriptionType:    service.SubscriptionTypeStandard,
-						ModelRoutingEnabled: true,
+						ID:                   10,
+						Name:                 "Group One",
+						Description:          "desc",
+						Platform:             service.PlatformAnthropic,
+						RateMultiplier:       1.5,
+						PeakRateMultiplier:   1.0,
+						IsExclusive:          false,
+						Status:               service.StatusActive,
+						SubscriptionType:     service.SubscriptionTypeStandard,
+						ProfitControlEnabled: true,
+						ProfitMinMargin:      0.3,
+						ProfitSafetyBuffer:   0.05,
+						ModelRoutingEnabled:  true,
 						ModelRouting: map[string][]int64{
 							"claude-3-*": []int64{101, 102},
 						},
@@ -357,6 +361,7 @@ func TestAPIContracts(t *testing.T) {
 						"is_exclusive": false,
 						"status": "active",
 						"subscription_type": "standard",
+						"hourly_limit_usd": null,
 						"daily_limit_usd": null,
 						"weekly_limit_usd": null,
 						"monthly_limit_usd": null,
@@ -429,9 +434,11 @@ func TestAPIContracts(t *testing.T) {
 						"starts_at": "2025-01-02T03:04:05Z",
 						"expires_at": "2099-01-02T03:04:05Z",
 						"status": "active",
+						"hourly_window_start": null,
 						"daily_window_start": null,
 						"weekly_window_start": null,
 						"monthly_window_start": null,
+						"hourly_usage_usd": 0,
 						"daily_usage_usd": 1.23,
 						"weekly_usage_usd": 2.34,
 						"monthly_usage_usd": 3.45,
@@ -874,6 +881,7 @@ func TestAPIContracts(t *testing.T) {
 					"max_codex_version": "",
 					"codex_cli_only_blacklist": "",
 					"codex_cli_only_whitelist": "",
+					"compact_home_enabled": false,
 					"codex_cli_only_allow_app_server_clients": false,
 					"codex_cli_only_engine_fingerprint_signals": "[{\"type\":\"header_prefix\",\"match\":[\"x-codex-\"],\"required\":true},{\"type\":\"header_exact\",\"match\":[\"session-id\",\"session_id\"],\"required\":false},{\"type\":\"header_exact\",\"match\":[\"thread-id\",\"thread_id\"],\"required\":false},{\"type\":\"body_path\",\"match\":[\"client_metadata.x-codex-window-id\",\"client_metadata.x-codex-installation-id\"],\"required\":false}]",
 					"allow_ungrouped_key_scheduling": false,
@@ -1175,6 +1183,7 @@ func TestAPIContracts(t *testing.T) {
 					"max_codex_version": "",
 					"codex_cli_only_blacklist": "",
 					"codex_cli_only_whitelist": "",
+					"compact_home_enabled": false,
 					"codex_cli_only_allow_app_server_clients": false,
 					"codex_cli_only_engine_fingerprint_signals": "[{\"type\":\"header_prefix\",\"match\":[\"x-codex-\"],\"required\":true},{\"type\":\"header_exact\",\"match\":[\"session-id\",\"session_id\"],\"required\":false},{\"type\":\"header_exact\",\"match\":[\"thread-id\",\"thread_id\"],\"required\":false},{\"type\":\"body_path\",\"match\":[\"client_metadata.x-codex-window-id\",\"client_metadata.x-codex-installation-id\"],\"required\":false}]",
 					"web_search_emulation_enabled": false,
@@ -1814,6 +1823,16 @@ func (s *stubAccountRepo) FindByExtraField(ctx context.Context, key string, valu
 }
 
 func (s *stubAccountRepo) Update(ctx context.Context, account *service.Account) error {
+	return errors.New("not implemented")
+}
+
+func (s *stubAccountRepo) UpdateWithAccountBillingSettings(
+	ctx context.Context,
+	account *service.Account,
+	probeEnabled *bool,
+	rateSyncEnabled *bool,
+	rateMultiplier *float64,
+) error {
 	return errors.New("not implemented")
 }
 
