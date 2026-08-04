@@ -1,0 +1,137 @@
+name: sub2api-monitor
+
+x-database-environment: &database-environment
+  MONITOR_DATABASE_URL: ${MONITOR_DATABASE_URL:-postgresql+asyncpg://monitor:${MONITOR_DB_PASSWORD:-monitor}@monitor-postgres:5432/monitor}
+  MONITOR_DATABASE_URL_FILE: ${MONITOR_DATABASE_URL_FILE:-}
+
+x-backend-environment: &backend-environment
+  <<: *database-environment
+  MONITOR_ENVIRONMENT: ${MONITOR_ENVIRONMENT:-production}
+  MONITOR_MASTER_KEY: ${MONITOR_MASTER_KEY:-}
+  MONITOR_MASTER_KEY_FILE: ${MONITOR_MASTER_KEY_FILE:-}
+  MONITOR_ADMIN_USERNAME: ${MONITOR_ADMIN_USERNAME:-admin}
+  MONITOR_ADMIN_PASSWORD: ${MONITOR_ADMIN_PASSWORD:-}
+  MONITOR_ADMIN_PASSWORD_FILE: ${MONITOR_ADMIN_PASSWORD_FILE:-}
+  MONITOR_ALLOW_PRIVATE_TARGETS: ${MONITOR_ALLOW_PRIVATE_TARGETS:-false}
+  MONITOR_ACTIVE_QUOTA_REFRESH_ENABLED: ${MONITOR_ACTIVE_QUOTA_REFRESH_ENABLED:-false}
+  MONITOR_ACTIVE_QUOTA_TARGET_INTERVAL_SECONDS: ${MONITOR_ACTIVE_QUOTA_TARGET_INTERVAL_SECONDS:-300}
+  MONITOR_ACTIVE_QUOTA_ACCOUNT_INTERVAL_SECONDS: ${MONITOR_ACTIVE_QUOTA_ACCOUNT_INTERVAL_SECONDS:-900}
+  MONITOR_ACTIVE_QUOTA_MAX_ACCOUNTS_PER_RUN: ${MONITOR_ACTIVE_QUOTA_MAX_ACCOUNTS_PER_RUN:-20}
+  MONITOR_LOG_LEVEL: ${MONITOR_LOG_LEVEL:-INFO}
+
+x-backend: &backend
+  build:
+    context: ./backend
+  image: sub2api-monitor-backend:${MONITOR_IMAGE_TAG:-dev}
+  restart: unless-stopped
+  environment: *backend-environment
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  networks: [monitor-net]
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  monitor-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: monitor
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: ${MONITOR_DB_PASSWORD:-}
+      POSTGRES_PASSWORD_FILE: ${MONITOR_DB_PASSWORD_FILE:-}
+    volumes:
+      - monitor-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitor -d monitor"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [monitor-net]
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    build:
+      context: ./backend
+    image: sub2api-monitor-backend:${MONITOR_IMAGE_TAG:-dev}
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    environment: *database-environment
+    depends_on:
+      monitor-postgres:
+        condition: service_healthy
+    networks: [monitor-net]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    <<: *backend
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; import time; p=Path('/tmp/sub2api-monitor-worker-health'); raise SystemExit(0 if p.is_file() and time.time()-p.stat().st_mtime < 120 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  web:
+    build:
+      context: ./frontend
+    image: sub2api-monitor-web:${MONITOR_IMAGE_TAG:-dev}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${MONITOR_PORT:-8080}:8080"
+    networks: [monitor-net]
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/nginx:size=32m,mode=0755
+      - /var/run:size=4m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+
+  fake-sub2api:
+    profiles: [qa]
+    build:
+      context: ./qa/fakes
+    image: sub2api-monitor-fake:${MONITOR_IMAGE_TAG:-dev}
+    command: ["sub2api", "--port", "8090"]
+    environment:
+      FAKE_SUB2API_API_KEY: test-admin-key
+    networks: [monitor-net]
+
+  fake-ntfy:
+    profiles: [qa]
+    build:
+      context: ./qa/fakes
+    image: sub2api-monitor-fake:${MONITOR_IMAGE_TAG:-dev}
+    command: ["ntfy", "--port", "8090"]
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    networks: [monitor-net]
+
+volumes:
+  monitor-data:
+
+networks:
+  monitor-net:
+    driver: bridge

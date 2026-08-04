@@ -1,0 +1,20 @@
+services:
+  api:
+    networks:
+      - monitor-net
+      - sub2api-local-net
+      - sub2api-local-db-net
+
+  worker:
+    networks:
+      - monitor-net
+      - sub2api-local-net
+      - sub2api-local-db-net
+
+networks:
+  sub2api-local-net:
+    external: true
+    name: sub2api-monitor-target-net
+  sub2api-local-db-net:
+    external: true
+    name: sub2api-monitor-target-db-net

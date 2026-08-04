@@ -1,0 +1,85 @@
+name: Sub2API Monitor CI
+
+on:
+  push:
+    paths:
+      - 'sub2api-monitor/**'
+      - '.github/workflows/sub2api-monitor-ci.yml'
+  pull_request:
+    paths:
+      - 'sub2api-monitor/**'
+      - '.github/workflows/sub2api-monitor-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sub2api-monitor/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: sub2api-monitor/backend/pyproject.toml
+      - run: pip install -e '.[test]'
+      - run: ruff check app tests alembic
+      - run: ruff format --check app tests alembic
+      - run: mypy app
+      - run: pytest --cov=app --cov-fail-under=70 --cov-report=term-missing
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sub2api-monitor/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sub2api-monitor/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    env:
+      MONITOR_DB_PASSWORD: ci-database-password
+      MONITOR_MASTER_KEY: ci-master-key-that-is-at-least-thirty-two-bytes
+      MONITOR_ADMIN_PASSWORD: ci-admin-password-long
+      MONITOR_ALLOW_PRIVATE_TARGETS: 'true'
+      MONITOR_PORT: '18081'
+      MONITOR_SMOKE_PASSWORD: ci-admin-password-long
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --profile qa config --quiet
+        working-directory: sub2api-monitor
+      - run: docker compose --profile qa up -d --build --wait
+        working-directory: sub2api-monitor
+      - run: python3 qa/smoke.py
+        working-directory: sub2api-monitor
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sub2api-monitor/frontend/package-lock.json
+      - run: npm ci
+        working-directory: sub2api-monitor/frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: sub2api-monitor/frontend
+      - run: npm run test:e2e
+        working-directory: sub2api-monitor/frontend
+        env:
+          MONITOR_E2E_URL: http://127.0.0.1:18081
+      - if: always()
+        run: docker compose --profile qa down -v
+        working-directory: sub2api-monitor

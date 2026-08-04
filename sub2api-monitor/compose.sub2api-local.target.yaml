@@ -1,0 +1,18 @@
+services:
+  sub2api-loc:
+    networks:
+      - sub2api-loc-network
+      - sub2api-monitor-target-net
+
+  postgres-loc:
+    networks:
+      - sub2api-loc-network
+      - sub2api-monitor-target-db-net
+
+networks:
+  sub2api-monitor-target-net:
+    external: true
+    name: sub2api-monitor-target-net
+  sub2api-monitor-target-db-net:
+    external: true
+    name: sub2api-monitor-target-db-net
