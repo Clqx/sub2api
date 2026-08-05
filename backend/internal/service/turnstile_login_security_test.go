@@ -146,6 +146,21 @@ func TestTurnstileLoginSecurityDoesNotCountProviderErrors(t *testing.T) {
 	require.Zero(t, repo.failures)
 }
 
+func TestAuthServiceVerifyLoginCaptchaUsesTurnstileIPProtection(t *testing.T) {
+	repo := &loginCaptchaRepoStub{}
+	verifier := &loginSecurityVerifierStub{result: &TurnstileVerifyResponse{Success: false}}
+	cfg := &config.Config{}
+	settingService := enabledTurnstileSettings(t)
+	turnstileService := NewTurnstileService(settingService, verifier, repo, cfg)
+	authService := NewAuthService(nil, nil, nil, nil, cfg, settingService, nil, turnstileService, nil, nil, nil, nil, nil)
+
+	err := authService.VerifyLoginCaptcha(context.Background(), CaptchaProof{TurnstileToken: "bad-token"}, "203.0.113.20", "browser")
+
+	require.ErrorIs(t, err, ErrTurnstileVerificationFailed)
+	require.Equal(t, 1, verifier.calls)
+	require.Equal(t, 1, repo.failures)
+}
+
 func TestTurnstileLoginSecurityRecordsSuccessAndAdminUnblock(t *testing.T) {
 	repo := &loginCaptchaRepoStub{}
 	verifier := &loginSecurityVerifierStub{result: &TurnstileVerifyResponse{Success: true}}
