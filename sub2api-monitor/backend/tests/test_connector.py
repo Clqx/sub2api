@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import gzip
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 
 from app.config import Settings
-from app.connectors.sub2api import ContractError, Sub2APIConnector, normalize_account
+from app.connectors.sub2api import (
+    ConnectorError,
+    ContractError,
+    Sub2APIConnector,
+    normalize_account,
+)
 
 
 @pytest.mark.asyncio
@@ -276,6 +282,153 @@ async def test_connector_rejects_oversized_decompressed_response(
 
 
 @pytest.mark.asyncio
+async def test_connector_does_not_decode_compressed_response_twice(
+    settings_dict: dict[str, object],
+) -> None:
+    compressed = gzip.compress(b'{"code":0,"data":{"version":"1.2.3"}}')
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip", "content-length": str(len(compressed))},
+            content=compressed,
+        )
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        fact, version = await connector.version()
+
+    assert fact.runtime_state == "healthy"
+    assert version == "1.2.3"
+
+
+@pytest.mark.asyncio
+async def test_monitoring_snapshot_covers_ops_groups_and_redacts_secrets(
+    settings_dict: dict[str, object],
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/alert-events") or request.url.path.endswith("/groups/all"):
+            data: object = []
+        else:
+            data = {
+                "token_consumed": 42,
+                "credentials": {"access_token": "must-not-survive"},
+                "nested": {"api_key": "must-not-survive", "healthy": True},
+            }
+        return httpx.Response(200, json={"code": 0, "data": data})
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        facts, snapshot = await connector.monitoring_snapshot("1h", page_size=5)
+
+    assert facts["ops.dashboard"].runtime_state == "healthy"
+    assert facts["groups.inventory"].support_state == "supported"
+    assert snapshot["resources"]["ops_snapshot"]["token_consumed"] == 42
+    assert "credentials" not in snapshot["resources"]["ops_snapshot"]
+    assert "api_key" not in snapshot["resources"]["ops_snapshot"]["nested"]
+    realtime = next(
+        request for request in seen if request.url.path.endswith("/ops/realtime-traffic")
+    )
+    token_stats = next(
+        request for request in seen if request.url.path.endswith("/openai-token-stats")
+    )
+    request_errors = next(
+        request for request in seen if request.url.path.endswith("/ops/request-errors")
+    )
+    assert realtime.url.params["window"] == "5m"
+    assert token_stats.url.params["time_range"] == "1h"
+    assert request_errors.url.params["page_size"] == "5"
+
+
+@pytest.mark.asyncio
+async def test_account_usage_stats_is_bounded_sanitized_and_encoded(
+    settings_dict: dict[str, object],
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "history": [{"date": "2026-08-08", "requests": 12}],
+                    "summary": {
+                        "total_requests": 12,
+                        "credentials": {"access_token": "must-not-survive"},
+                    },
+                    "models": [
+                        {"model": "gpt-5", "requests": 12, "api_key": "must-not-survive"}
+                    ],
+                    "endpoints": [],
+                    "upstream_endpoints": [],
+                    "request_body": {"secret": "must-not-survive"},
+                },
+            },
+        )
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        result = await connector.account_usage_stats("account/with space", days=7)
+
+    assert seen[0].url.path == "/api/v1/admin/accounts/account/with space/stats"
+    assert seen[0].url.raw_path.startswith(b"/api/v1/admin/accounts/account%2Fwith%20space/stats")
+    assert seen[0].url.params["days"] == "7"
+    assert result["summary"]["total_requests"] == 12
+    assert "credentials" not in result["summary"]
+    assert "api_key" not in result["models"][0]
+    assert "request_body" not in result
+
+
+@pytest.mark.asyncio
+async def test_account_usage_stats_rejects_invalid_contract_and_http_errors(
+    settings_dict: dict[str, object],
+) -> None:
+    responses = iter(
+        [
+            httpx.Response(200, json={"code": 0, "data": {"summary": {}}}),
+            httpx.Response(403, json={"code": 403, "message": "forbidden"}),
+        ]
+    )
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(lambda _: next(responses)),
+    )
+    async with connector:
+        with pytest.raises(ContractError, match="invalid account usage stats"):
+            await connector.account_usage_stats("1")
+        with pytest.raises(ConnectorError, match="HTTP 403") as error:
+            await connector.account_usage_stats("1")
+    assert getattr(error.value, "status_code", None) == 403
+
+
+@pytest.mark.asyncio
 async def test_connector_pins_validated_dns_address(
     settings_dict: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -303,3 +456,147 @@ async def test_connector_pins_validated_dns_address(
         fact, version = await connector.version()
     assert fact.runtime_state == "healthy"
     assert version == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_upstream_billing_and_channel_monitor_contracts(
+    settings_dict: dict[str, object],
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path.endswith("upstream-billing-probe/batch"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "results": [
+                            {"account_id": 11, "snapshot": {"status": "ok"}}
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("upstream-billing-probe/settings"):
+            return httpx.Response(
+                200, json={"code": 0, "data": {"enabled": True, "interval_minutes": 15}}
+            )
+        if request.url.path == "/api/v1/admin/channel-monitors":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "id": 9,
+                                "name": "Codex",
+                                "provider": "openai",
+                                "endpoint": "https://upstream.example.com",
+                                "primary_model": "gpt-5.3-codex",
+                                "enabled": True,
+                                "interval_seconds": 60,
+                                "primary_status": "operational",
+                                "primary_latency_ms": 321,
+                                "availability_7d": 99.5,
+                            }
+                        ],
+                        "pages": 1,
+                    },
+                },
+            )
+        if request.url.path.endswith("/run"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "results": [
+                            {
+                                "model": "gpt-5.3-codex",
+                                "status": "operational",
+                                "latency_ms": 300,
+                                "ping_latency_ms": 20,
+                                "message": "ok",
+                                "checked_at": "2026-08-08T00:00:00Z",
+                            }
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/history"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "model": "gpt-5.3-codex",
+                                "status": "degraded",
+                                "latency_ms": 900,
+                                "ping_latency_ms": 25,
+                                "message": "slow",
+                                "checked_at": "2026-08-07T00:00:00Z",
+                            }
+                        ]
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected endpoint: {request.method} {request.url}")
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        billing_fact, settings = await connector.upstream_billing_probe_settings()
+        billing_batch = await connector.probe_upstream_billing_batch(["11"])
+        channel_fact, channels = await connector.channel_monitors()
+        run = await connector.run_channel_monitor("9")
+        history = await connector.channel_monitor_history("9", model="gpt-5.3-codex")
+
+    assert billing_fact.support_state == "supported"
+    assert settings == {"enabled": True, "interval_minutes": 15}
+    assert billing_batch[0]["snapshot"] == {"status": "ok"}
+    assert channel_fact.runtime_state == "healthy"
+    assert channels[0].primary_status == "operational"
+    assert channels[0].availability_7d == pytest.approx(99.5)
+    assert run[0].latency_ms == 300
+    assert history[0].status == "degraded"
+    assert ("POST", "/api/v1/admin/channel-monitors/9/run") in seen
+
+
+def test_account_normalizes_upstream_billing_snapshot() -> None:
+    account = normalize_account(
+        {
+            "id": 3,
+            "name": "relay",
+            "platform": "openai",
+            "type": "apikey",
+            "status": "active",
+            "schedulable": True,
+            "rate_multiplier": 0.2,
+            "extra": {
+                "upstream_billing_probe_enabled": True,
+                "upstream_billing_rate_sync_enabled": True,
+                "upstream_billing_probe": {
+                    "status": "ok",
+                    "last_attempt_at": "2026-08-08T00:00:00Z",
+                    "data": {"resolved_rate_multiplier": 0.18},
+                    "credential": "must-not-survive",
+                },
+            },
+        }
+    )
+
+    assert account.rate_multiplier == pytest.approx(0.2)
+    assert account.upstream_billing_probe_enabled
+    assert account.upstream_billing_rate_sync_enabled
+    assert account.upstream_billing_probe is not None
+    assert account.upstream_billing_probe["data"] == {"resolved_rate_multiplier": 0.18}
+    assert "credential" not in account.upstream_billing_probe

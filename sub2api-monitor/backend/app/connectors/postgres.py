@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import ipaddress
 import socket
+import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -168,10 +169,12 @@ class Sub2APIPostgresConnector:
         self,
         *,
         database_url: str,
+        ca_certificate: str | None = None,
         settings: Settings,
         connect: ConnectCallback | None = None,
     ):
         self.database_url = _asyncpg_url(database_url)
+        self.ca_certificate = ca_certificate
         self.settings = settings
         self._connect = connect or asyncpg.connect
 
@@ -228,7 +231,7 @@ class Sub2APIPostgresConnector:
         except ConnectorError:
             raise
         except Exception as exc:
-            raise ConnectorError("target database probe failed") from exc
+            raise _database_connection_error(exc) from exc
 
     async def accounts(
         self,
@@ -262,10 +265,10 @@ class Sub2APIPostgresConnector:
             snapshots, schema_fingerprint = await self._read_transaction(operation)
         except ConnectorError as exc:
             return ProbeFact("unknown", "unavailable", "missing", str(exc)), [], None
-        except Exception:
+        except Exception as exc:
             return (
                 ProbeFact(
-                    "unknown", "unavailable", "missing", "target database account read failed"
+                    "unknown", "unavailable", "missing", str(_database_connection_error(exc))
                 ),
                 [],
                 None,
@@ -279,6 +282,8 @@ class Sub2APIPostgresConnector:
         connect_kwargs: dict[str, Any] = {
             "timeout": self.settings.target_db_connect_timeout_seconds
         }
+        if self.ca_certificate is not None:
+            connect_kwargs["ssl"] = _database_ssl_context(self.ca_certificate)
         if pinned_ip is not None:
             connect_kwargs["host"] = pinned_ip
         connection = await self._connect(self.database_url, **connect_kwargs)
@@ -480,6 +485,39 @@ def _quota_windows(
 
 def _asyncpg_url(database_url: str) -> str:
     return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _database_ssl_context(ca_certificate: str) -> ssl.SSLContext:
+    try:
+        context = ssl.create_default_context(cadata=ca_certificate)
+    except (ssl.SSLError, ValueError) as exc:
+        raise ConnectorError("target database CA certificate is invalid") from exc
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    # Public database connections are pinned to the validated IP. The supplied
+    # certificate remains mandatory, while hostname matching is intentionally
+    # disabled so deployments using an IP endpoint can use their server CA.
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_REQUIRED
+    return context
+
+
+def _database_connection_error(exc: Exception) -> ConnectorError:
+    if isinstance(exc, ConnectionResetError):
+        return ConnectorError(
+            "target database connection was reset before the probe; "
+            "check the TCP gateway allowlist and PostgreSQL protocol passthrough"
+        )
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return ConnectorError("target database TLS certificate verification failed")
+    if isinstance(exc, asyncpg.InvalidPasswordError):
+        return ConnectorError("target database authentication failed")
+    if isinstance(exc, asyncpg.InvalidAuthorizationSpecificationError):
+        return ConnectorError("target database authorization rejected the connection")
+    if isinstance(exc, TimeoutError):
+        return ConnectorError("target database connection timed out")
+    if isinstance(exc, OSError):
+        return ConnectorError("target database network connection failed")
+    return ConnectorError("target database probe failed")
 
 
 def _quota_freshness(

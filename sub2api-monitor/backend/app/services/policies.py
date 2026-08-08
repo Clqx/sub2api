@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     AccountCurrent,
+    ChannelMonitorCurrent,
     Incident,
     IncidentStatus,
     IncidentTransition,
@@ -87,9 +90,10 @@ async def _set_incident(
     severity: str,
     title: str,
     message: str,
+    subject_type: str = "account",
 ) -> None:
     fingerprint = incident_fingerprint(
-        target_id, policy.id, "account", subject_id, rule_key, window_key
+        target_id, policy.id, subject_type, subject_id, rule_key, window_key
     )
     incident = await session.scalar(select(Incident).where(Incident.fingerprint == fingerprint))
     now = datetime.now(timezone.utc)
@@ -98,7 +102,7 @@ async def _set_incident(
             incident = Incident(
                 target_id=target_id,
                 policy_id=policy.id,
-                subject_type="account",
+                subject_type=subject_type,
                 subject_id=subject_id,
                 rule_key=rule_key,
                 window_key=window_key,
@@ -210,3 +214,90 @@ async def evaluate_account(
                 f"Account {account.name}, {quota.label}: {quota.remaining_percent:.1f}% remaining"
             ),
         )
+
+
+def upstream_rate_multiplier(snapshot: dict[str, Any] | None) -> float | None:
+    if not isinstance(snapshot, dict):
+        return None
+    data = snapshot.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    for value in (
+        data.get("resolved_rate_multiplier"),
+        data.get("effective_rate_multiplier"),
+        snapshot.get("synced_rate_multiplier"),
+    ):
+        if value is None or isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        try:
+            multiplier = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(multiplier) and multiplier >= 0:
+            return multiplier
+    return None
+
+
+async def evaluate_upstream_rate_change(
+    session: AsyncSession,
+    target_name: str,
+    account: AccountCurrent,
+    previous_multiplier: float | None,
+) -> None:
+    if (
+        account.platform.casefold() != "openai"
+        or account.account_type.casefold() != "apikey"
+        or not account.upstream_billing_probe_enabled
+    ):
+        return
+    current_multiplier = upstream_rate_multiplier(account.upstream_billing_probe)
+    if previous_multiplier is None or current_multiplier is None:
+        return
+    changed = not math.isclose(
+        previous_multiplier,
+        current_multiplier,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    )
+    policy = await policy_for_target(session, account.target_id)
+    await _set_incident(
+        session,
+        target_id=account.target_id,
+        policy=policy,
+        subject_id=account.external_account_id,
+        rule_key="upstream.rate_multiplier.changed",
+        window_key="resolved_rate_multiplier",
+        firing=changed,
+        severity="warning",
+        title=f"[{target_name}] Upstream rate multiplier changed",
+        message=(
+            f"Account {account.name} upstream resolved rate multiplier changed "
+            f"from x{previous_multiplier:g} to x{current_multiplier:g}"
+        ),
+    )
+
+
+async def evaluate_channel(
+    session: AsyncSession, target_name: str, channel: ChannelMonitorCurrent
+) -> None:
+    policy = await policy_for_target(session, channel.target_id)
+    if not policy.channel_failure_enabled:
+        return
+    unhealthy = channel.enabled and channel.primary_status in {"failed", "error"}
+    degraded = channel.enabled and channel.primary_status == "degraded"
+    await _set_incident(
+        session,
+        target_id=channel.target_id,
+        policy=policy,
+        subject_id=channel.external_monitor_id,
+        subject_type="channel_monitor",
+        rule_key="channel.unhealthy",
+        window_key=channel.primary_model,
+        firing=unhealthy or degraded,
+        severity="critical" if unhealthy else "warning",
+        title=f"[{target_name}] Channel monitor unhealthy",
+        message=(
+            f"Channel {channel.name} ({channel.primary_model or 'primary model'}) is "
+            f"{channel.primary_status or 'unknown'}; latency={channel.primary_latency_ms}ms"
+        )[:1000],
+    )

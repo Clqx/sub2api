@@ -1,10 +1,10 @@
 # Project Status
 
-Last updated: 2026-08-03
+Last updated: 2026-08-08
 
 ## Current Phase
 
-Phase 1, the Phase 2 FULL cached-quota slice, and the explicitly authorized active-quota refresh slice are closed. Remaining Phase 2 work covers broader providers and V1 noise-control workflows.
+Phase 1 and the completed Phase 2 FULL, active-quota, upstream-rate, and channel-monitoring slices are closed. Remaining Phase 2 work covers broader provider quota mappings and V1 noise-control workflows.
 
 ## Phase Goal
 
@@ -53,6 +53,32 @@ The current Phase 2 increment adds fresh provider quota through the existing Sub
 - [x] Verify active OpenAI OAuth observations and responsive UI against `sub2api-local`.
 - [x] Complete independent QA with no open blocker, major, or minor findings.
 
+## Phase 2 Upstream Rate and Channel Monitoring Completed
+
+- [x] Preserve account cost multipliers and sanitized upstream billing probe snapshots during API and FULL-mode collection.
+- [x] Expose target-wide probe settings, per-account enablement, and audited immediate probes.
+- [x] Aggregate channel monitor status, latency, seven-day availability, model coverage, and target history across deployments.
+- [x] Proxy complete channel create, edit, delete, and immediate-run workflows without storing plaintext channel API keys.
+- [x] Route degraded/failed channel states and recovery through the existing incident and ntfy outbox engine.
+- [x] Alert on resolved upstream multiplier changes for enabled OpenAI API-key accounts.
+- [x] Accept an encrypted per-target PostgreSQL PEM certificate and expose database configuration for existing targets.
+- [x] Add responsive React operations pages, migration coverage, connector contract tests, strict type checks, and desktop/mobile browser verification.
+
+## Native Sub2API Operations Monitoring Completed
+
+- [x] Probe and aggregate the target's native dashboard, traffic, latency, concurrency, account-availability, request/error, token, alert, log, and system-health APIs.
+- [x] Expose group inventory, usage, and capacity with real per-capability support/runtime/freshness results.
+- [x] Bound every upstream list request and recursively redact secrets and request bodies.
+- [x] Add overview, capacity, request/error, and system views with responsive internal table scrolling.
+- [x] Verify the live `whiles` FULL target: API and database connected, identity binding verified, and all native Ops capabilities healthy.
+
+## Native Account Usage Analytics Completed
+
+- [x] Proxy native per-account usage statistics through a bounded, recursively sanitized read-only endpoint.
+- [x] Expose 7/30/90-day requests, tokens, account/user/standard cost, response time, active days, daily trend, models, and inbound/upstream endpoints.
+- [x] Add account multiplier and group membership to the cross-target inventory without replacing missing values with zero.
+- [x] Verify the live `whiles` target plus desktop and 390px mobile layouts with no page-level overflow or application console errors.
+
 ## Pending Phase 0 Decisions
 
 - [ ] Confirm the oldest Sub2API version that V1 must support.
@@ -87,3 +113,7 @@ Phase 2 - full API+DB connector, field precedence, binding verification, expande
 - 2026-08-03: First active-increment QA found account starvation beyond the per-run limit and non-atomic active success/sample persistence. Remediation now filters account cooldowns before the run limit and commits each active sample with its success audit/capability state; dedicated rotation, rollback, and empty-response regressions pass. QA re-review is in progress.
 - 2026-08-03: Second QA pass found per-account attempt-query growth and a missing alert retry after downstream rollback. Remediation uses one grouped attempt query for the full account pool and merges still-fresh persisted active samples into every collection, so policy/ntfy work retries without another upstream call. A 1000-account query bound and failed-then-retried low-quota incident test pass.
 - 2026-08-03: Independent QA approved closure after all active-quota findings were remediated. Final gates: 48 backend tests at 73.12% coverage, Ruff, mypy, 6 frontend tests, lint/build, migration and Compose checks, healthy runtime image `sha256:483ec546...`, and real desktop/mobile E2E 2/2.
+- 2026-08-08: Added multi-target upstream billing-rate discovery and target-owned channel monitoring. Final local gates: 51 backend tests, Ruff, mypy, 6 frontend tests, ESLint, production build, a single Alembic head, and desktop/mobile browser layout checks with no application console errors.
+- 2026-08-08: Enabled five-minute upstream-rate discovery for OpenAI API-key accounts, added multiplier-change incidents, and added encrypted PEM certificate input for existing and new FULL targets. Final local gates: 55 backend tests, Ruff, mypy, 8 frontend tests, ESLint, production build, live collection, and desktop/mobile form checks.
+- 2026-08-08: Added native Sub2API operations aggregation and the four-view Operations page. Final gates: 57 backend tests, Ruff, strict mypy, 9 frontend tests, ESLint, production build, live target reprobe, and desktop/mobile browser checks with no page overflow.
+- 2026-08-08: Added native per-account usage analytics with 7/30/90-day summaries, trends, model and endpoint distributions. Final gates: 59 backend tests, Ruff, strict mypy, 10 frontend tests, ESLint, production build, live `whiles` reads, and 1280px/390px browser checks with no page overflow.

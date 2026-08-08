@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, CircleDollarSign, Server, Users } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, CircleDollarSign, RadioTower, Server, Users } from 'lucide-react'
 import { api } from '../api'
 import { ErrorState } from '../components/Status'
 
@@ -12,6 +12,7 @@ export function OverviewPage() {
     ['可用账号', d ? `${d.accounts_available}/${d.accounts_total}` : '--', CheckCircle2],
     ['低额度账号', d?.low_quota_accounts ?? '--', CircleDollarSign],
     ['未恢复告警', d?.active_incidents ?? '--', AlertTriangle],
+    ['健康渠道', d ? `${Math.max(0,d.channels_total-d.channels_unhealthy)}/${d.channels_total}` : '--', RadioTower],
     ['24h 采集失败', d?.failed_collections_24h ?? '--', Users],
   ] as const
   return <><PageTitle/><section className="metric-grid">{metrics.map(([label,value,Icon])=><div className="metric" key={label}><div><span>{label}</span><strong>{value}</strong></div><Icon size={20}/></div>)}</section>

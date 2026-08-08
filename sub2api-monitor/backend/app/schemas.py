@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
 class ORMModel(BaseModel):
@@ -57,6 +57,30 @@ class TargetCredential(BaseModel):
 
 class TargetDatabaseCredential(BaseModel):
     database_url: str = Field(min_length=1, max_length=4096)
+    ca_certificate: str | None = Field(default=None, min_length=1, max_length=65536)
+
+    @field_validator("ca_certificate")
+    @classmethod
+    def validate_ca_certificate(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        certificate = value.strip()
+        if (
+            "-----BEGIN CERTIFICATE-----" not in certificate
+            or "-----END CERTIFICATE-----" not in certificate
+        ):
+            raise ValueError("ca_certificate must contain a PEM certificate")
+        return certificate + "\n"
+
+    def secret_dict(self) -> dict[str, str]:
+        return {
+            key: value
+            for key, value in {
+                "database_url": self.database_url,
+                "ca_certificate": self.ca_certificate,
+            }.items()
+            if value is not None
+        }
 
 
 class TargetCreate(BaseModel):
@@ -166,6 +190,10 @@ class AccountResponse(ORMModel):
     available: bool
     availability_reasons: list[str]
     group_ids: list[str]
+    rate_multiplier: float | None
+    upstream_billing_probe_enabled: bool
+    upstream_billing_rate_sync_enabled: bool
+    upstream_billing_probe: dict[str, Any] | None
     expires_at: datetime | None
     rate_limit_reset_at: datetime | None
     overload_until: datetime | None
@@ -180,6 +208,72 @@ class AccountResponse(ORMModel):
 class AccountCursorPage(BaseModel):
     items: list[AccountResponse]
     next_cursor: str | None = None
+
+
+class AccountUsageHistory(BaseModel):
+    date: str | None = None
+    label: str | None = None
+    requests: int | None = None
+    tokens: int | None = None
+    cost: float | None = None
+    actual_cost: float | None = None
+    user_cost: float | None = None
+
+
+class AccountUsageDay(BaseModel):
+    date: str | None = None
+    label: str | None = None
+    requests: int | None = None
+    tokens: int | None = None
+    cost: float | None = None
+    user_cost: float | None = None
+
+
+class AccountUsageSummary(BaseModel):
+    days: int | None = None
+    actual_days_used: int | None = None
+    total_cost: float | None = None
+    total_user_cost: float | None = None
+    total_standard_cost: float | None = None
+    total_requests: int | None = None
+    total_tokens: int | None = None
+    avg_daily_cost: float | None = None
+    avg_daily_user_cost: float | None = None
+    avg_daily_requests: float | None = None
+    avg_daily_tokens: float | None = None
+    avg_duration_ms: float | None = None
+    today: AccountUsageDay | None = None
+    highest_cost_day: AccountUsageDay | None = None
+    highest_request_day: AccountUsageDay | None = None
+
+
+class AccountModelStat(BaseModel):
+    model: str | None = None
+    requests: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    total_tokens: int | None = None
+    cost: float | None = None
+    actual_cost: float | None = None
+    account_cost: float | None = None
+
+
+class AccountEndpointStat(BaseModel):
+    endpoint: str | None = None
+    requests: int | None = None
+    total_tokens: int | None = None
+    cost: float | None = None
+    actual_cost: float | None = None
+
+
+class AccountUsageStatsResponse(BaseModel):
+    history: list[AccountUsageHistory]
+    summary: AccountUsageSummary
+    models: list[AccountModelStat]
+    endpoints: list[AccountEndpointStat]
+    upstream_endpoints: list[AccountEndpointStat]
 
 
 class QuotaResponse(ORMModel):
@@ -220,6 +314,7 @@ class PolicyCreate(BaseModel):
     target_id: str | None = None
     enabled: bool = True
     unavailable_enabled: bool = True
+    channel_failure_enabled: bool = True
     quota_warning_remaining: float = Field(default=20, ge=0, le=100)
     quota_critical_remaining: float = Field(default=5, ge=0, le=100)
     quota_recovery_remaining: float = Field(default=30, ge=0, le=100)
@@ -239,6 +334,7 @@ class PolicyResponse(ORMModel):
     name: str
     enabled: bool
     unavailable_enabled: bool
+    channel_failure_enabled: bool
     quota_warning_remaining: float
     quota_critical_remaining: float
     quota_recovery_remaining: float
@@ -323,3 +419,109 @@ class DashboardResponse(BaseModel):
     low_quota_accounts: int
     active_incidents: int
     failed_collections_24h: int
+    channels_total: int = 0
+    channels_unhealthy: int = 0
+
+
+class UpstreamBillingSettings(BaseModel):
+    enabled: bool
+    interval_minutes: int = Field(ge=5, le=1440)
+
+
+class UpstreamBillingProbeToggle(BaseModel):
+    enabled: bool
+
+
+class UpstreamBillingBatchRequest(BaseModel):
+    account_ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class UpstreamBillingProbeResponse(BaseModel):
+    account_id: str
+    target_id: str
+    external_account_id: str
+    snapshot: dict[str, Any] | None = None
+
+
+class ChannelMonitorCreate(BaseModel):
+    target_id: str
+    name: str = Field(min_length=1, max_length=100)
+    provider: Literal["openai", "anthropic", "gemini", "grok"]
+    api_mode: Literal["chat_completions", "responses"] = "chat_completions"
+    endpoint: HttpUrl
+    api_key: str = Field(min_length=1, max_length=2000)
+    primary_model: str = Field(default="", max_length=200)
+    extra_models: list[str] = Field(default_factory=list, max_length=50)
+    group_name: str = Field(default="", max_length=100)
+    enabled: bool = True
+    interval_seconds: int = Field(default=60, ge=15, le=3600)
+    jitter_seconds: int = Field(default=0, ge=0, le=3585)
+    template_id: int | None = None
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+    body_override_mode: Literal["off", "merge", "replace"] = "off"
+    body_override: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_jitter(self) -> ChannelMonitorCreate:
+        if self.jitter_seconds >= self.interval_seconds:
+            raise ValueError("jitter_seconds must be lower than interval_seconds")
+        return self
+
+
+class ChannelMonitorUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    provider: Literal["openai", "anthropic", "gemini", "grok"] | None = None
+    api_mode: Literal["chat_completions", "responses"] | None = None
+    endpoint: HttpUrl | None = None
+    api_key: str | None = Field(default=None, max_length=2000)
+    primary_model: str | None = Field(default=None, max_length=200)
+    extra_models: list[str] | None = Field(default=None, max_length=50)
+    group_name: str | None = Field(default=None, max_length=100)
+    enabled: bool | None = None
+    interval_seconds: int | None = Field(default=None, ge=15, le=3600)
+    jitter_seconds: int | None = Field(default=None, ge=0, le=3585)
+    template_id: int | None = None
+    clear_template: bool = False
+    extra_headers: dict[str, str] | None = None
+    body_override_mode: Literal["off", "merge", "replace"] | None = None
+    body_override: dict[str, Any] | None = None
+
+
+class ChannelMonitorResponse(ORMModel):
+    id: str
+    target_id: str
+    external_monitor_id: str
+    name: str
+    provider: str
+    api_mode: str
+    endpoint: str
+    api_key_masked: str
+    api_key_decrypt_failed: bool
+    primary_model: str
+    extra_models: list[str]
+    group_name: str
+    enabled: bool
+    interval_seconds: int
+    jitter_seconds: int
+    last_checked_at: datetime | None
+    primary_status: str
+    primary_latency_ms: int | None
+    availability_7d: float
+    extra_models_status: list[dict[str, Any]]
+    template_id: str | None
+    extra_headers: dict[str, str]
+    body_override_mode: str
+    body_override: dict[str, Any] | None
+    source_created_at: datetime | None
+    source_updated_at: datetime | None
+    observed_at: datetime
+    target_name: str | None = None
+
+
+class ChannelCheckResponse(BaseModel):
+    model: str
+    status: str
+    latency_ms: int | None
+    ping_latency_ms: int | None
+    message: str
+    checked_at: datetime

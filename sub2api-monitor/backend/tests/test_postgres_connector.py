@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ssl
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -259,6 +260,70 @@ async def test_public_database_connection_uses_resolved_ip(
     await connector.probe()
 
     assert connect_kwargs["host"] == "203.0.113.9"
+
+
+async def test_database_connection_uses_supplied_ca_certificate(
+    settings_dict: dict[str, object], monkeypatch
+) -> None:
+    connection = FakeConnection({})
+    connect_kwargs: dict[str, Any] = {}
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    captured: dict[str, str] = {}
+
+    def create_default_context(*, cadata: str) -> ssl.SSLContext:
+        captured["cadata"] = cadata
+        return context
+
+    async def connect(*_: Any, **kwargs: Any) -> FakeConnection:
+        connect_kwargs.update(kwargs)
+        return connection
+
+    monkeypatch.setattr(
+        "app.connectors.postgres.ssl.create_default_context", create_default_context
+    )
+    connector = Sub2APIPostgresConnector(
+        database_url="postgresql://readonly:secret@db:5432/sub2api?sslmode=require",
+        ca_certificate="-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
+        settings=Settings(**settings_dict),
+        connect=connect,
+    )
+
+    await connector.probe()
+
+    assert captured["cadata"].startswith("-----BEGIN CERTIFICATE-----")
+    assert connect_kwargs["ssl"] is context
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is False
+
+
+async def test_database_connection_rejects_invalid_ca_certificate(
+    settings_dict: dict[str, object],
+) -> None:
+    connector = Sub2APIPostgresConnector(
+        database_url="postgresql://readonly:secret@db:5432/sub2api?sslmode=require",
+        ca_certificate="not-a-certificate",
+        settings=Settings(**settings_dict),
+    )
+
+    with pytest.raises(ConnectorError, match="CA certificate is invalid"):
+        await connector.probe()
+
+
+async def test_database_connection_reports_gateway_reset(
+    settings_dict: dict[str, object],
+) -> None:
+    async def connect(*_: Any, **__: Any) -> FakeConnection:
+        raise ConnectionResetError("gateway reset")
+
+    connector = Sub2APIPostgresConnector(
+        database_url="postgresql://readonly:secret@db:5432/sub2api?sslmode=require",
+        settings=Settings(**settings_dict),
+        connect=connect,
+    )
+
+    with pytest.raises(ConnectorError, match="TCP gateway allowlist"):
+        await connector.probe()
 
 
 async def test_public_database_rejects_verify_full_before_connection() -> None:

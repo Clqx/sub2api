@@ -24,7 +24,13 @@ from app.models import (
 )
 from app.security import SecretCipher
 from app.services.active_usage import collect_active_usage
-from app.services.policies import evaluate_account
+from app.services.monitoring import sync_channel_monitors
+from app.services.policies import (
+    evaluate_account,
+    evaluate_channel,
+    evaluate_upstream_rate_change,
+    upstream_rate_multiplier,
+)
 from app.services.targets import (
     apply_probe_fact,
     connector_for_target,
@@ -63,6 +69,15 @@ async def collect_run(
             passive_attempted = 0
             passive_succeeded = 0
             active_results: dict[str, list[QuotaWindow]] = {}
+            try:
+                billing_fact, _ = await connector.upstream_billing_probe_settings()
+            except Exception as exc:
+                billing_fact = ProbeFact("unknown", "unavailable", "missing", _safe_error(exc))
+            try:
+                channel_fact, channel_monitors = await connector.channel_monitors()
+            except Exception as exc:
+                channel_fact = ProbeFact("unknown", "unavailable", "missing", _safe_error(exc))
+                channel_monitors = []
             if accounts_fact.runtime_state == "healthy":
                 (
                     passive_results,
@@ -99,6 +114,20 @@ async def collect_run(
                 active_results = await _latest_persisted_active_usage(
                     session, target.id, accounts, settings, now
                 )
+        await apply_probe_fact(
+            session, target.id, "accounts.upstream_billing_probe", billing_fact, now
+        )
+        await apply_probe_fact(session, target.id, "channels.monitor", channel_fact, now)
+        if channel_fact.runtime_state == "healthy":
+            stored_channels, removed_channels = await sync_channel_monitors(
+                session, target, channel_monitors, observed_at=now
+            )
+            for channel in stored_channels:
+                await evaluate_channel(session, target.name, channel)
+            for channel in removed_channels:
+                channel.enabled = False
+                await evaluate_channel(session, target.name, channel)
+                await session.delete(channel)
         passive_fact = _passive_capability_fact(
             passive_results, passive_attempted, passive_succeeded
         )
@@ -119,7 +148,7 @@ async def collect_run(
                     *active_results.get(account.external_account_id, []),
                 ]
             )
-            current, quotas = await _store_account(
+            current, quotas, previous_upstream_multiplier = await _store_account(
                 session,
                 target,
                 run,
@@ -134,6 +163,12 @@ async def collect_run(
             )
             quota_count += len(quotas)
             await evaluate_account(session, target.name, current, quotas)
+            await evaluate_upstream_rate_change(
+                session,
+                target.name,
+                current,
+                previous_upstream_multiplier,
+            )
         previous = list(
             await session.scalars(
                 select(AccountCurrent).where(AccountCurrent.target_id == target.id)
@@ -355,6 +390,14 @@ def merge_database_snapshots(
                 snapshot.temp_unschedulable_until or api_account.temp_unschedulable_until
             ),
             "group_ids": api_account.group_ids,
+            "rate_multiplier": api_account.rate_multiplier,
+            "extra": {
+                "upstream_billing_probe_enabled": api_account.upstream_billing_probe_enabled,
+                "upstream_billing_rate_sync_enabled": (
+                    api_account.upstream_billing_rate_sync_enabled
+                ),
+                "upstream_billing_probe": api_account.upstream_billing_probe,
+            },
         }
         item = normalize_account(raw, now=now)
         item.quotas = _newest_quotas([*api_account.quotas, *snapshot.quotas])
@@ -458,7 +501,7 @@ async def _store_account(
     sequence: int,
     producer_id: str,
     persisted_quota_keys: set[tuple[str, datetime, str]] | None = None,
-) -> tuple[AccountCurrent, list[QuotaSample]]:
+) -> tuple[AccountCurrent, list[QuotaSample], float | None]:
     observation = AccountObservation(
         producer_id=producer_id,
         target_id=target.id,
@@ -476,6 +519,9 @@ async def _store_account(
             AccountCurrent.target_id == target.id,
             AccountCurrent.external_account_id == account.external_account_id,
         )
+    )
+    previous_upstream_multiplier = (
+        upstream_rate_multiplier(current.upstream_billing_probe) if current is not None else None
     )
     if current is None:
         current = AccountCurrent(
@@ -505,6 +551,10 @@ async def _store_account(
     current.rate_limit_reset_at = account.rate_limit_reset_at
     current.overload_until = account.overload_until
     current.temp_unschedulable_until = account.temp_unschedulable_until
+    current.rate_multiplier = account.rate_multiplier
+    current.upstream_billing_probe_enabled = account.upstream_billing_probe_enabled
+    current.upstream_billing_rate_sync_enabled = account.upstream_billing_rate_sync_enabled
+    current.upstream_billing_probe = account.upstream_billing_probe
     current.source_observation_id = observation.id
     current.observed_at = account.observed_at
     current.last_seen_at = datetime.now(timezone.utc)
@@ -533,7 +583,7 @@ async def _store_account(
             session.add(sample)
         samples.append(sample)
     await session.flush()
-    return current, samples
+    return current, samples, previous_upstream_multiplier
 
 
 async def _fail_run(session: AsyncSession, run: CollectionRun, error: str) -> None:

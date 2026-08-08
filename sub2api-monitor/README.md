@@ -4,7 +4,7 @@ Independent monitoring center for multiple Sub2API deployments. It observes acco
 
 ## Project Status
 
-Phase 1, the first Phase 2 FULL slice, and the active-quota refresh increment are complete. The runnable system supports multiple API-only or API+read-only-DB targets, account availability, passive and explicitly opted-in active quota observations, alert incidents, durable ntfy delivery, and an operations UI. Real `sub2api-local` integration and independent QA passed; remaining provider mappings and V1 noise-control workflows stay in Phase 2. The current source of truth is [docs/STATUS.md](docs/STATUS.md).
+Phase 1 and the current Phase 2 slices are complete. The runnable system supports multiple API-only or API+read-only-DB targets, account availability, passive and explicitly opted-in active quota observations, upstream billing-rate discovery, channel uptime monitoring, alert incidents, durable ntfy delivery, and an operations UI. The current source of truth is [docs/STATUS.md](docs/STATUS.md).
 
 ## Stack
 
@@ -76,7 +76,7 @@ GRANT SELECT (
 ) ON TABLE public.accounts TO sub2api_monitor_ro;
 ```
 
-Use `postgresql://sub2api_monitor_ro:<password>@<host>:5432/<database>` in the FULL target form. Adjust the column grant only when a compatible Sub2API schema omits a listed column. Do not grant `credentials`. The connector rejects roles without access to `id`, roles with `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`, and transactions that are not read-only. It queries only fixed allowlisted account columns and quota keys.
+Use `postgresql://sub2api_monitor_ro:<password>@<host>:5432/<database>?sslmode=require` in the FULL target form. For a public TLS endpoint, select the downloaded `.crt`/`.pem` file or paste the complete PEM contents into **TLS server certificate (PEM)**; DER-formatted `.crt` files are converted to PEM in the browser. A path on the monitored server is not accessible to the monitor. The connection URL and certificate are encrypted together. Adjust the column grant only when a compatible Sub2API schema omits a listed column. Do not grant `credentials`. The connector rejects roles without access to `id`, roles with `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`, and transactions that are not read-only. It queries only fixed allowlisted account columns and quota keys.
 
 FULL scheduled collection remains passive until active quota refresh is explicitly authorized. OpenAI Codex 5-hour/7-day snapshots, configured local limits, and supported provider snapshots include source, observation time, reset time, and freshness. Snapshots older than `MONITOR_TARGET_QUOTA_STALE_SECONDS` (default one hour), or past their reset time, remain visible as expired but do not fire or recover low-quota incidents.
 
@@ -86,7 +86,23 @@ Set `MONITOR_ACTIVE_QUOTA_REFRESH_ENABLED=true` to permit active quota work glob
 
 Active usage may make Sub2API contact the upstream provider, refresh a token, update its quota cache, or clear a recoverable account error. Disabling either switch stops new active calls without disabling passive account monitoring. Unsupported account types, including an OpenAI API key without configured local limits, remain quota-unknown rather than zero.
 
-For public database targets, DNS-pinned connections currently reject `sslmode=verify-full` because asyncpg cannot preserve the original hostname for certificate verification while connecting to a validated IP. Use a trusted private target network or another supported SSL mode; the monitor does not silently downgrade hostname verification.
+### Upstream billing-rate discovery
+
+The **Upstream rates** page aggregates each account's configured cost multiplier and the target's `upstream_billing_probe` snapshot. It preserves the declared effective/resolved multiplier, peak multiplier, attempt time, freshness deadline, next probe time, failure reason, and whether automatic probing or rate synchronization is enabled. Operators can update the target-wide automatic-probe interval, toggle probing per account, and run an immediate probe. A changed resolved multiplier for an enabled OpenAI API-key account creates an `upstream.rate_multiplier.changed` incident and enters the existing ntfy outbox workflow. Immediate probes may contact the account's upstream Sub2API deployment and are audited.
+
+### Channel monitoring
+
+The **Channel monitors** page aggregates target-owned OpenAI, Anthropic, Gemini, and Grok channel checks. It exposes the primary and extra models, latest state, latency, seven-day availability, schedule, and live target history. Channel definitions can be created, edited, deleted, and run immediately through the monitor; the upstream API key remains masked and is never persisted in the monitor database. A degraded, failed, or error primary model enters the existing incident, recovery, and ntfy outbox workflow.
+
+### Native operations monitoring
+
+The **Operations** page aggregates the monitored target's existing read-only Ops APIs. Its overview, capacity, request/error, and system views cover dashboard trends, QPS/TPS, latency distribution, OpenAI token statistics, platform and user concurrency, account availability, group inventory/usage/capacity, request and upstream errors, request details, alert events, background jobs, system logs, auth-cache health, ingress health, and log-pipeline health. The connector calls only a fixed endpoint allowlist with bounded page sizes and recursively removes credentials, tokens, headers, passwords, and request bodies before returning data to the monitor UI.
+
+### Account usage analytics
+
+The **Accounts** page shows each account's configured multiplier and group membership. Opening an account reads the target's native 7, 30, or 90-day usage statistics on demand: requests, tokens, account cost, user-billed cost, standard cost, response time, active days, daily trend, model distribution, and inbound/upstream endpoint distribution. The monitor does not fan this request out across the account list, does not persist the returned analytics, and keeps missing values distinct from explicit upstream zeroes.
+
+For public database targets, use `sslmode=require` plus the separately supplied PEM certificate. The connector pins the resolved public IP, requires the supplied certificate, validates its trust chain, and enforces TLS 1.2 or newer. `sslmode=verify-full` remains rejected because DNS pinning cannot preserve hostname verification; the monitor does not silently downgrade that mode.
 
 ## Documentation
 

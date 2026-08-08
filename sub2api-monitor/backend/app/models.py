@@ -278,6 +278,14 @@ class AccountCurrent(Base):
     available: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
     availability_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     group_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    rate_multiplier: Mapped[float | None] = mapped_column(Float)
+    upstream_billing_probe_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    upstream_billing_rate_sync_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    upstream_billing_probe: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rate_limit_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     overload_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -354,6 +362,7 @@ class Policy(Base):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     unavailable_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    channel_failure_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     quota_warning_remaining: Mapped[float] = mapped_column(Float, default=20.0)
     quota_critical_remaining: Mapped[float] = mapped_column(Float, default=5.0)
     quota_recovery_remaining: Mapped[float] = mapped_column(Float, default=30.0)
@@ -361,6 +370,44 @@ class Policy(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+
+
+class ChannelMonitorCurrent(Base):
+    __tablename__ = "channel_monitors"
+    __table_args__ = (
+        UniqueConstraint("target_id", "external_monitor_id", name="uq_channel_target_external"),
+        Index("ix_channel_target_status", "target_id", "primary_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    target_id: Mapped[str] = mapped_column(ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    external_monitor_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    api_mode: Mapped[str] = mapped_column(String(30), default="chat_completions", nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(2048), nullable=False)
+    api_key_masked: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    api_key_decrypt_failed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    primary_model: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    extra_models: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    group_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    jitter_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    primary_status: Mapped[str] = mapped_column(String(30), default="", nullable=False)
+    primary_latency_ms: Mapped[int | None] = mapped_column(Integer)
+    availability_7d: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    extra_models_status: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    template_id: Mapped[str | None] = mapped_column(String(160))
+    extra_headers: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
+    body_override_mode: Mapped[str] = mapped_column(String(20), default="off", nullable=False)
+    body_override: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Incident(Base):

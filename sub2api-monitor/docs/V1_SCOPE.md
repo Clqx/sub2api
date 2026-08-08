@@ -19,12 +19,16 @@ Each deployment is a `target`. Accounts are globally identified by `(target_id, 
 | CAP-02 | Declare side effects | Every capability states whether collection is passive, calls an upstream provider, or may change target-side state. |
 | ACC-01 | Account inventory | List accounts across targets with server-side filtering and stable global identity. |
 | ACC-02 | Availability | Explain effective availability using status, schedulable, expiry, rate limit, overload, and temporary quarantine when present. |
+| ACC-03 | Usage analytics | Read native account requests, tokens, account/user/standard costs, latency, trends, models, and endpoints on demand. |
 | QTA-01 | Normalize quota | Represent percentage windows, balances, credits, reset times, source, and observed time without losing provider meaning. |
 | QTA-02 | Detect stale data | Never treat missing or expired quota samples as healthy zero usage. |
+| RAT-01 | Monitor upstream billing rates | Preserve configured and declared multipliers, probe freshness, failures, and synchronization state. |
+| CHN-01 | Monitor model channels | Aggregate target channel status, latency, availability, history, and manual checks across deployments. |
 | ALT-01 | Evaluate policies | Support warning, critical, exhausted, unavailable, group-capacity, stale-data, and recovery events. |
 | ALT-02 | Control noise | Apply sustain duration, hysteresis, cooldown, reminder, deduplication, acknowledgement, and silence. |
 | NTF-01 | Publish to ntfy | Route by target/policy, redact content, retry failures durably, and retain delivery history. |
 | OPS-01 | Self-observability | Expose health, readiness, worker heartbeat, collection runs, and outbox state. |
+| OPS-02 | Aggregate target operations | Expose the target's native traffic, capacity, request/error, alert, log, and system-health telemetry through fixed read-only APIs. |
 | SEC-01 | Protect credentials | Secrets are write-only in APIs, encrypted at rest, redacted from logs, and never exposed to the browser. |
 | DEP-01 | Docker deployment | Start API, worker, web, and monitoring PostgreSQL from an empty volume using Docker Compose. |
 
@@ -32,7 +36,8 @@ Each deployment is a `target`. Accounts are globally identified by `(target_id, 
 
 - Overview: instance reachability, monitoring coverage, available accounts, low quota, firing incidents, failed collections.
 - Targets: onboarding wizard, connection tests, capabilities, collection status, settings.
-- Accounts: cross-target table and account detail drawer with availability reasons and quota windows.
+- Accounts: cross-target table with multiplier and group context; account detail includes native 7/30/90-day usage analytics, availability reasons, and quota windows.
+- Operations: target traffic, latency, concurrency, group capacity, requests/errors, alerts, logs, and system health.
 - Alerts: firing, acknowledged, silenced, resolved, and notification delivery state.
 - Policies: global defaults with per-target overrides.
 - Notifications: ntfy destinations, routing, test publish, and delivery history.
@@ -54,7 +59,7 @@ Each deployment is a `target`. Accounts are globally identified by `(target_id, 
 
 - Modifying monitored Sub2API source code.
 - Direct SQL/DDL/DML writes through monitored Sub2API database connections. Separately authorized active API probes may cause documented incidental target-side writes under the Probe Safety contract.
-- Monitor-initiated management actions such as account disablement, credential rotation, or traffic rerouting. An explicitly authorized active usage API may have documented target-side incidental writes; that does not grant general management authority.
+- General account management actions such as account disablement, credential rotation, or traffic rerouting. Explicitly authorized active quota, billing-rate probe, and channel-monitor operations remain limited to their documented target APIs and do not grant broader management authority.
 - Treating API-only access as equivalent to full access.
 - Arbitrary compatibility with forks that replace the core account/API contracts.
 - General infrastructure monitoring unrelated to account health and quota.

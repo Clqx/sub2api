@@ -22,8 +22,27 @@ CAPABILITY_DEFAULTS: dict[str, tuple[bool, str]] = {
     "instance.version": (True, "none"),
     "accounts.inventory": (True, "none"),
     "accounts.availability": (True, "none"),
+    "accounts.upstream_billing_probe": (True, "upstream_call_on_manual_probe"),
+    "channels.monitor": (True, "upstream_call_on_channel_check"),
     "groups.inventory": (True, "none"),
+    "groups.usage": (True, "none"),
     "groups.capacity": (True, "none"),
+    "ops.dashboard": (True, "none"),
+    "ops.latency": (True, "none"),
+    "ops.errors": (True, "none"),
+    "ops.openai_token_stats": (True, "none"),
+    "ops.concurrency": (True, "none"),
+    "ops.user_concurrency": (True, "none"),
+    "ops.account_availability": (True, "none"),
+    "ops.realtime_traffic": (True, "none"),
+    "ops.request_errors": (True, "none"),
+    "ops.upstream_errors": (True, "none"),
+    "ops.request_details": (True, "none"),
+    "ops.alert_events": (True, "none"),
+    "ops.system_logs": (True, "none"),
+    "ops.system_log_health": (True, "none"),
+    "ops.auth_cache_health": (True, "none"),
+    "ops.ingress_health": (True, "none"),
     "quota.passive": (True, "none"),
     "quota.active_refresh": (False, "upstream_call_and_possible_target_write"),
     "quota.balance": (True, "none"),
@@ -60,7 +79,7 @@ async def create_target(
     )
     if payload.database is not None:
         target.database_secret = TargetDatabaseSecret(
-            ciphertext=cipher.encrypt_json({"database_url": payload.database.database_url})
+            ciphertext=cipher.encrypt_json(payload.database.secret_dict())
         )
         target.db_connection_state = "unknown"
         target.binding_state = "pending"
@@ -113,9 +132,7 @@ async def update_target(
         changed_connector = True
         if target.database_secret is None:
             target.database_secret = TargetDatabaseSecret(target_id=target.id, ciphertext="")
-        target.database_secret.ciphertext = cipher.encrypt_json(
-            {"database_url": payload.database.database_url}
-        )
+        target.database_secret.ciphertext = cipher.encrypt_json(payload.database.secret_dict())
     if next_mode == "full" and target.database_secret is None:
         raise ValueError("database is required for full mode")
     if payload.mode is not None and payload.mode != target.mode:
@@ -283,7 +300,12 @@ def database_connector_for_target(
     database_url = secret.get("database_url")
     if not isinstance(database_url, str) or not database_url:
         raise ValueError("target database credential is invalid")
-    return Sub2APIPostgresConnector(database_url=database_url, settings=settings)
+    ca_certificate = secret.get("ca_certificate")
+    return Sub2APIPostgresConnector(
+        database_url=database_url,
+        ca_certificate=ca_certificate if isinstance(ca_certificate, str) else None,
+        settings=settings,
+    )
 
 
 async def probe_target(
@@ -294,13 +316,52 @@ async def probe_target(
     actor: str,
 ) -> ProbeResult:
     now = datetime.now(timezone.utc)
+    database_error_reason: str | None = None
     connector = await connector_for_target(session, target, settings, cipher)
+    monitoring_facts: dict[str, ProbeFact] = {}
     async with connector:
         result = await connector.probe()
+        try:
+            billing_fact, _ = await connector.upstream_billing_probe_settings()
+        except Exception as exc:
+            billing_fact = ProbeFact("unknown", "unavailable", "missing", str(exc)[:500])
+        try:
+            channel_fact, _ = await connector.channel_monitors()
+        except Exception as exc:
+            channel_fact = ProbeFact("unknown", "unavailable", "missing", str(exc)[:500])
+        try:
+            monitoring_facts, _ = await connector.monitoring_snapshot("5m", page_size=1)
+        except Exception as exc:
+            reason = str(exc)[:500]
+            monitoring_facts = {
+                key: ProbeFact("unknown", "unavailable", "missing", reason)
+                for key in CAPABILITY_DEFAULTS
+                if key.startswith("ops.") or key.startswith("groups.")
+            }
     await apply_probe_fact(session, target.id, "instance.health", result.health, now)
     await apply_probe_fact(session, target.id, "instance.version", result.version, now)
     await apply_probe_fact(session, target.id, "accounts.inventory", result.accounts, now)
     await apply_probe_fact(session, target.id, "accounts.availability", result.accounts, now)
+    await apply_probe_fact(
+        session, target.id, "accounts.upstream_billing_probe", billing_fact, now
+    )
+    await apply_probe_fact(session, target.id, "channels.monitor", channel_fact, now)
+    for key, fact in monitoring_facts.items():
+        await apply_probe_fact(session, target.id, key, fact, now)
+    local_quota_found = any(
+        quota.quota_key.startswith("local.")
+        for account in result.normalized_accounts
+        for quota in account.quotas
+    )
+    local_quota_fact = (
+        ProbeFact("supported", "healthy", "fresh")
+        if local_quota_found
+        else ProbeFact(
+            "unsupported", "unavailable", "missing", "account inventory has no local quota fields"
+        )
+    )
+    await apply_probe_fact(session, target.id, "quota.balance", local_quota_fact, now)
+    await apply_probe_fact(session, target.id, "quota.credits", local_quota_fact, now)
     target.version = result.version_text
     target.last_probe_at = now
     target.api_connection_state = (
@@ -312,13 +373,18 @@ async def probe_target(
     ready = api_ready
     if target.mode == "full":
         database_connector = database_connector_for_target(target, settings, cipher)
+        database_probe_error: str | None = None
         try:
             database_result = await database_connector.probe()
-        except Exception:
+        except Exception as exc:
             database_result = None
+            database_probe_error = str(exc)[:500]
         if database_result is None:
             database_fact = ProbeFact(
-                "unknown", "unavailable", "missing", "target database probe failed"
+                "unknown",
+                "unavailable",
+                "missing",
+                database_probe_error or "target database probe failed",
             )
             target.db_connection_state = "unavailable"
             target.binding_state = "inconclusive"
@@ -335,6 +401,7 @@ async def probe_target(
             )
             target.binding_db_fingerprint = None
             target.binding_db_schema_fingerprint = None
+            database_error_reason = database_fact.reason
         else:
             database_fact = database_result.fact
             target.db_connection_state = (
@@ -368,6 +435,8 @@ async def probe_target(
                 target.binding_state = "verified"
             else:
                 target.binding_state = "mismatch"
+            if database_fact.runtime_state != "healthy":
+                database_error_reason = database_fact.reason
         target.binding_method = "account_identity_set+api_version+public_accounts_schema_v1"
         target.binding_confidence = "medium" if target.binding_state == "verified" else "none"
         target.binding_checked_at = now
@@ -404,6 +473,7 @@ async def probe_target(
         None
         if ready
         else result.accounts.reason
+        or database_error_reason
         or (
             f"API/database identity binding is {target.binding_state}"
             if target.mode == "full"

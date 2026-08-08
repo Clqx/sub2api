@@ -46,6 +46,7 @@ async def test_target_secret_is_encrypted_and_capabilities_are_independent(
 async def test_full_target_database_secret_is_separately_encrypted(db_session) -> None:
     cipher = SecretCipher("test-master-key-that-is-long-enough")
     database_url = "postgresql://readonly:db-secret@database:5432/sub2api"
+    ca_certificate = "-----BEGIN CERTIFICATE-----\ntest-certificate\n-----END CERTIFICATE-----\n"
     target = await create_target(
         db_session,
         TargetCreate.model_validate(
@@ -54,7 +55,10 @@ async def test_full_target_database_secret_is_separately_encrypted(db_session) -
                 "base_url": "https://sub.example.com",
                 "mode": "full",
                 "credential": {"auth_type": "x_api_key", "api_key": "admin-secret"},
-                "database": {"database_url": database_url},
+                "database": {
+                    "database_url": database_url,
+                    "ca_certificate": ca_certificate,
+                },
             }
         ),
         cipher,
@@ -65,7 +69,11 @@ async def test_full_target_database_secret_is_separately_encrypted(db_session) -
     )
     assert database_secret is not None
     assert database_url not in database_secret.ciphertext
-    assert cipher.decrypt_json(database_secret.ciphertext) == {"database_url": database_url}
+    assert ca_certificate not in database_secret.ciphertext
+    assert cipher.decrypt_json(database_secret.ciphertext) == {
+        "database_url": database_url,
+        "ca_certificate": ca_certificate,
+    }
     capabilities = list(
         await db_session.scalars(select(Capability).where(Capability.target_id == target.id))
     )

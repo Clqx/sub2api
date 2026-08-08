@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
@@ -13,12 +13,13 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import bearer, current_user, get_cipher
 from app.config import Settings, get_settings
 from app.connectors.postgres import validate_database_url
-from app.connectors.sub2api import ConnectorError, validate_target_url
+from app.connectors.sub2api import ConnectorError, Sub2APIConnector, validate_target_url
 from app.database import get_session
 from app.models import (
     AccountCurrent,
     AuditEvent,
     Capability,
+    ChannelMonitorCurrent,
     CollectionRun,
     Incident,
     IncidentStatus,
@@ -35,9 +36,14 @@ from app.models import (
 from app.schemas import (
     AccountCursorPage,
     AccountResponse,
+    AccountUsageStatsResponse,
     ActiveRefreshCapabilityUpdate,
     CapabilityResponse,
+    ChannelCheckResponse,
     ChannelCreate,
+    ChannelMonitorCreate,
+    ChannelMonitorResponse,
+    ChannelMonitorUpdate,
     ChannelResponse,
     ChannelUpdate,
     DashboardResponse,
@@ -54,6 +60,10 @@ from app.schemas import (
     TargetCreate,
     TargetResponse,
     TargetUpdate,
+    UpstreamBillingBatchRequest,
+    UpstreamBillingProbeResponse,
+    UpstreamBillingProbeToggle,
+    UpstreamBillingSettings,
     UserResponse,
 )
 from app.security import (
@@ -62,6 +72,18 @@ from app.security import (
     create_session_token,
     login_throttle,
     revoke_session_token,
+)
+from app.services.monitoring import (
+    account_connector,
+    channel_payload,
+    supports_upstream_billing_probe,
+    target_connector,
+    upsert_channel_monitor,
+)
+from app.services.policies import (
+    evaluate_channel,
+    evaluate_upstream_rate_change,
+    upstream_rate_multiplier,
 )
 from app.services.targets import (
     create_target,
@@ -301,6 +323,7 @@ async def list_accounts(
     session: AsyncSession = Depends(get_session),
     target_id: str | None = None,
     platform: str | None = None,
+    account_type: str | None = None,
     available: bool | None = None,
     search: str | None = None,
     cursor: str | None = None,
@@ -311,6 +334,8 @@ async def list_accounts(
         conditions.append(AccountCurrent.target_id == target_id)
     if platform:
         conditions.append(AccountCurrent.platform == platform)
+    if account_type:
+        conditions.append(AccountCurrent.account_type == account_type)
     if available is not None:
         conditions.append(AccountCurrent.available.is_(available))
     if search:
@@ -440,6 +465,468 @@ async def account_quota(
     for item in samples:
         latest.setdefault(item.quota_key, item)
     return list(latest.values())
+
+
+@router.get(
+    "/accounts/{account_id}/stats",
+    response_model=AccountUsageStatsResponse,
+)
+async def account_usage_stats(
+    account_id: str,
+    days: int = Query(default=30, ge=1, le=90),
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> dict[str, Any]:
+    account, _target, connector = await _account_connector_or_404(
+        session, account_id, settings, cipher
+    )
+    try:
+        async with connector:
+            return await connector.account_usage_stats(
+                account.external_account_id, days=days
+            )
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+
+
+@router.get(
+    "/targets/{target_id}/upstream-billing-probe/settings",
+    response_model=UpstreamBillingSettings,
+)
+async def get_upstream_billing_settings(
+    target_id: str,
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> UpstreamBillingSettings:
+    _target, connector = await _target_connector_or_404(session, target_id, settings, cipher)
+    try:
+        async with connector:
+            fact, data = await connector.upstream_billing_probe_settings()
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    if fact.runtime_state != "healthy" or data is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, fact.reason or "feature unavailable")
+    return UpstreamBillingSettings.model_validate(data)
+
+
+@router.put(
+    "/targets/{target_id}/upstream-billing-probe/settings",
+    response_model=UpstreamBillingSettings,
+)
+async def update_upstream_billing_settings(
+    target_id: str,
+    payload: UpstreamBillingSettings,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> UpstreamBillingSettings:
+    _, connector = await _target_connector_or_404(session, target_id, settings, cipher)
+    try:
+        async with connector:
+            result = await connector.update_upstream_billing_probe_settings(**payload.model_dump())
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="upstream_billing.settings.update",
+            target_id=target_id,
+            details=payload.model_dump(),
+        )
+    )
+    await session.commit()
+    return UpstreamBillingSettings.model_validate(result)
+
+
+@router.get("/targets/{target_id}/operations")
+async def target_operations(
+    target_id: str,
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+    time_range: Literal["5m", "30m", "1h", "6h", "24h"] = "1h",
+) -> dict[str, Any]:
+    target, connector = await _target_connector_or_404(session, target_id, settings, cipher)
+    try:
+        async with connector:
+            facts, snapshot = await connector.monitoring_snapshot(time_range)
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    snapshot["target_id"] = target.id
+    snapshot["target_name"] = target.name
+    snapshot["capabilities"] = {
+        key: {
+            "support_state": fact.support_state,
+            "runtime_state": fact.runtime_state,
+            "freshness": fact.freshness,
+            "reason": fact.reason,
+        }
+        for key, fact in facts.items()
+    }
+    return snapshot
+
+
+@router.put(
+    "/accounts/{account_id}/upstream-billing-probe",
+    response_model=UpstreamBillingProbeResponse,
+)
+async def toggle_upstream_billing_probe(
+    account_id: str,
+    payload: UpstreamBillingProbeToggle,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> UpstreamBillingProbeResponse:
+    account, target, connector = await _account_connector_or_404(
+        session, account_id, settings, cipher
+    )
+    _require_upstream_billing_account(account)
+    try:
+        async with connector:
+            await connector.set_upstream_billing_probe_enabled(
+                account.external_account_id, payload.enabled
+            )
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    account.upstream_billing_probe_enabled = payload.enabled
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="upstream_billing.account.toggle",
+            target_id=target.id,
+            details={"account_id": account.external_account_id, "enabled": payload.enabled},
+        )
+    )
+    await session.commit()
+    return UpstreamBillingProbeResponse(
+        account_id=account.id,
+        target_id=target.id,
+        external_account_id=account.external_account_id,
+        snapshot=account.upstream_billing_probe,
+    )
+
+
+@router.post(
+    "/accounts/{account_id}/upstream-billing-probe",
+    response_model=UpstreamBillingProbeResponse,
+)
+async def probe_upstream_billing(
+    account_id: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> UpstreamBillingProbeResponse:
+    account, target, connector = await _account_connector_or_404(
+        session, account_id, settings, cipher
+    )
+    _require_upstream_billing_account(account)
+    previous_multiplier = upstream_rate_multiplier(account.upstream_billing_probe)
+    try:
+        async with connector:
+            result = await connector.probe_upstream_billing(account.external_account_id)
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    snapshot = result.get("snapshot") if isinstance(result.get("snapshot"), dict) else None
+    account.upstream_billing_probe = snapshot
+    if snapshot is not None and isinstance(snapshot.get("synced_rate_multiplier"), (int, float)):
+        account.rate_multiplier = float(snapshot["synced_rate_multiplier"])
+    await evaluate_upstream_rate_change(
+        session,
+        target.name,
+        account,
+        previous_multiplier,
+    )
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="upstream_billing.account.probe",
+            target_id=target.id,
+            details={
+                "account_id": account.external_account_id,
+                "status": snapshot.get("status") if snapshot else "missing",
+            },
+        )
+    )
+    await session.commit()
+    return UpstreamBillingProbeResponse(
+        account_id=account.id,
+        target_id=target.id,
+        external_account_id=account.external_account_id,
+        snapshot=snapshot,
+    )
+
+
+@router.post(
+    "/accounts/upstream-billing-probe/batch",
+    response_model=list[UpstreamBillingProbeResponse],
+)
+async def probe_upstream_billing_batch(
+    payload: UpstreamBillingBatchRequest,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> list[UpstreamBillingProbeResponse]:
+    accounts = list(
+        await session.scalars(
+            select(AccountCurrent).where(AccountCurrent.id.in_(payload.account_ids))
+        )
+    )
+    if len(accounts) != len(set(payload.account_ids)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "one or more accounts were not found")
+    for account in accounts:
+        _require_upstream_billing_account(account)
+    by_target: dict[str, list[AccountCurrent]] = {}
+    for account in accounts:
+        by_target.setdefault(account.target_id, []).append(account)
+    output: list[UpstreamBillingProbeResponse] = []
+    for target_id, target_accounts in by_target.items():
+        target, connector = await _target_connector_or_404(session, target_id, settings, cipher)
+        try:
+            async with connector:
+                results = await connector.probe_upstream_billing_batch(
+                    [account.external_account_id for account in target_accounts]
+                )
+        except ConnectorError as exc:
+            raise _remote_http_error(exc) from exc
+        result_by_id = {str(result.get("account_id")): result for result in results}
+        for account in target_accounts:
+            previous_multiplier = upstream_rate_multiplier(account.upstream_billing_probe)
+            result = result_by_id.get(account.external_account_id, {})
+            snapshot = (
+                result.get("snapshot") if isinstance(result.get("snapshot"), dict) else None
+            )
+            if snapshot is not None:
+                account.upstream_billing_probe = snapshot
+                synced = snapshot.get("synced_rate_multiplier")
+                if isinstance(synced, (int, float)):
+                    account.rate_multiplier = float(synced)
+                await evaluate_upstream_rate_change(
+                    session,
+                    target.name,
+                    account,
+                    previous_multiplier,
+                )
+            output.append(
+                UpstreamBillingProbeResponse(
+                    account_id=account.id,
+                    target_id=target.id,
+                    external_account_id=account.external_account_id,
+                    snapshot=snapshot,
+                )
+            )
+        session.add(
+            AuditEvent(
+                actor=user.username,
+                action="upstream_billing.account.batch_probe",
+                target_id=target.id,
+                details={"account_ids": [item.external_account_id for item in target_accounts]},
+            )
+        )
+    await session.commit()
+    return output
+
+
+@router.get("/channel-monitors", response_model=list[ChannelMonitorResponse])
+async def list_channel_monitors(
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    target_id: str | None = None,
+    provider: str | None = None,
+    enabled: bool | None = None,
+) -> list[ChannelMonitorResponse]:
+    stmt = select(ChannelMonitorCurrent, Target.name).join(
+        Target, Target.id == ChannelMonitorCurrent.target_id
+    )
+    if target_id:
+        stmt = stmt.where(ChannelMonitorCurrent.target_id == target_id)
+    if provider:
+        stmt = stmt.where(ChannelMonitorCurrent.provider == provider)
+    if enabled is not None:
+        stmt = stmt.where(ChannelMonitorCurrent.enabled.is_(enabled))
+    rows = (await session.execute(stmt.order_by(Target.name, ChannelMonitorCurrent.name))).all()
+    output: list[ChannelMonitorResponse] = []
+    for item, target_name in rows:
+        response = ChannelMonitorResponse.model_validate(item)
+        response.target_name = target_name
+        output.append(response)
+    return output
+
+
+@router.post(
+    "/channel-monitors", response_model=ChannelMonitorResponse, status_code=status.HTTP_201_CREATED
+)
+async def create_channel_monitor(
+    payload: ChannelMonitorCreate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> ChannelMonitorResponse:
+    target, connector = await _target_connector_or_404(
+        session, payload.target_id, settings, cipher
+    )
+    remote_payload = channel_payload(payload.model_dump(), include_target=True)
+    try:
+        async with connector:
+            remote = await connector.create_channel_monitor(remote_payload)
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    item = await upsert_channel_monitor(session, target.id, remote)
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="channel_monitor.create",
+            target_id=target.id,
+            details={"external_monitor_id": remote.external_monitor_id},
+        )
+    )
+    await session.commit()
+    response = ChannelMonitorResponse.model_validate(item)
+    response.target_name = target.name
+    return response
+
+
+@router.patch("/channel-monitors/{monitor_id}", response_model=ChannelMonitorResponse)
+async def update_channel_monitor(
+    monitor_id: str,
+    payload: ChannelMonitorUpdate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> ChannelMonitorResponse:
+    item = await _required_channel(session, monitor_id)
+    target, connector = await _target_connector_or_404(
+        session, item.target_id, settings, cipher
+    )
+    remote_payload = channel_payload(payload.model_dump(exclude_unset=True))
+    try:
+        async with connector:
+            remote = await connector.update_channel_monitor(
+                item.external_monitor_id, remote_payload
+            )
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    item = await upsert_channel_monitor(session, target.id, remote)
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="channel_monitor.update",
+            target_id=target.id,
+            details={"external_monitor_id": item.external_monitor_id},
+        )
+    )
+    await session.commit()
+    response = ChannelMonitorResponse.model_validate(item)
+    response.target_name = target.name
+    return response
+
+
+@router.delete("/channel-monitors/{monitor_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_channel_monitor(
+    monitor_id: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> Response:
+    item = await _required_channel(session, monitor_id)
+    target, connector = await _target_connector_or_404(
+        session, item.target_id, settings, cipher
+    )
+    try:
+        async with connector:
+            await connector.delete_channel_monitor(item.external_monitor_id)
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="channel_monitor.delete",
+            target_id=target.id,
+            details={"external_monitor_id": item.external_monitor_id},
+        )
+    )
+    item.enabled = False
+    await evaluate_channel(session, target.name, item)
+    await session.delete(item)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/channel-monitors/{monitor_id}/run", response_model=list[ChannelCheckResponse]
+)
+async def run_channel_monitor(
+    monitor_id: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+) -> list[ChannelCheckResponse]:
+    item = await _required_channel(session, monitor_id)
+    target, connector = await _target_connector_or_404(
+        session, item.target_id, settings, cipher
+    )
+    try:
+        async with connector:
+            results = await connector.run_channel_monitor(item.external_monitor_id)
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    primary = next((result for result in results if result.model == item.primary_model), None)
+    if primary is None and results:
+        primary = results[0]
+    if primary is not None:
+        item.primary_status = primary.status
+        item.primary_latency_ms = primary.latency_ms
+        item.last_checked_at = primary.checked_at
+        item.observed_at = datetime.now(timezone.utc)
+    await evaluate_channel(session, target.name, item)
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="channel_monitor.run",
+            target_id=target.id,
+            details={"external_monitor_id": item.external_monitor_id},
+        )
+    )
+    await session.commit()
+    return [_channel_check_response(result) for result in results]
+
+
+@router.get(
+    "/channel-monitors/{monitor_id}/history", response_model=list[ChannelCheckResponse]
+)
+async def channel_monitor_history(
+    monitor_id: str,
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+    model: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> list[ChannelCheckResponse]:
+    item = await _required_channel(session, monitor_id)
+    _target, connector = await _target_connector_or_404(
+        session, item.target_id, settings, cipher
+    )
+    try:
+        async with connector:
+            results = await connector.channel_monitor_history(
+                item.external_monitor_id, model=model, limit=limit
+            )
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    return [_channel_check_response(result) for result in results]
 
 
 @router.post("/policies", response_model=PolicyResponse, status_code=status.HTTP_201_CREATED)
@@ -760,6 +1247,15 @@ async def dashboard(
             CollectionRun.created_at >= failed_since,
         )
     )
+    channels_total = await session.scalar(select(func.count()).select_from(ChannelMonitorCurrent))
+    channels_unhealthy = await session.scalar(
+        select(func.count())
+        .select_from(ChannelMonitorCurrent)
+        .where(
+            ChannelMonitorCurrent.enabled.is_(True),
+            ChannelMonitorCurrent.primary_status.in_(["degraded", "failed", "error"]),
+        )
+    )
     return DashboardResponse(
         targets_total=int(targets_total or 0),
         targets_ready=int(targets_ready or 0),
@@ -768,6 +1264,8 @@ async def dashboard(
         low_quota_accounts=int(low_quota_accounts or 0),
         active_incidents=int(active_incidents or 0),
         failed_collections_24h=int(failed_collections or 0),
+        channels_total=int(channels_total or 0),
+        channels_unhealthy=int(channels_unhealthy or 0),
     )
 
 
@@ -787,3 +1285,54 @@ async def validate_remote_database_url(url: str, settings: Settings) -> None:
         await validate_database_url(url, allow_private=settings.allow_private_targets)
     except ConnectorError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
+async def _target_connector_or_404(
+    session: AsyncSession, target_id: str, settings: Settings, cipher: SecretCipher
+) -> tuple[Target, Sub2APIConnector]:
+    try:
+        return await target_connector(session, target_id, settings, cipher)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+
+async def _account_connector_or_404(
+    session: AsyncSession, account_id: str, settings: Settings, cipher: SecretCipher
+) -> tuple[AccountCurrent, Target, Sub2APIConnector]:
+    try:
+        return await account_connector(session, account_id, settings, cipher)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+
+async def _required_channel(session: AsyncSession, monitor_id: str) -> ChannelMonitorCurrent:
+    item = await session.get(ChannelMonitorCurrent, monitor_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "channel monitor not found")
+    return item
+
+
+def _require_upstream_billing_account(account: AccountCurrent) -> None:
+    if not supports_upstream_billing_probe(account):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "upstream billing probes are limited to OpenAI API-key accounts",
+        )
+
+
+def _remote_http_error(exc: ConnectorError) -> HTTPException:
+    remote_status = exc.status_code
+    if remote_status in {400, 401, 403, 404, 409, 422, 429}:
+        return HTTPException(remote_status, str(exc))
+    return HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
+
+
+def _channel_check_response(result: Any) -> ChannelCheckResponse:
+    return ChannelCheckResponse(
+        model=result.model,
+        status=result.status,
+        latency_ms=result.latency_ms,
+        ping_latency_ms=result.ping_latency_ms,
+        message=result.message,
+        checked_at=result.checked_at,
+    )
