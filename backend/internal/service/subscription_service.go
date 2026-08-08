@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/dgraph-io/ristretto"
 	"golang.org/x/sync/singleflight"
 )
@@ -388,14 +389,17 @@ func (s *SubscriptionService) withSubscriptionUpdateTx(ctx context.Context, fn f
 
 func renewedSubscriptionTerm(existingSub *UserSubscription, notes string, startsAt, expiresAt time.Time) *UserSubscription {
 	renewed := *existingSub
-	windowStart := startsAt
+	// 日窗口按日历日对齐（0 点刷新）；周/月窗口按订阅期限对齐（锚点为新周期起点）。
+	dailyWindowStart := timezone.StartOfDay(startsAt)
+	hourlyWindowStart := startsAt
+	periodicWindowStart := startsAt
 	renewed.StartsAt = startsAt
 	renewed.ExpiresAt = expiresAt
 	renewed.Status = SubscriptionStatusActive
-	renewed.HourlyWindowStart = &windowStart
-	renewed.DailyWindowStart = &windowStart
-	renewed.WeeklyWindowStart = &windowStart
-	renewed.MonthlyWindowStart = &windowStart
+	renewed.HourlyWindowStart = &hourlyWindowStart
+	renewed.DailyWindowStart = &dailyWindowStart
+	renewed.WeeklyWindowStart = &periodicWindowStart
+	renewed.MonthlyWindowStart = &periodicWindowStart
 	renewed.HourlyUsageUSD = 0
 	renewed.DailyUsageUSD = 0
 	renewed.WeeklyUsageUSD = 0
@@ -871,9 +875,9 @@ func (s *SubscriptionService) checkAndActivateWindowAt(ctx context.Context, sub 
 	hourlyRepo, supportsHourly := s.userSubRepo.(HourlyUserSubscriptionRepository)
 	if !sub.IsWindowActivated() {
 		if supportsHourly {
-			return hourlyRepo.ActivateWindowsWithHourly(ctx, sub.ID, now, now)
+			return hourlyRepo.ActivateWindowsWithHourly(ctx, sub.ID, now, timezone.StartOfDay(now), now)
 		}
-		return s.userSubRepo.ActivateWindows(ctx, sub.ID, now)
+		return s.userSubRepo.ActivateWindows(ctx, sub.ID, timezone.StartOfDay(now), now)
 	}
 
 	// Existing subscriptions created before hourly quotas already have the
@@ -903,13 +907,14 @@ func (s *SubscriptionService) AdminResetQuota(ctx context.Context, subscriptionI
 		return nil, err
 	}
 	now := s.currentTime()
+	dailyStart := timezone.StartOfDay(now)
 	var resetErr error
 	if repo, ok := s.userSubRepo.(HourlyUserSubscriptionRepository); ok {
-		resetErr = repo.ResetUsageWindowsWithHourly(ctx, sub.ID, resetHourly, resetDaily, resetWeekly, resetMonthly, now, now)
+		resetErr = repo.ResetUsageWindowsWithHourly(ctx, sub.ID, resetHourly, resetDaily, resetWeekly, resetMonthly, now, dailyStart, now)
 	} else if resetHourly {
 		resetErr = ErrInvalidInput
 	} else {
-		resetErr = s.userSubRepo.ResetUsageWindows(ctx, sub.ID, resetDaily, resetWeekly, resetMonthly, now)
+		resetErr = s.userSubRepo.ResetUsageWindows(ctx, sub.ID, resetDaily, resetWeekly, resetMonthly, dailyStart, now)
 	}
 	if resetErr != nil {
 		return nil, resetErr
@@ -944,8 +949,8 @@ func (s *SubscriptionService) CheckAndResetWindows(ctx context.Context, sub *Use
 		needsInvalidateCache = true
 	}
 
-	// 日窗口重置（24小时）
-	if windowStart, ok := sub.automaticWindowStartAt(sub.DailyWindowStart, 24*time.Hour, now); !sub.HasOneTimeDailyQuota() && ok {
+	// 日窗口重置（每天 0 点刷新，按日历日对齐）
+	if windowStart, ok := sub.automaticDailyWindowStartAt(now); ok {
 		expectedWindowStart := sub.DailyWindowStart
 		if err := s.userSubRepo.ResetDailyUsage(ctx, sub.ID, expectedWindowStart, windowStart); err != nil {
 			return err
