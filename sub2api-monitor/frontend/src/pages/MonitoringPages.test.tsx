@@ -27,9 +27,12 @@ describe('monitoring expansion pages', () => {
       total: 1,
     })
     vi.spyOn(api, 'upstreamBillingSettings').mockResolvedValue({ enabled: true, interval_minutes: 30 })
+    vi.spyOn(api, 'costRoutingPolicy').mockResolvedValue({ id:'routing-1',target_id:'target-1',enabled:true,mode:'recommend',probe_interval_seconds:30,priority_scale:1000,unhealthy_priority:100000,minimum_priority:1,quality_bindings:{'9':['5']},last_account_count:1,last_change_count:0 })
+    vi.spyOn(api, 'channelMonitors').mockResolvedValue([{id:'channel-1',target_id:'target-1',external_monitor_id:'5',name:'Relay quality',provider:'openai',api_mode:'responses',endpoint:'https://example.com',api_key_masked:'***',api_key_decrypt_failed:false,primary_model:'gpt-5',extra_models:[],group_name:'',enabled:true,interval_seconds:30,jitter_seconds:0,last_checked_at:'2026-08-09T00:00:00Z',primary_status:'operational',primary_latency_ms:120,availability_7d:100,extra_models_status:[],extra_headers:{},body_override_mode:'off',observed_at:'2026-08-09T00:00:00Z'}])
+    vi.spyOn(api, 'routingDecisions').mockResolvedValue([{id:'decision-1',policy_id:'routing-1',target_id:'target-1',external_account_id:'9',account_name:'Relay',observed_multiplier:.16,previous_priority:200,desired_priority:160,reason:'cost_decrease',mode:'recommend',status:'recommended',result:{},created_at:'2026-08-09T00:00:00Z'}])
     const accounts = vi.spyOn(api, 'accounts').mockResolvedValue({
       items: [{
-        id: 'account-1', target_id: 'target-1', target_name: 'Prod', external_account_id: '9', name: 'Relay', platform: 'openai', account_type: 'apikey', status: 'active', schedulable: true, available: true, availability_reasons: [], rate_multiplier: 0.2, upstream_billing_probe_enabled: true, upstream_billing_rate_sync_enabled: false, upstream_billing_probe: { status: 'ok', data: { resolved_rate_multiplier: 0.16 } },
+        id: 'account-1', target_id: 'target-1', target_name: 'Prod', external_account_id: '9', name: 'Relay', platform: 'openai', account_type: 'apikey', status: 'active', schedulable: true, available: true, availability_reasons: [], priority:200, routing_desired_priority:160, routing_status:'recommend', rate_multiplier: 0.2, upstream_billing_probe_enabled: true, upstream_billing_rate_sync_enabled: false, upstream_billing_probe: { status: 'ok', data: { resolved_rate_multiplier: 0.16 } },
       }, {
         id: 'account-2', target_id: 'target-1', target_name: 'Prod', external_account_id: '10', name: 'OAuth account', platform: 'openai', account_type: 'oauth', status: 'active', schedulable: true, available: true, availability_reasons: [], rate_multiplier: 1, upstream_billing_probe_enabled: false, upstream_billing_rate_sync_enabled: false,
       }],
@@ -39,10 +42,15 @@ describe('monitoring expansion pages', () => {
 
     renderPage(<RatesPage />)
 
-    expect(await screen.findByText('Relay')).toBeTruthy()
+    expect((await screen.findAllByText('Relay')).length).toBeGreaterThan(0)
+    expect(screen.getByText('一分钟成本路由')).toBeTruthy()
     expect(screen.getByText('×0.2')).toBeTruthy()
-    expect(screen.getByText('×0.16')).toBeTruthy()
+    expect(screen.getAllByText('×0.16').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('200').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('160').length).toBeGreaterThan(0)
+    expect(screen.getByText('倍率下降')).toBeTruthy()
     expect(screen.queryByText('OAuth account')).toBeNull()
+    expect((screen.getByRole('checkbox',{name:'Relay 绑定 Relay quality'}) as HTMLInputElement).checked).toBe(true)
     expect(accounts.mock.calls[0]?.[0]).toContain('platform=openai')
     expect(accounts.mock.calls[0]?.[0]).toContain('account_type=apikey')
   })

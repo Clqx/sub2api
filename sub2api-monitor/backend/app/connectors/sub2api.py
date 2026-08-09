@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -65,6 +66,7 @@ class NormalizedAccount:
     overload_until: datetime | None
     temp_unschedulable_until: datetime | None
     observed_at: datetime
+    priority: int | None = None
     rate_multiplier: float | None = None
     upstream_billing_probe_enabled: bool = False
     upstream_billing_rate_sync_enabled: bool = False
@@ -82,6 +84,7 @@ class NormalizedAccount:
             "available": self.available,
             "availability_reasons": self.availability_reasons,
             "group_ids": self.group_ids,
+            "priority": self.priority,
             "expires_at": _iso(self.expires_at),
             "rate_limit_reset_at": _iso(self.rate_limit_reset_at),
             "overload_until": _iso(self.overload_until),
@@ -180,6 +183,21 @@ MONITORING_SENSITIVE_KEYS = frozenset(
         "response_body",
         "secret",
     }
+)
+MONITORING_ERROR_SECRET_PATTERNS = (
+    (re.compile(r"(?i)\b(bearer)\s+[a-z0-9._~+/=-]+"), r"\1 [REDACTED]"),
+    (
+        re.compile(
+            r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)\b\s*([:=])\s*[^\s,;]+"
+        ),
+        r"\1\2[REDACTED]",
+    ),
+    (
+        re.compile(r"(?i)(postgresql(?:\+asyncpg)?://[^:\s/@]+:)[^@\s/]+@"),
+        r"\1[REDACTED]@",
+    ),
+    (re.compile(r"(?i)\bsk-[a-z0-9_-]{12,}"), "sk-[REDACTED]"),
+    (re.compile(r"(?i)\badmin-[a-f0-9]{16,}"), "admin-[REDACTED]"),
 )
 
 
@@ -502,6 +520,20 @@ class Sub2APIConnector:
         if not isinstance(raw, list):
             raise ContractError("invalid upstream billing batch probe response")
         return [item for item in raw if isinstance(item, dict)]
+
+    async def set_account_priority(self, external_account_id: str, priority: int) -> dict[str, Any]:
+        account_id = quote(external_account_id, safe="")
+        response = await self.request(
+            "PUT",
+            f"/api/v1/admin/accounts/{account_id}",
+            json={"priority": priority},
+        )
+        if response.status_code != 200:
+            raise ConnectorError(
+                f"account priority update returned HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
+        return {"http_status": response.status_code, "priority": priority}
 
     async def channel_monitors(self) -> tuple[ProbeFact, list[NormalizedChannelMonitor]]:
         output: list[NormalizedChannelMonitor] = []
@@ -1024,6 +1056,7 @@ def normalize_account(raw: dict[str, Any], now: datetime | None = None) -> Norma
         available=not reasons,
         availability_reasons=reasons,
         group_ids=group_ids,
+        priority=_as_int(raw.get("priority")),
         expires_at=expires_at,
         rate_limit_reset_at=rate_reset,
         overload_until=overload_until,
@@ -1192,7 +1225,25 @@ def _sanitize_probe_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] 
         "last_error",
         "synced_rate_multiplier",
     }
-    return {key: value for key, value in snapshot.items() if key in allowed}
+    result = {key: value for key, value in snapshot.items() if key in allowed}
+    if "data" in result:
+        result["data"] = _sanitize_monitoring_payload(result["data"])
+    if isinstance(result.get("last_error"), str):
+        result["last_error"] = sanitize_monitoring_error(result["last_error"])
+    return result
+
+
+def sanitize_upstream_billing_snapshot(
+    snapshot: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    return _sanitize_probe_snapshot(snapshot)
+
+
+def sanitize_monitoring_error(value: str, *, limit: int = 1000) -> str:
+    sanitized = value.replace("\r", " ").replace("\n", " ").strip()
+    for pattern, replacement in MONITORING_ERROR_SECRET_PATTERNS:
+        sanitized = pattern.sub(replacement, sanitized)
+    return sanitized[:limit]
 
 
 def _sanitize_monitoring_payload(value: Any) -> Any:
@@ -1275,6 +1326,8 @@ def _usage_freshness(
 
 
 def _as_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):

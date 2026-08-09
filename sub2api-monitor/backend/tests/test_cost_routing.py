@@ -1,0 +1,860 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
+from sqlalchemy import select
+
+from app.api.router import update_cost_routing_policy
+from app.config import Settings
+from app.connectors.sub2api import ProbeFact, normalize_account, normalize_channel_monitor
+from app.models import (
+    AccountCurrent,
+    ChannelMonitorCurrent,
+    CostRoutingPolicy,
+    Incident,
+    IncidentTransition,
+    NotificationChannel,
+    NotificationOutbox,
+    Policy,
+    RoutingDecision,
+    Target,
+    TargetSecret,
+    User,
+)
+from app.schemas import CostRoutingPolicyUpdate
+from app.security import SecretCipher
+from app.services import cost_routing
+from app.services.cost_routing import (
+    claim_due_cost_routing_policies,
+    desired_priority,
+    renew_cost_routing_claim,
+    run_cost_routing_policy,
+)
+from app.services.policies import evaluate_upstream_rate_change, upstream_rate_multiplier
+
+
+def test_cost_priority_uses_absolute_multiplier_bands() -> None:
+    assert upstream_rate_multiplier(
+        {
+            "status": "ok",
+            "data": {
+                "resolved_rate_multiplier": 0.2,
+                "effective_rate_multiplier": 0.8,
+            },
+        }
+    ) == 0.8
+    assert (
+        desired_priority(
+            0.16,
+            healthy=True,
+            priority_scale=1000,
+            minimum_priority=1,
+            unhealthy_priority=100000,
+        )
+        == 160
+    )
+    assert (
+        desired_priority(
+            0.8,
+            healthy=True,
+            priority_scale=1000,
+            minimum_priority=1,
+            unhealthy_priority=100000,
+        )
+        == 800
+    )
+    assert (
+        desired_priority(
+            0.16,
+            healthy=False,
+            priority_scale=1000,
+            minimum_priority=1,
+            unhealthy_priority=100000,
+        )
+        == 100000
+    )
+
+
+def test_enabling_cost_routing_requires_explicit_side_effect_confirmation() -> None:
+    with pytest.raises(ValidationError, match="confirm_side_effects"):
+        CostRoutingPolicyUpdate(enabled=True, mode="recommend")
+    policy = CostRoutingPolicyUpdate(
+        enabled=True,
+        mode="execute",
+        confirm_side_effects=True,
+    )
+    assert policy.probe_interval_seconds == 30
+
+
+@pytest.mark.asyncio
+async def test_cost_routing_claim_prevents_overlapping_workers(db_session) -> None:
+    now = datetime.now(timezone.utc)
+    target = Target(
+        id="target-claim",
+        name="Claim",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="claim-policy",
+        target_id=target.id,
+        enabled=True,
+        next_run_at=now - timedelta(seconds=1),
+    )
+    db_session.add_all([target, policy])
+    await db_session.commit()
+
+    assert await claim_due_cost_routing_policies(db_session, owner_id="worker-a") == [policy.id]
+    assert await claim_due_cost_routing_policies(db_session, owner_id="worker-b") == []
+    assert not await renew_cost_routing_claim(db_session, policy.id, "worker-b")
+    assert await renew_cost_routing_claim(db_session, policy.id, "worker-a")
+
+
+@pytest.mark.asyncio
+async def test_execute_mode_demotes_fault_and_applies_cost_increase(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-routing",
+        name="Prod",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    incident_policy = Policy(id="incident-policy-routing", target_id=target.id, name="Routing")
+    routing_policy = CostRoutingPolicy(
+        id="routing-policy",
+        target_id=target.id,
+        enabled=True,
+        mode="execute",
+        priority_scale=1000,
+        unhealthy_priority=100000,
+        minimum_priority=1,
+    )
+    channel = NotificationChannel(
+        id="routing-channel",
+        target_id=target.id,
+        name="routing alerts",
+        server_url="https://ntfy.example.com",
+        topic="alerts",
+    )
+    cheap = _account(
+        target.id,
+        "1",
+        "Cheap",
+        priority=200,
+        multiplier=0.2,
+        now=now,
+    )
+    expensive = _account(
+        target.id,
+        "2",
+        "Expensive",
+        priority=200,
+        multiplier=0.2,
+        now=now,
+    )
+    db_session.add_all([target, secret, incident_policy, routing_policy, channel, cheap, expensive])
+    await db_session.commit()
+
+    inventory = [
+        normalize_account(
+            {
+                "id": "1",
+                "name": "Cheap",
+                "platform": "openai",
+                "type": "apikey",
+                "status": "active",
+                "schedulable": False,
+                "priority": 200,
+            },
+            now,
+        ),
+        normalize_account(
+            {
+                "id": "2",
+                "name": "Expensive",
+                "platform": "openai",
+                "type": "apikey",
+                "status": "active",
+                "schedulable": True,
+                "priority": 200,
+            },
+            now,
+        ),
+    ]
+    writes: list[tuple[str, int]] = []
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            return ProbeFact("supported", "healthy", "fresh"), inventory
+
+        async def probe_upstream_billing_batch(self, account_ids: list[str]):
+            assert account_ids == ["1", "2"]
+            return [
+                {
+                    "account_id": "1",
+                    "snapshot": {
+                        "status": "ok",
+                        "data": {"effective_rate_multiplier": 0.2},
+                    },
+                },
+                {
+                    "account_id": "2",
+                    "snapshot": {
+                        "status": "ok",
+                        "data": {"effective_rate_multiplier": 0.8},
+                    },
+                },
+            ]
+
+        async def set_account_priority(self, account_id: str, priority: int):
+            writes.append((account_id, priority))
+            return {"http_status": 200, "priority": priority}
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    succeeded = await run_cost_routing_policy(
+        db_session,
+        routing_policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+
+    assert succeeded
+    assert set(writes) == {("1", 100000), ("2", 800)}
+    await db_session.refresh(cheap)
+    await db_session.refresh(expensive)
+    await db_session.refresh(routing_policy)
+    assert cheap.priority == 100000
+    assert expensive.priority == 800
+    assert routing_policy.last_change_count == 2
+    decisions = list(
+        await db_session.scalars(select(RoutingDecision).order_by(RoutingDecision.account_name))
+    )
+    assert [(item.reason, item.status) for item in decisions] == [
+        ("unavailable", "succeeded"),
+        ("cost_increase", "succeeded"),
+    ]
+    incident_keys = set(await db_session.scalars(select(Incident.rule_key)))
+    assert "account.unavailable" in incident_keys
+    assert "upstream.rate_multiplier.changed" in incident_keys
+    assert "cost_routing.priority_changed" in incident_keys
+    assert len(list(await db_session.scalars(select(NotificationOutbox)))) >= 3
+
+
+@pytest.mark.asyncio
+async def test_recommend_mode_chunks_probes_without_priority_writes(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-recommend",
+        name="Recommend",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="recommend-policy",
+        target_id=target.id,
+        enabled=True,
+        mode="recommend",
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    accounts = [
+        _account(target.id, str(index), f"Account {index}", priority=100, multiplier=0.1, now=now)
+        for index in range(1, 22)
+    ]
+    oauth_account = _account(
+        target.id,
+        "oauth-22",
+        "OAuth excluded",
+        priority=50,
+        multiplier=0.05,
+        now=now,
+    )
+    oauth_account.account_type = "oauth"
+    old_decision = RoutingDecision(
+        policy_id=policy.id,
+        target_id=target.id,
+        external_account_id="expired",
+        account_name="Expired",
+        observed_multiplier=0.1,
+        previous_priority=100,
+        desired_priority=100,
+        reason="in_sync",
+        mode="recommend",
+        status="recommended",
+        created_at=now - timedelta(days=31),
+    )
+    db_session.add_all([target, secret, policy, *accounts, oauth_account, old_decision])
+    await db_session.commit()
+
+    inventory = [
+        normalize_account(
+            {
+                "id": account.external_account_id,
+                "name": account.name,
+                "platform": "openai",
+                "type": "apikey",
+                "status": "active",
+                "schedulable": True,
+                "priority": 100,
+            },
+            now,
+        )
+        for account in accounts
+    ]
+    inventory.append(
+        normalize_account(
+            {
+                "id": "new-23",
+                "name": "New account",
+                "platform": "openai",
+                "type": "apikey",
+                "status": "active",
+                "schedulable": True,
+                "priority": 100,
+            },
+            now,
+        )
+    )
+    inventory.append(
+        normalize_account(
+            {
+                "id": oauth_account.external_account_id,
+                "name": oauth_account.name,
+                "platform": "openai",
+                "type": "oauth",
+                "status": "active",
+                "schedulable": True,
+                "priority": 50,
+            },
+            now,
+        )
+    )
+    batches: list[list[str]] = []
+    active_batches = 0
+    max_active_batches = 0
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            return ProbeFact("supported", "healthy", "fresh"), inventory
+
+        async def probe_upstream_billing_batch(self, account_ids: list[str]):
+            nonlocal active_batches, max_active_batches
+            batches.append(account_ids)
+            active_batches += 1
+            max_active_batches = max(max_active_batches, active_batches)
+            try:
+                await asyncio.sleep(0.01)
+                return [
+                    {
+                        "account_id": account_id,
+                        "snapshot": {
+                            "status": "ok",
+                            "data": {"effective_rate_multiplier": 0.3},
+                        },
+                    }
+                    for account_id in account_ids
+                ]
+            finally:
+                active_batches -= 1
+
+        async def set_account_priority(self, _account_id: str, _priority: int):
+            raise AssertionError("recommend mode must not write account priority")
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    assert await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+    assert await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+    assert sorted(len(batch) for batch in batches) == [2, 2, 20, 20]
+    assert max_active_batches == 2
+    decisions = list(await db_session.scalars(select(RoutingDecision)))
+    assert len(decisions) == 22
+    assert {decision.status for decision in decisions} == {"recommended"}
+    assert {decision.desired_priority for decision in decisions} == {300}
+    new_account = await db_session.scalar(
+        select(AccountCurrent).where(AccountCurrent.external_account_id == "new-23")
+    )
+    assert new_account is not None
+    assert new_account.routing_desired_priority == 300
+    await db_session.refresh(accounts[0])
+    assert accounts[0].priority == 100
+    assert accounts[0].routing_desired_priority == 300
+    await db_session.refresh(oauth_account)
+    assert oauth_account.routing_desired_priority is None
+    assert await db_session.get(RoutingDecision, old_decision.id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_mode", [None, "recommend"])
+async def test_execute_mode_guard_cancels_pending_priority_write(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    pending_mode: str | None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id=f"target-guard-{pending_mode}",
+        name="Guard",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id=f"policy-guard-{pending_mode}",
+        target_id=target.id,
+        enabled=True,
+        mode="execute",
+        lease_owner="worker-a",
+    )
+    account = _account(target.id, "1", "Guarded", priority=100, multiplier=0.1, now=now)
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    db_session.add_all([target, secret, policy, account])
+    await db_session.commit()
+    inventory = [
+        normalize_account(
+            {
+                "id": "1",
+                "name": "Guarded",
+                "platform": "openai",
+                "type": "apikey",
+                "status": "active",
+                "schedulable": True,
+                "priority": 100,
+            },
+            now,
+        )
+    ]
+    writes: list[tuple[str, int]] = []
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            return ProbeFact("supported", "healthy", "fresh"), inventory
+
+        async def probe_upstream_billing_batch(self, _account_ids: list[str]):
+            return [
+                {
+                    "account_id": "1",
+                    "snapshot": {
+                        "status": "ok",
+                        "data": {"effective_rate_multiplier": 0.8},
+                    },
+                }
+            ]
+
+        async def set_account_priority(self, account_id: str, priority: int):
+            writes.append((account_id, priority))
+            return {"priority": priority}
+
+    guard_calls = 0
+
+    async def execution_guard(_policy_id: str, _owner: str | None) -> str | None:
+        nonlocal guard_calls
+        guard_calls += 1
+        return "execute" if guard_calls == 1 else pending_mode
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    assert await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+        claim_owner="worker-a",
+        execution_mode_guard=execution_guard,
+    )
+    assert writes == []
+    await db_session.refresh(account)
+    assert account.priority == 100
+    assert account.routing_status == "cancelled"
+    decision = await db_session.scalar(select(RoutingDecision))
+    assert decision is not None
+    assert decision.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_channel_quality_failure_demotes_bound_account(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-quality",
+        name="Quality",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="policy-quality",
+        target_id=target.id,
+        enabled=True,
+        mode="execute",
+        quality_bindings={"1": ["monitor-1"]},
+    )
+    account = _account(target.id, "1", "Bound", priority=100, multiplier=0.1, now=now)
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    db_session.add_all([target, secret, policy, account])
+    await db_session.commit()
+    inventory = [
+        normalize_account(
+            {
+                "id": "1",
+                "name": "Bound",
+                "platform": "openai",
+                "type": "apikey",
+                "status": "active",
+                "schedulable": True,
+                "priority": 100,
+            },
+            now,
+        )
+    ]
+    quality_monitors = [
+        normalize_channel_monitor(
+            {
+                "id": "monitor-1",
+                "name": "Primary OpenAI",
+                "provider": "openai",
+                "enabled": True,
+                "interval_seconds": 30,
+                "last_checked_at": now.isoformat(),
+                "primary_status": "failed",
+            }
+        )
+    ]
+    writes: list[tuple[str, int]] = []
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            return ProbeFact("supported", "healthy", "fresh"), inventory
+
+        async def channel_monitors(self):
+            return ProbeFact("supported", "healthy", "fresh"), quality_monitors
+
+        async def probe_upstream_billing_batch(self, _account_ids: list[str]):
+            return [
+                {
+                    "account_id": "1",
+                    "snapshot": {
+                        "status": "ok",
+                        "data": {"effective_rate_multiplier": 0.1},
+                    },
+                }
+            ]
+
+        async def set_account_priority(self, account_id: str, priority: int):
+            writes.append((account_id, priority))
+            return {"priority": priority}
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    assert await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+    assert writes == [("1", 100000)]
+    decision = await db_session.scalar(select(RoutingDecision))
+    assert decision is not None
+    assert decision.reason == "quality_failed"
+    assert decision.result["quality_failures"] == ["Primary OpenAI:failed"]
+    incident = await db_session.scalar(
+        select(Incident).where(Incident.rule_key == "cost_routing.priority_changed")
+    )
+    assert incident is not None
+    assert incident.severity == "critical"
+
+
+@pytest.mark.asyncio
+async def test_inventory_timeout_fails_closed_without_priority_write(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-timeout",
+        name="Timeout",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="policy-timeout",
+        target_id=target.id,
+        enabled=True,
+        mode="execute",
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    db_session.add_all([target, secret, policy])
+    await db_session.commit()
+    writes: list[tuple[str, int]] = []
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            await asyncio.sleep(0.05)
+            return ProbeFact("supported", "healthy", "fresh"), []
+
+        async def set_account_priority(self, account_id: str, priority: int):
+            writes.append((account_id, priority))
+            return {"priority": priority}
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    monkeypatch.setattr(cost_routing, "COST_ROUTING_INVENTORY_TIMEOUT_SECONDS", 0.01)
+    assert not await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+    assert writes == []
+    await db_session.refresh(policy)
+    assert policy.last_error == "TimeoutError"
+    assert await db_session.scalar(select(RoutingDecision)) is None
+
+
+@pytest.mark.asyncio
+async def test_consecutive_multiplier_changes_emit_repeated_notifications(db_session) -> None:
+    now = datetime.now(timezone.utc)
+    target = Target(
+        id="target-rate-notify",
+        name="Notify",
+        base_url="https://example.com",
+    )
+    policy = Policy(id="policy-rate-notify", target_id=target.id, name="Notify")
+    channel = NotificationChannel(
+        id="channel-rate-notify",
+        target_id=target.id,
+        name="Rate alerts",
+        server_url="https://ntfy.example.com",
+        topic="alerts",
+    )
+    account = _account(target.id, "1", "Rate account", priority=100, multiplier=0.2, now=now)
+    db_session.add_all([target, policy, channel, account])
+    await db_session.commit()
+
+    await evaluate_upstream_rate_change(db_session, target.name, account, 0.1)
+    account.upstream_billing_probe = {
+        "status": "ok",
+        "data": {"effective_rate_multiplier": 0.3},
+    }
+    await evaluate_upstream_rate_change(db_session, target.name, account, 0.2)
+    await db_session.commit()
+
+    incident = await db_session.scalar(
+        select(Incident).where(Incident.rule_key == "upstream.rate_multiplier.changed")
+    )
+    assert incident is not None
+    transitions = list(
+        await db_session.scalars(
+            select(IncidentTransition).where(IncidentTransition.incident_id == incident.id)
+        )
+    )
+    assert [transition.reason for transition in transitions] == [
+        "threshold crossed",
+        "condition changed",
+    ]
+    outbox = list(
+        await db_session.scalars(
+            select(NotificationOutbox).where(NotificationOutbox.incident_id == incident.id)
+        )
+    )
+    assert len(outbox) == 2
+
+
+@pytest.mark.asyncio
+async def test_quality_bindings_reject_foreign_or_ineligible_references(db_session) -> None:
+    now = datetime.now(timezone.utc)
+    target = Target(id="binding-target", name="Binding", base_url="https://example.com")
+    other = Target(id="binding-other", name="Other", base_url="https://other.example.com")
+    valid = _account(target.id, "valid", "Valid", priority=100, multiplier=0.1, now=now)
+    oauth = _account(target.id, "oauth", "OAuth", priority=100, multiplier=0.1, now=now)
+    oauth.account_type = "oauth"
+    foreign = _account(other.id, "foreign", "Foreign", priority=100, multiplier=0.1, now=now)
+    valid_monitor = ChannelMonitorCurrent(
+        target_id=target.id,
+        external_monitor_id="valid-monitor",
+        name="Valid monitor",
+        provider="openai",
+        endpoint="https://api.openai.com",
+        observed_at=now,
+    )
+    wrong_provider = ChannelMonitorCurrent(
+        target_id=target.id,
+        external_monitor_id="wrong-provider",
+        name="Wrong provider",
+        provider="anthropic",
+        endpoint="https://api.anthropic.com",
+        observed_at=now,
+    )
+    foreign_monitor = ChannelMonitorCurrent(
+        target_id=other.id,
+        external_monitor_id="foreign-monitor",
+        name="Foreign monitor",
+        provider="openai",
+        endpoint="https://api.openai.com",
+        observed_at=now,
+    )
+    db_session.add_all(
+        [
+            target,
+            other,
+            valid,
+            oauth,
+            foreign,
+            valid_monitor,
+            wrong_provider,
+            foreign_monitor,
+        ]
+    )
+    await db_session.commit()
+    payload = CostRoutingPolicyUpdate(
+        quality_bindings={
+            "valid": ["valid-monitor", "wrong-provider", "foreign-monitor"],
+            "oauth": ["valid-monitor"],
+            "foreign": ["valid-monitor"],
+        }
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await update_cost_routing_policy(
+            target.id,
+            payload,
+            User(username="admin", password_hash="unused"),
+            db_session,
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.detail["account_ids"] == ["foreign", "oauth"]
+    assert error.value.detail["monitor_ids"] == ["foreign-monitor", "wrong-provider"]
+    assert await db_session.scalar(select(CostRoutingPolicy)) is None
+
+
+def _account(
+    target_id: str,
+    external_id: str,
+    name: str,
+    *,
+    priority: int,
+    multiplier: float,
+    now: datetime,
+) -> AccountCurrent:
+    return AccountCurrent(
+        target_id=target_id,
+        external_account_id=external_id,
+        name=name,
+        platform="openai",
+        account_type="apikey",
+        status="active",
+        schedulable=True,
+        available=True,
+        availability_reasons=[],
+        group_ids=[],
+        priority=priority,
+        rate_multiplier=multiplier,
+        upstream_billing_probe={
+            "status": "ok",
+            "data": {"effective_rate_multiplier": multiplier},
+        },
+        observed_at=now,
+        last_seen_at=now,
+    )

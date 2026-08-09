@@ -126,6 +126,7 @@ async def _set_incident(
     title: str,
     message: str,
     subject_type: str = "account",
+    notify_on_change: bool = False,
 ) -> None:
     fingerprint = incident_fingerprint(
         target_id, policy.id, subject_type, subject_id, rule_key, window_key
@@ -190,6 +191,19 @@ async def _set_incident(
             session.add(transition)
             await session.flush()
             await _queue_transition(session, incident, transition, "incident.escalated")
+        elif notify_on_change and (incident.title != title or incident.message != message):
+            incident.severity = severity
+            incident.title = title
+            incident.message = message
+            transition = IncidentTransition(
+                incident_id=incident.id,
+                from_status=incident.status,
+                to_status=incident.status,
+                reason="condition changed",
+            )
+            session.add(transition)
+            await session.flush()
+            await _queue_transition(session, incident, transition, "incident.firing")
     elif incident is not None and incident.status != IncidentStatus.RESOLVED.value:
         old = incident.status
         incident.status = IncidentStatus.RESOLVED.value
@@ -260,8 +274,8 @@ def upstream_rate_multiplier(snapshot: dict[str, Any] | None) -> float | None:
     if not isinstance(data, dict):
         data = {}
     for value in (
-        data.get("resolved_rate_multiplier"),
         data.get("effective_rate_multiplier"),
+        data.get("resolved_rate_multiplier"),
         snapshot.get("synced_rate_multiplier"),
     ):
         if value is None or isinstance(value, bool) or not isinstance(value, (str, int, float)):
@@ -281,11 +295,7 @@ async def evaluate_upstream_rate_change(
     account: AccountCurrent,
     previous_multiplier: float | None,
 ) -> None:
-    if (
-        account.platform.casefold() != "openai"
-        or account.account_type.casefold() != "apikey"
-        or not account.upstream_billing_probe_enabled
-    ):
+    if account.platform.casefold() != "openai" or account.account_type.casefold() != "apikey":
         return
     current_multiplier = upstream_rate_multiplier(account.upstream_billing_probe)
     if previous_multiplier is None or current_multiplier is None:
@@ -308,9 +318,39 @@ async def evaluate_upstream_rate_change(
         severity="warning",
         title=f"[{target_name}] Upstream rate multiplier changed",
         message=(
-            f"Account {account.name} upstream resolved rate multiplier changed "
+            f"Account {account.name} upstream effective rate multiplier changed "
             f"from x{previous_multiplier:g} to x{current_multiplier:g}"
         ),
+        notify_on_change=True,
+    )
+
+
+async def evaluate_upstream_probe_health(
+    session: AsyncSession,
+    target_name: str,
+    account: AccountCurrent,
+) -> None:
+    if account.platform.casefold() != "openai" or account.account_type.casefold() != "apikey":
+        return
+    snapshot = account.upstream_billing_probe
+    status = snapshot.get("status") if isinstance(snapshot, dict) else None
+    error = snapshot.get("last_error") if isinstance(snapshot, dict) else None
+    policy = await policy_for_target(session, account.target_id)
+    await _set_incident(
+        session,
+        target_id=account.target_id,
+        policy=policy,
+        subject_id=account.external_account_id,
+        rule_key="upstream.billing_probe.failed",
+        window_key="",
+        firing=status != "ok",
+        severity="critical",
+        title=f"[{target_name}] Upstream billing probe failed",
+        message=(
+            f"Account {account.name} upstream billing probe failed: "
+            f"{error or status or 'missing result'}"
+        )[:1000],
+        notify_on_change=True,
     )
 
 
@@ -358,6 +398,91 @@ async def evaluate_collection_health(
         severity="critical",
         title=f"[{target_name}] Scheduled collection failed",
         message=(error or "Scheduled collection recovered")[:1000],
+    )
+
+
+async def evaluate_cost_routing_run(
+    session: AsyncSession,
+    target_id: str,
+    target_name: str,
+    error: str | None,
+) -> None:
+    policy = await policy_for_target(session, target_id)
+    await _set_incident(
+        session,
+        target_id=target_id,
+        policy=policy,
+        subject_id=target_id,
+        subject_type="target",
+        rule_key="cost_routing.run_failed",
+        window_key="",
+        firing=error is not None,
+        severity="critical",
+        title=f"[{target_name}] Cost routing control failed",
+        message=(error or "Cost routing control recovered")[:1000],
+        notify_on_change=True,
+    )
+
+
+async def evaluate_routing_action(
+    session: AsyncSession,
+    *,
+    target_id: str,
+    target_name: str,
+    account_id: str,
+    account_name: str,
+    mode: str,
+    firing: bool,
+    reason: str,
+    previous_priority: int | None,
+    desired_priority: int,
+    error: str | None = None,
+    detail: str | None = None,
+) -> None:
+    policy = await policy_for_target(session, target_id)
+    if error is not None:
+        rule_key = "cost_routing.priority_update_failed"
+        title = f"[{target_name}] Routing priority update failed"
+        message = (
+            f"Account {account_name} priority {previous_priority} -> {desired_priority} failed: "
+            f"{error}"
+        )
+        severity = "critical"
+    else:
+        rule_key = (
+            "cost_routing.priority_recommended"
+            if mode == "recommend"
+            else "cost_routing.priority_changed"
+        )
+        title = (
+            f"[{target_name}] Routing priority recommendation"
+            if mode == "recommend"
+            else f"[{target_name}] Routing priority changed"
+        )
+        verb = "recommended" if mode == "recommend" else "changed"
+        message = (
+            f"Account {account_name} priority {verb} from {previous_priority} "
+            f"to {desired_priority}; reason={reason}"
+        )
+        severity = (
+            "critical"
+            if reason in {"unavailable", "probe_failed", "quality_failed"}
+            else "warning"
+        )
+    if detail:
+        message = f"{message}; detail={detail}"
+    await _set_incident(
+        session,
+        target_id=target_id,
+        policy=policy,
+        subject_id=account_id,
+        rule_key=rule_key,
+        window_key="priority",
+        firing=firing,
+        severity=severity,
+        title=title,
+        message=message[:1000],
+        notify_on_change=True,
     )
 
 

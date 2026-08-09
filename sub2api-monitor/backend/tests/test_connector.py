@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -13,6 +14,7 @@ from app.connectors.sub2api import (
     Sub2APIConnector,
     normalize_account,
     resolve_target_address,
+    sanitize_upstream_billing_snapshot,
 )
 
 
@@ -581,6 +583,7 @@ def test_account_normalizes_upstream_billing_snapshot() -> None:
             "type": "apikey",
             "status": "active",
             "schedulable": True,
+            "priority": 160,
             "rate_multiplier": 0.2,
             "extra": {
                 "upstream_billing_probe_enabled": True,
@@ -588,7 +591,10 @@ def test_account_normalizes_upstream_billing_snapshot() -> None:
                 "upstream_billing_probe": {
                     "status": "ok",
                     "last_attempt_at": "2026-08-08T00:00:00Z",
-                    "data": {"resolved_rate_multiplier": 0.18},
+                    "data": {
+                        "resolved_rate_multiplier": 0.18,
+                        "credentials": {"api_key": "must-not-survive"},
+                    },
                     "credential": "must-not-survive",
                 },
             },
@@ -596,8 +602,58 @@ def test_account_normalizes_upstream_billing_snapshot() -> None:
     )
 
     assert account.rate_multiplier == pytest.approx(0.2)
+    assert account.priority == 160
     assert account.upstream_billing_probe_enabled
     assert account.upstream_billing_rate_sync_enabled
     assert account.upstream_billing_probe is not None
     assert account.upstream_billing_probe["data"] == {"resolved_rate_multiplier": 0.18}
     assert "credential" not in account.upstream_billing_probe
+
+
+@pytest.mark.asyncio
+async def test_account_priority_update_is_fixed_and_account_id_is_encoded(
+    settings_dict: dict[str, object],
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"code": 0, "data": {"id": "relay/one"}})
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        result = await connector.set_account_priority("relay/one", 840)
+
+    assert seen[0].method == "PUT"
+    assert seen[0].url.raw_path == b"/api/v1/admin/accounts/relay%2Fone"
+    assert json.loads(seen[0].content) == {"priority": 840}
+    assert result == {"http_status": 200, "priority": 840}
+
+
+def test_upstream_probe_error_redacts_embedded_secrets() -> None:
+    snapshot = sanitize_upstream_billing_snapshot(
+        {
+            "status": "failed",
+            "last_error": (
+                "Bearer bearer-token-value api_key=plain-key "
+                "password=hunter2 postgresql://reader:db-password@db.example.com/monitor "
+                "sk-1234567890abcdef admin-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+        }
+    )
+
+    assert snapshot is not None
+    error = snapshot["last_error"]
+    assert "bearer-token-value" not in error
+    assert "plain-key" not in error
+    assert "hunter2" not in error
+    assert "db-password" not in error
+    assert "1234567890abcdef" not in error
+    assert "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" not in error
+    assert error.count("[REDACTED]") == 6

@@ -278,6 +278,7 @@ class AccountCurrent(Base):
     available: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
     availability_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     group_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    priority: Mapped[int | None] = mapped_column(Integer)
     rate_multiplier: Mapped[float | None] = mapped_column(Float)
     upstream_billing_probe_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
@@ -286,6 +287,10 @@ class AccountCurrent(Base):
         Boolean, default=False, nullable=False
     )
     upstream_billing_probe: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    routing_desired_priority: Mapped[int | None] = mapped_column(Integer)
+    routing_status: Mapped[str | None] = mapped_column(String(30))
+    routing_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    routing_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rate_limit_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     overload_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -551,6 +556,72 @@ class AutomationExecution(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CostRoutingPolicy(Base):
+    __tablename__ = "cost_routing_policies"
+    __table_args__ = (
+        UniqueConstraint("target_id", name="uq_cost_routing_policy_target"),
+        Index("ix_cost_routing_due", "enabled", "next_run_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    target_id: Mapped[str] = mapped_column(ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), default="recommend", nullable=False)
+    probe_interval_seconds: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    priority_scale: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    unhealthy_priority: Mapped[int] = mapped_column(Integer, default=100000, nullable=False)
+    minimum_priority: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    quality_bindings: Mapped[dict[str, list[str]]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    last_account_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_change_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(100))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class RoutingDecision(Base):
+    __tablename__ = "routing_decisions"
+    __table_args__ = (
+        Index("ix_routing_decision_target_time", "target_id", "created_at"),
+        Index(
+            "ix_routing_decision_account_time",
+            "target_id",
+            "external_account_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    policy_id: Mapped[str | None] = mapped_column(
+        ForeignKey("cost_routing_policies.id", ondelete="SET NULL"), index=True
+    )
+    target_id: Mapped[str | None] = mapped_column(
+        ForeignKey("targets.id", ondelete="SET NULL"), index=True
+    )
+    external_account_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    account_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    observed_multiplier: Mapped[float | None] = mapped_column(Float)
+    previous_priority: Mapped[int | None] = mapped_column(Integer)
+    desired_priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(40), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class WorkerHeartbeat(Base):

@@ -201,10 +201,15 @@ class AccountResponse(ORMModel):
     available: bool
     availability_reasons: list[str]
     group_ids: list[str]
+    priority: int | None
     rate_multiplier: float | None
     upstream_billing_probe_enabled: bool
     upstream_billing_rate_sync_enabled: bool
     upstream_billing_probe: dict[str, Any] | None
+    routing_desired_priority: int | None
+    routing_status: str | None
+    routing_updated_at: datetime | None
+    routing_applied_at: datetime | None
     expires_at: datetime | None
     rate_limit_reset_at: datetime | None
     overload_until: datetime | None
@@ -490,6 +495,83 @@ class AutomationExecutionResponse(ORMModel):
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+
+
+class CostRoutingPolicyUpdate(BaseModel):
+    enabled: bool = False
+    mode: Literal["recommend", "execute"] = "recommend"
+    probe_interval_seconds: int = Field(default=30, ge=30, le=30)
+    priority_scale: int = Field(default=1000, ge=1, le=1_000_000)
+    unhealthy_priority: int = Field(default=100000, ge=2, le=2_000_000_000)
+    minimum_priority: int = Field(default=1, ge=0, le=1_999_999_999)
+    quality_bindings: dict[str, list[str]] = Field(default_factory=dict)
+    confirm_side_effects: bool = False
+
+    @model_validator(mode="after")
+    def validate_cost_routing(self) -> CostRoutingPolicyUpdate:
+        if self.unhealthy_priority <= self.minimum_priority:
+            raise ValueError("unhealthy_priority must be greater than minimum_priority")
+        if self.enabled and not self.confirm_side_effects:
+            raise ValueError("confirm_side_effects is required when enabling cost routing")
+        if len(self.quality_bindings) > 10_000:
+            raise ValueError("quality_bindings exceeds the account limit")
+        normalized: dict[str, list[str]] = {}
+        for raw_account_id, raw_monitor_ids in self.quality_bindings.items():
+            account_id = raw_account_id.strip()
+            if not account_id or len(account_id) > 160:
+                raise ValueError("quality_bindings contains an invalid account id")
+            if len(raw_monitor_ids) > 100:
+                raise ValueError("quality_bindings exceeds the per-account monitor limit")
+            monitor_ids = list(
+                dict.fromkeys(item.strip() for item in raw_monitor_ids if item.strip())
+            )
+            if any(len(item) > 160 for item in monitor_ids):
+                raise ValueError("quality_bindings contains an invalid monitor id")
+            if monitor_ids:
+                normalized[account_id] = monitor_ids
+        self.quality_bindings = normalized
+        return self
+
+
+class CostRoutingPolicyResponse(ORMModel):
+    id: str | None = None
+    target_id: str
+    enabled: bool = False
+    mode: str = "recommend"
+    probe_interval_seconds: int = 30
+    priority_scale: int = 1000
+    unhealthy_priority: int = 100000
+    minimum_priority: int = 1
+    quality_bindings: dict[str, list[str]] = Field(default_factory=dict)
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+    last_error: str | None = None
+    last_account_count: int = 0
+    last_change_count: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class CostRoutingRunRequest(BaseModel):
+    confirm_side_effects: bool = False
+
+
+class RoutingDecisionResponse(ORMModel):
+    id: str
+    policy_id: str | None
+    target_id: str | None
+    external_account_id: str
+    account_name: str
+    observed_multiplier: float | None
+    previous_priority: int | None
+    desired_priority: int
+    reason: str
+    mode: str
+    status: str
+    result: dict[str, Any]
+    last_error: str | None
+    created_at: datetime
+    finished_at: datetime | None
 
 
 class AccountActionRequest(BaseModel):

@@ -23,6 +23,7 @@ from app.models import (
     Capability,
     ChannelMonitorCurrent,
     CollectionRun,
+    CostRoutingPolicy,
     Incident,
     IncidentStatus,
     NotificationChannel,
@@ -30,6 +31,7 @@ from app.models import (
     OutboxStatus,
     Policy,
     QuotaSample,
+    RoutingDecision,
     RunStatus,
     Target,
     User,
@@ -52,6 +54,9 @@ from app.schemas import (
     ChannelMonitorUpdate,
     ChannelResponse,
     ChannelUpdate,
+    CostRoutingPolicyResponse,
+    CostRoutingPolicyUpdate,
+    CostRoutingRunRequest,
     DashboardResponse,
     IncidentResponse,
     LoginRequest,
@@ -61,6 +66,7 @@ from app.schemas import (
     PolicyResponse,
     ProbeResponse,
     QuotaResponse,
+    RoutingDecisionResponse,
     RunResponse,
     SystemStatus,
     TargetCreate,
@@ -556,6 +562,164 @@ async def update_upstream_billing_settings(
     )
     await session.commit()
     return UpstreamBillingSettings.model_validate(result)
+
+
+@router.get(
+    "/targets/{target_id}/cost-routing-policy",
+    response_model=CostRoutingPolicyResponse,
+)
+async def get_cost_routing_policy(
+    target_id: str,
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> CostRoutingPolicyResponse:
+    await required_target(session, target_id)
+    policy = await session.scalar(
+        select(CostRoutingPolicy).where(CostRoutingPolicy.target_id == target_id)
+    )
+    if policy is None:
+        return CostRoutingPolicyResponse(target_id=target_id)
+    return CostRoutingPolicyResponse.model_validate(policy)
+
+
+@router.put(
+    "/targets/{target_id}/cost-routing-policy",
+    response_model=CostRoutingPolicyResponse,
+)
+async def update_cost_routing_policy(
+    target_id: str,
+    payload: CostRoutingPolicyUpdate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> CostRoutingPolicy:
+    await required_target(session, target_id)
+    if payload.quality_bindings:
+        bound_account_ids = set(payload.quality_bindings)
+        accounts = list(
+            await session.scalars(
+                select(AccountCurrent).where(
+                    AccountCurrent.target_id == target_id,
+                    AccountCurrent.external_account_id.in_(bound_account_ids),
+                )
+            )
+        )
+        eligible_account_ids = {
+            account.external_account_id
+            for account in accounts
+            if account.platform.casefold() == "openai"
+            and account.account_type.casefold() == "apikey"
+        }
+        unknown_accounts = sorted(bound_account_ids - eligible_account_ids)
+        bound_monitor_ids = {
+            monitor_id
+            for monitor_ids in payload.quality_bindings.values()
+            for monitor_id in monitor_ids
+        }
+        monitors = list(
+            await session.scalars(
+                select(ChannelMonitorCurrent).where(
+                    ChannelMonitorCurrent.target_id == target_id,
+                    ChannelMonitorCurrent.external_monitor_id.in_(bound_monitor_ids),
+                )
+            )
+        )
+        eligible_monitor_ids = {
+            monitor.external_monitor_id
+            for monitor in monitors
+            if monitor.provider.casefold() == "openai"
+        }
+        unknown_monitors = sorted(bound_monitor_ids - eligible_monitor_ids)
+        if unknown_accounts or unknown_monitors:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                {
+                    "message": (
+                        "quality bindings must reference this target's OpenAI API-key "
+                        "accounts and OpenAI channel monitors"
+                    ),
+                    "account_ids": unknown_accounts,
+                    "monitor_ids": unknown_monitors,
+                },
+            )
+    policy = await session.scalar(
+        select(CostRoutingPolicy).where(CostRoutingPolicy.target_id == target_id)
+    )
+    if policy is None:
+        policy = CostRoutingPolicy(target_id=target_id)
+        session.add(policy)
+    for key, value in payload.model_dump(exclude={"confirm_side_effects"}).items():
+        setattr(policy, key, value)
+    policy.next_run_at = datetime.now(timezone.utc) if policy.enabled else None
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="cost_routing.policy.update",
+            target_id=target_id,
+            details={
+                "enabled": policy.enabled,
+                "mode": policy.mode,
+                "probe_interval_seconds": policy.probe_interval_seconds,
+                "priority_scale": policy.priority_scale,
+                "unhealthy_priority": policy.unhealthy_priority,
+                "minimum_priority": policy.minimum_priority,
+            },
+        )
+    )
+    await session.commit()
+    await session.refresh(policy)
+    return policy
+
+
+@router.post(
+    "/targets/{target_id}/cost-routing-policy/run",
+    response_model=CostRoutingPolicyResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def queue_cost_routing_run(
+    target_id: str,
+    payload: CostRoutingRunRequest,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> CostRoutingPolicy:
+    await required_target(session, target_id)
+    policy = await session.scalar(
+        select(CostRoutingPolicy).where(CostRoutingPolicy.target_id == target_id)
+    )
+    if policy is None or not policy.enabled:
+        raise HTTPException(status.HTTP_409_CONFLICT, "cost routing policy is not enabled")
+    if not payload.confirm_side_effects:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "confirm_side_effects is required to queue a cost routing run",
+        )
+    policy.next_run_at = datetime.now(timezone.utc)
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="cost_routing.run.queue",
+            target_id=target_id,
+            details={"policy_id": policy.id, "mode": policy.mode},
+        )
+    )
+    await session.commit()
+    await session.refresh(policy)
+    return policy
+
+
+@router.get("/routing-decisions", response_model=list[RoutingDecisionResponse])
+async def list_routing_decisions(
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    target_id: str | None = None,
+    decision_status: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> list[RoutingDecision]:
+    stmt = select(RoutingDecision).order_by(RoutingDecision.created_at.desc()).limit(limit)
+    if target_id:
+        stmt = stmt.where(RoutingDecision.target_id == target_id)
+    if decision_status:
+        stmt = stmt.where(RoutingDecision.status == decision_status)
+    return list(await session.scalars(stmt))
 
 
 @router.get("/targets/{target_id}/operations")

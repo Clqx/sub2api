@@ -13,10 +13,16 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.config import Settings, get_settings
 from app.database import SessionFactory
-from app.models import CollectionRun, RunStatus, Target, WorkerHeartbeat
+from app.models import CollectionRun, CostRoutingPolicy, RunStatus, Target, WorkerHeartbeat
 from app.security import SecretCipher, ensure_admin
 from app.services.automation import dispatch_automations
 from app.services.collector import collect_run
+from app.services.cost_routing import (
+    COST_ROUTING_LEASE_SECONDS,
+    claim_due_cost_routing_policies,
+    renew_cost_routing_claim,
+    run_cost_routing_policy,
+)
 from app.services.notifier import dispatch_due
 
 logger = logging.getLogger(__name__)
@@ -29,6 +35,7 @@ class Worker:
         self.worker_id = f"{self.hostname}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self.cipher = SecretCipher(settings.master_key)
         self._semaphore = asyncio.Semaphore(settings.worker_concurrency)
+        self._routing_semaphore = asyncio.Semaphore(max(1, min(4, settings.worker_concurrency)))
         self._health_file = Path("/tmp/sub2api-monitor-worker-health")
 
     async def run_forever(self) -> None:
@@ -37,6 +44,7 @@ class Worker:
         await self._recover_stale_runs(recover_same_host=True)
         logger.info("worker started", extra={"worker_id": self.worker_id})
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        cost_routing_task = asyncio.create_task(self._cost_routing_loop())
         try:
             while True:
                 try:
@@ -46,7 +54,8 @@ class Worker:
                 await asyncio.sleep(self.settings.worker_poll_seconds)
         finally:
             heartbeat_task.cancel()
-            await asyncio.gather(heartbeat_task, return_exceptions=True)
+            cost_routing_task.cancel()
+            await asyncio.gather(heartbeat_task, cost_routing_task, return_exceptions=True)
 
     async def tick(self) -> None:
         await self._recover_stale_runs()
@@ -57,6 +66,25 @@ class Worker:
         async with SessionFactory() as session:
             await dispatch_automations(session, self.settings, self.cipher)
             await dispatch_due(session, self.settings, self.cipher)
+
+    async def _cost_routing_loop(self) -> None:
+        while True:
+            try:
+                async with SessionFactory() as session:
+                    policy_ids = await claim_due_cost_routing_policies(
+                        session,
+                        owner_id=self.worker_id,
+                        limit=self.settings.worker_concurrency,
+                    )
+                if policy_ids:
+                    await asyncio.gather(
+                        *(self._execute_cost_routing(policy_id) for policy_id in policy_ids)
+                    )
+                    async with SessionFactory() as session:
+                        await dispatch_due(session, self.settings, self.cipher)
+            except Exception:
+                logger.exception("cost routing tick failed")
+            await asyncio.sleep(min(self.settings.worker_poll_seconds, 2.0))
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -160,6 +188,46 @@ class Worker:
                 if run is None:
                     return
                 await collect_run(session, run, self.settings, self.cipher, self.worker_id)
+
+    async def _execute_cost_routing(self, policy_id: str) -> None:
+        async with self._routing_semaphore:
+            renew_task = asyncio.create_task(self._renew_cost_routing_claim(policy_id))
+            try:
+                async with SessionFactory() as session:
+                    await run_cost_routing_policy(
+                        session,
+                        policy_id,
+                        self.settings,
+                        self.cipher,
+                        actor=f"worker:{self.worker_id}",
+                        claim_owner=self.worker_id,
+                        execution_mode_guard=self._cost_routing_execution_mode,
+                    )
+            finally:
+                renew_task.cancel()
+                await asyncio.gather(renew_task, return_exceptions=True)
+
+    async def _renew_cost_routing_claim(self, policy_id: str) -> None:
+        interval = COST_ROUTING_LEASE_SECONDS / 3
+        while True:
+            await asyncio.sleep(interval)
+            async with SessionFactory() as session:
+                renewed = await renew_cost_routing_claim(session, policy_id, self.worker_id)
+            if not renewed:
+                return
+
+    async def _cost_routing_execution_mode(
+        self,
+        policy_id: str,
+        claim_owner: str | None,
+    ) -> str | None:
+        async with SessionFactory() as session:
+            policy = await session.get(CostRoutingPolicy, policy_id)
+            if policy is None or not policy.enabled:
+                return None
+            if claim_owner is not None and policy.lease_owner != claim_owner:
+                return None
+            return policy.mode
 
 
 async def async_main() -> None:

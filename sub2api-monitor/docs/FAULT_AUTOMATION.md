@@ -11,8 +11,27 @@ The target Admin API key is a global full-privilege credential. The monitor ther
 | `clear_rate_limit` | `POST /api/v1/admin/accounts/:id/clear-rate-limit` | Clear a stale rate-limit state. |
 | `clear_temp_unschedulable` | `DELETE /api/v1/admin/accounts/:id/temp-unschedulable` | Remove a stale temporary quarantine. |
 | `set_schedulable` | `POST /api/v1/admin/accounts/:id/schedulable` | Re-enable an account that was incorrectly left unschedulable. |
+| Cost routing priority | `PUT /api/v1/admin/accounts/:id` with a priority-only body | Reconcile OpenAI API-key scheduling order from fresh effective upstream cost and availability. |
 
 The monitor never exposes a generic method/path/body action. Account deletion, credential changes, imports/exports, proxy/routing changes, quota resets, system restart/upgrade, data management, and backup/restore APIs are outside the automation allowlist.
+
+## One-Minute Cost Routing
+
+Cost routing is target-scoped, disabled by default, and starts in `recommend` mode. Enabling either mode requires explicit side-effect confirmation because the controller invokes the upstream billing probe every 30 seconds. Each run has a 25-second hard budget, leaving margin for worker polling so a newly observed change can be applied within one minute when the worker and target are not overloaded.
+
+Only accounts whose normalized identity is `platform=openai` and `type=apikey` are eligible. Every cycle refreshes the target account inventory, immediately inserts newly discovered eligible accounts, splits billing probes into the target API's maximum batch size of 20, runs batches concurrently within the hard budget, and uses `effective_rate_multiplier` before the resolved or synchronized fallback value.
+
+Healthy account priority is deterministic:
+
+```text
+priority = clamp(round(effective_multiplier * priority_scale), minimum_priority, unhealthy_priority - 1)
+```
+
+Lower numeric priority is preferred by Sub2API. An unavailable account or account-specific billing-probe failure receives `unhealthy_priority`, so the next healthy cost band takes over. Operators may explicitly bind an eligible account to one or more OpenAI channel monitors. A missing, disabled, stale, degraded, failed, error, or unknown bound monitor fails closed and applies the same unhealthy priority. Recovery restores the account to its calculated cost band. Equal desired and current priorities are not rewritten.
+
+The worker claims due policies with `FOR UPDATE SKIP LOCKED`, records a renewable owner lease, advances the next due time before network calls, and does not hold row locks while probing or updating the target. A second worker cannot execute the same target policy while that lease is active; an abandoned lease expires automatically. The worker re-reads policy enablement, mode, and lease ownership after probing and immediately before every bounded, idempotent priority `PUT`. Disabling the policy, switching to recommendation mode, or losing the lease cancels pending writes.
+
+Recommendations are deduplicated while the desired priority remains unchanged. Decisions are retained for 30 days by default and can be configured with `MONITOR_COST_ROUTING_DECISION_RETENTION_DAYS`. Successes, failures, multiplier changes, account failures, quality failures, and probe failures are stored as decisions/incidents; every distinct multiplier or routing-condition change emits another firing transition through the existing ntfy/Webhook outbox.
 
 ## Fault Sources
 
@@ -52,6 +71,7 @@ The signature is HMAC-SHA256 over the exact UTF-8 request body using determinist
 ## Operational Safeguards
 
 - New automation rules are disabled by default and use recommendation mode by default.
+- New cost-routing policies are disabled by default, use recommendation mode, and have a fixed 30-second controller interval with a 25-second hard execution budget.
 - Enabled automatic execution requires an explicit `confirm_side_effects` request.
 - Cooldown is at least five minutes.
 - Target credentials, Webhook bearer tokens, and signing secrets are encrypted and write-only.

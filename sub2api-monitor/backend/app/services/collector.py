@@ -418,6 +418,7 @@ def merge_database_snapshots(
                 snapshot.temp_unschedulable_until or api_account.temp_unschedulable_until
             ),
             "group_ids": api_account.group_ids,
+            "priority": api_account.priority,
             "rate_multiplier": api_account.rate_multiplier,
             "extra": {
                 "upstream_billing_probe_enabled": api_account.upstream_billing_probe_enabled,
@@ -575,6 +576,7 @@ async def _store_account(
     current.available = account.available
     current.availability_reasons = account.availability_reasons
     current.group_ids = account.group_ids
+    current.priority = account.priority
     current.expires_at = account.expires_at
     current.rate_limit_reset_at = account.rate_limit_reset_at
     current.overload_until = account.overload_until

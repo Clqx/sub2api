@@ -31,6 +31,7 @@ Protected assets are target administrator credentials, DB credentials, the monit
 
 - Encrypt target credentials at rest using a master key supplied outside the monitor database.
 - Return secret fields as write-only configuration state and exclude them from logs, traces, errors, and frontend payloads.
+- Cost routing exposes only the fixed account-priority update operation. It never accepts an arbitrary target method, path, or request body; target responses are reduced to bounded status metadata before persistence.
 - Treat supplied Sub2API API keys as administrator credentials until a target proves a narrower scope.
 - Reject unsafe target URLs and redirects according to an explicit SSRF/network policy; never forward authorization across an untrusted redirect.
 - Use fixed parameterized SQL, schema/column/JSON-key allowlists, read-only transactions, and a database role with no write grants.

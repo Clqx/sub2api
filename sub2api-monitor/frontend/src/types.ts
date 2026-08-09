@@ -35,6 +35,7 @@ export interface Account {
   available: boolean | null
   availability_reasons: string[]
   group_ids?: string[]
+  priority?: number | null
   remaining_percent?: number | null
   quota_freshness?: Freshness
   observed_at?: string | null
@@ -46,6 +47,10 @@ export interface Account {
   upstream_billing_probe_enabled: boolean
   upstream_billing_rate_sync_enabled: boolean
   upstream_billing_probe?: UpstreamBillingProbeSnapshot | null
+  routing_desired_priority?: number | null
+  routing_status?: 'recommend' | 'recommended' | 'in_sync' | 'succeeded' | 'failed' | 'cancelled' | null
+  routing_updated_at?: string | null
+  routing_applied_at?: string | null
 }
 
 export interface UpstreamBillingProbeSnapshot {
@@ -62,6 +67,43 @@ export interface UpstreamBillingProbeSnapshot {
 }
 
 export interface UpstreamBillingSettings { enabled:boolean; interval_minutes:number }
+
+export interface CostRoutingPolicy {
+  id?:string|null
+  target_id:string
+  enabled:boolean
+  mode:'recommend'|'execute'
+  probe_interval_seconds:number
+  priority_scale:number
+  unhealthy_priority:number
+  minimum_priority:number
+  quality_bindings:Record<string,string[]>
+  last_run_at?:string|null
+  next_run_at?:string|null
+  last_error?:string|null
+  last_account_count:number
+  last_change_count:number
+  created_at?:string|null
+  updated_at?:string|null
+}
+
+export interface RoutingDecision {
+  id:string
+  policy_id?:string|null
+  target_id?:string|null
+  external_account_id:string
+  account_name:string
+  observed_multiplier?:number|null
+  previous_priority?:number|null
+  desired_priority:number
+  reason:'cost_increase'|'cost_decrease'|'cost_discovered'|'unavailable'|'probe_failed'|'quality_failed'|'recovery'|'priority_reconcile'|'in_sync'
+  mode:'recommend'|'execute'
+  status:'recommended'|'running'|'succeeded'|'failed'|'cancelled'
+  result:Record<string,unknown>
+  last_error?:string|null
+  created_at:string
+  finished_at?:string|null
+}
 
 export interface Incident {
   id: string
