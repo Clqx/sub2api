@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     target_binding_ttl_hours: int = Field(default=24, ge=1, le=168)
     target_db_fallback_minutes: int = Field(default=60, ge=0, le=240)
     allow_private_targets: bool = False
+    allow_private_notification_targets: bool = False
     worker_poll_seconds: float = Field(default=2.0, ge=0.2, le=60.0)
     worker_concurrency: int = Field(default=8, ge=1, le=100)
     worker_stale_seconds: int = Field(default=60, ge=10, le=3600)

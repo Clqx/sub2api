@@ -140,11 +140,31 @@ class ChannelCheckResult:
     checked_at: datetime
 
 
+@dataclass(slots=True)
+class NativeAlertEvent:
+    external_event_id: str
+    rule_id: str
+    severity: str
+    status: str
+    title: str
+    description: str
+    fired_at: datetime | None
+
+
 SecretRotatedCallback = Callable[[dict[str, str]], Awaitable[None]]
 
 ACTIVE_USAGE_PLATFORMS = frozenset({"anthropic", "openai"})
 ACTIVE_USAGE_ACCOUNT_TYPES = frozenset({"oauth", "setup-token"})
 MONITORING_TIME_RANGES = frozenset({"5m", "30m", "1h", "6h", "24h"})
+ACCOUNT_AUTOMATION_ACTIONS = frozenset(
+    {
+        "recover_state",
+        "clear_error",
+        "clear_rate_limit",
+        "clear_temp_unschedulable",
+        "set_schedulable",
+    }
+)
 MONITORING_SENSITIVE_KEYS = frozenset(
     {
         "access_token",
@@ -165,7 +185,12 @@ MONITORING_SENSITIVE_KEYS = frozenset(
 
 async def resolve_target_address(url: str, *, allow_private: bool) -> str | None:
     parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         raise ConnectorError("target URL must be an HTTP(S) URL without user info")
     if allow_private:
         return None
@@ -497,9 +522,7 @@ class Sub2APIConnector:
                     "unknown", "unavailable", "missing", "invalid channel monitor response"
                 ), []
             output.extend(
-                normalize_channel_monitor(raw)
-                for raw in data["items"]
-                if isinstance(raw, dict)
+                normalize_channel_monitor(raw) for raw in data["items"] if isinstance(raw, dict)
             )
             pages = _as_int(data.get("pages"))
             if (pages and page >= pages) or len(data["items"]) < page_size:
@@ -670,6 +693,76 @@ class Sub2APIConnector:
             "time_range": time_range,
             "resources": resources,
             "failures": failures,
+        }
+
+    async def native_alert_events(
+        self, *, limit: int = 100
+    ) -> tuple[ProbeFact, list[NativeAlertEvent], bool]:
+        bounded_limit = min(max(limit, 1), 100)
+        response = await self.request(
+            "GET",
+            "/api/v1/admin/ops/alert-events",
+            params={"status": "firing", "limit": bounded_limit},
+        )
+        fact = _fact_from_response(response, "native alert events")
+        if response.status_code != 200:
+            return fact, [], False
+        data = _envelope_data(response)
+        if not isinstance(data, list):
+            return (
+                ProbeFact("unknown", "unavailable", "missing", "invalid alert event response"),
+                [],
+                False,
+            )
+        events: list[NativeAlertEvent] = []
+        for raw in data:
+            if not isinstance(raw, dict) or not isinstance(raw.get("id"), (str, int)):
+                continue
+            severity = str(raw.get("severity") or "warning").casefold()
+            if severity not in {"info", "warning", "critical"}:
+                severity = "warning"
+            events.append(
+                NativeAlertEvent(
+                    external_event_id=str(raw["id"]),
+                    rule_id=str(raw.get("rule_id") or "unknown"),
+                    severity=severity,
+                    status=str(raw.get("status") or "firing"),
+                    title=str(raw.get("title") or f"Native alert {raw['id']}")[:300],
+                    description=str(raw.get("description") or "")[:1000],
+                    fired_at=_parse_datetime(raw.get("fired_at")),
+                )
+            )
+        return fact, events, len(data) < bounded_limit
+
+    async def execute_account_action(
+        self, external_account_id: str, action: str, *, idempotency_key: str
+    ) -> dict[str, Any]:
+        if action not in ACCOUNT_AUTOMATION_ACTIONS:
+            raise ValueError("unsupported account automation action")
+        account_id = quote(external_account_id, safe="")
+        method = "POST"
+        path = f"/api/v1/admin/accounts/{account_id}/{action.replace('_', '-')}"
+        kwargs: dict[str, Any] = {}
+        if action == "clear_temp_unschedulable":
+            method = "DELETE"
+            path = f"/api/v1/admin/accounts/{account_id}/temp-unschedulable"
+        elif action == "set_schedulable":
+            path = f"/api/v1/admin/accounts/{account_id}/schedulable"
+            kwargs["json"] = {"schedulable": True}
+        response = await self.request(
+            method,
+            path,
+            headers={"Idempotency-Key": idempotency_key},
+            **kwargs,
+        )
+        if response.status_code < 200 or response.status_code >= 300:
+            raise ConnectorError(
+                f"account action returned HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
+        return {
+            "http_status": response.status_code,
+            "idempotency_replayed": response.headers.get("X-Idempotency-Replayed") == "true",
         }
 
     async def channel_monitor_history(

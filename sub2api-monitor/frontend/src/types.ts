@@ -226,20 +226,62 @@ export interface AccountUsageStats {
 
 export interface NotificationChannel {
   id: string
+  target_id?: string | null
   name: string
+  kind: 'ntfy' | 'webhook'
   server_url: string
   topic: string
   enabled: boolean
+  event_types: Array<'incident.firing' | 'incident.escalated' | 'incident.resolved'>
+  severities: Array<'info' | 'warning' | 'critical'>
   token_configured: boolean
+  signing_secret_configured: boolean
+  created_at: string
 }
 
 export interface OutboxItem {
   id: string
   channel_id: string
+  channel_name?: string | null
+  channel_kind?: 'ntfy' | 'webhook' | null
   status: 'pending' | 'sent' | 'dead'
   attempts: number
   last_error?: string | null
   sent_at?: string | null
+  created_at: string
+}
+
+export type AutomationAction = 'recover_state' | 'clear_error' | 'clear_rate_limit' | 'clear_temp_unschedulable' | 'set_schedulable'
+
+export interface AutomationRule {
+  id: string
+  target_id?: string | null
+  name: string
+  enabled: boolean
+  trigger_rule_key: 'account.unavailable'
+  action: AutomationAction
+  mode: 'recommend' | 'execute'
+  reason_filters: string[]
+  cooldown_seconds: number
+  created_at: string
+  updated_at: string
+}
+
+export interface AutomationExecution {
+  id: string
+  rule_id: string | null
+  incident_id: string | null
+  transition_id: string
+  target_id: string | null
+  external_account_id: string
+  action: AutomationAction
+  mode: 'recommend' | 'execute'
+  status: 'recommended' | 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped'
+  attempts: number
+  result: Record<string, unknown>
+  last_error?: string | null
+  started_at?: string | null
+  finished_at?: string | null
   created_at: string
 }
 

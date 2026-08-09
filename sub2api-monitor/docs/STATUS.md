@@ -1,10 +1,10 @@
 # Project Status
 
-Last updated: 2026-08-08
+Last updated: 2026-08-09
 
 ## Current Phase
 
-Phase 1 and the completed Phase 2 FULL, active-quota, upstream-rate, and channel-monitoring slices are closed. Remaining Phase 2 work covers broader provider quota mappings and V1 noise-control workflows.
+Phase 1 and the completed Phase 2 monitoring slices are closed. The current controlled-automation increment adds native fault discovery, event subscriptions, and a narrowly allowlisted Admin API executor.
 
 ## Phase Goal
 
@@ -79,6 +79,15 @@ The current Phase 2 increment adds fresh provider quota through the existing Sub
 - [x] Add account multiplier and group membership to the cross-target inventory without replacing missing values with zero.
 - [x] Verify the live `whiles` target plus desktop and 390px mobile layouts with no page-level overflow or application console errors.
 
+## Fault Discovery and Automation Completed
+
+- [x] Mirror firing native Ops alerts and resolve them only from complete evidence.
+- [x] Create deduplicated scheduled-collection failure and recovery incidents.
+- [x] Add target/event/severity subscriptions for ntfy and HMAC-signed Webhooks on the durable outbox.
+- [x] Add recommendation, approval, and explicitly enabled execution modes for five allowlisted account recovery actions.
+- [x] Enforce cooldown, event-transition uniqueness, target idempotency keys, bounded result persistence, audit, and post-action collection.
+- [x] Keep destructive account, credential, routing, system, data-management, and backup APIs outside the executor.
+
 ## Pending Phase 0 Decisions
 
 - [ ] Confirm the oldest Sub2API version that V1 must support.
@@ -117,3 +126,4 @@ Phase 2 - full API+DB connector, field precedence, binding verification, expande
 - 2026-08-08: Enabled five-minute upstream-rate discovery for OpenAI API-key accounts, added multiplier-change incidents, and added encrypted PEM certificate input for existing and new FULL targets. Final local gates: 55 backend tests, Ruff, mypy, 8 frontend tests, ESLint, production build, live collection, and desktop/mobile form checks.
 - 2026-08-08: Added native Sub2API operations aggregation and the four-view Operations page. Final gates: 57 backend tests, Ruff, strict mypy, 9 frontend tests, ESLint, production build, live target reprobe, and desktop/mobile browser checks with no page overflow.
 - 2026-08-08: Added native per-account usage analytics with 7/30/90-day summaries, trends, model and endpoint distributions. Final gates: 59 backend tests, Ruff, strict mypy, 10 frontend tests, ESLint, production build, live `whiles` reads, and 1280px/390px browser checks with no page overflow.
+- 2026-08-09: Added native Ops alert ingestion, collection-failure incidents, filtered ntfy/Webhook subscriptions, signed Webhook delivery, and explicitly confirmed account-recovery automation with idempotent execution and verification runs.

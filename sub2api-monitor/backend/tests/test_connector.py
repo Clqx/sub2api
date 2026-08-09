@@ -12,6 +12,7 @@ from app.connectors.sub2api import (
     ContractError,
     Sub2APIConnector,
     normalize_account,
+    resolve_target_address,
 )
 
 
@@ -373,9 +374,7 @@ async def test_account_usage_stats_is_bounded_sanitized_and_encoded(
                         "total_requests": 12,
                         "credentials": {"access_token": "must-not-survive"},
                     },
-                    "models": [
-                        {"model": "gpt-5", "requests": 12, "api_key": "must-not-survive"}
-                    ],
+                    "models": [{"model": "gpt-5", "requests": 12, "api_key": "must-not-survive"}],
                     "endpoints": [],
                     "upstream_endpoints": [],
                     "request_body": {"secret": "must-not-survive"},
@@ -458,6 +457,12 @@ async def test_connector_pins_validated_dns_address(
     assert version == "1.0"
 
 
+@pytest.mark.parametrize("url", ["https://user@example.com", "https://:password@example.com"])
+async def test_target_url_rejects_all_userinfo_forms(url: str) -> None:
+    with pytest.raises(ConnectorError, match="without user info"):
+        await resolve_target_address(url, allow_private=True)
+
+
 @pytest.mark.asyncio
 async def test_upstream_billing_and_channel_monitor_contracts(
     settings_dict: dict[str, object],
@@ -471,11 +476,7 @@ async def test_upstream_billing_and_channel_monitor_contracts(
                 200,
                 json={
                     "code": 0,
-                    "data": {
-                        "results": [
-                            {"account_id": 11, "snapshot": {"status": "ok"}}
-                        ]
-                    },
+                    "data": {"results": [{"account_id": 11, "snapshot": {"status": "ok"}}]},
                 },
             )
         if request.url.path.endswith("upstream-billing-probe/settings"):

@@ -28,6 +28,8 @@ from app.services.monitoring import sync_channel_monitors
 from app.services.policies import (
     evaluate_account,
     evaluate_channel,
+    evaluate_collection_health,
+    evaluate_native_alerts,
     evaluate_upstream_rate_change,
     upstream_rate_multiplier,
 )
@@ -78,6 +80,16 @@ async def collect_run(
             except Exception as exc:
                 channel_fact = ProbeFact("unknown", "unavailable", "missing", _safe_error(exc))
                 channel_monitors = []
+            try:
+                native_alert_fact, native_alerts, native_alerts_complete = (
+                    await connector.native_alert_events()
+                )
+            except Exception as exc:
+                native_alert_fact = ProbeFact(
+                    "unknown", "unavailable", "missing", _safe_error(exc)
+                )
+                native_alerts = []
+                native_alerts_complete = False
             if accounts_fact.runtime_state == "healthy":
                 (
                     passive_results,
@@ -118,6 +130,17 @@ async def collect_run(
             session, target.id, "accounts.upstream_billing_probe", billing_fact, now
         )
         await apply_probe_fact(session, target.id, "channels.monitor", channel_fact, now)
+        await apply_probe_fact(
+            session, target.id, "ops.alert_events", native_alert_fact, now
+        )
+        if native_alert_fact.runtime_state == "healthy":
+            await evaluate_native_alerts(
+                session,
+                target.id,
+                target.name,
+                native_alerts,
+                complete=native_alerts_complete,
+            )
         if channel_fact.runtime_state == "healthy":
             stored_channels, removed_channels = await sync_channel_monitors(
                 session, target, channel_monitors, observed_at=now
@@ -186,6 +209,7 @@ async def collect_run(
         run.account_count = len(accounts)
         run.quota_count = quota_count
         run.finished_at = datetime.now(timezone.utc)
+        await evaluate_collection_health(session, target.id, target.name, None)
         await session.commit()
     except Exception as exc:
         await session.rollback()
@@ -206,6 +230,10 @@ async def collect_run(
             failed_run.status = RunStatus.FAILED.value
             failed_run.error = _safe_error(exc)
             failed_run.finished_at = datetime.now(timezone.utc)
+        if target:
+            await evaluate_collection_health(
+                session, target.id, target.name, _safe_error(exc)
+            )
         await session.commit()
 
 

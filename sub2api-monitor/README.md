@@ -102,6 +102,16 @@ The **Operations** page aggregates the monitored target's existing read-only Ops
 
 The **Accounts** page shows each account's configured multiplier and group membership. Opening an account reads the target's native 7, 30, or 90-day usage statistics on demand: requests, tokens, account cost, user-billed cost, standard cost, response time, active days, daily trend, model distribution, and inbound/upstream endpoint distribution. The monitor does not fan this request out across the account list, does not persist the returned analytics, and keeps missing values distinct from explicit upstream zeroes.
 
+### Fault discovery and event subscriptions
+
+Scheduled collection failures and the target's firing native Ops alerts enter the same deduplicated incident lifecycle as account, quota, rate, and channel faults. Subscriptions can be global or target-scoped, filter firing/escalated/resolved events and severity, and deliver through ntfy or Webhook. Webhooks support encrypted Bearer credentials and optional HMAC-SHA256 signatures while retaining the durable outbox, retry, and delivery history.
+
+Notification destinations are revalidated and DNS-pinned on every delivery. Private notification endpoints are blocked by default even when private Sub2API targets are enabled; set `MONITOR_ALLOW_PRIVATE_NOTIFICATION_TARGETS=true` only for explicitly trusted internal ntfy or Webhook endpoints.
+
+### Bounded account recovery automation
+
+The **Automation** page creates disabled-by-default rules for `account.unavailable` incidents. Recommendation mode requires operator approval before execution; automatic mode requires explicit side-effect confirmation. Only unified state recovery, error clearing, rate-limit clearing, temporary-unschedulable clearing, and schedulable restoration are allowed. Every execution has a stable target idempotency key, cooldown, audit trail, bounded result, and follow-up collection. See [fault automation](docs/FAULT_AUTOMATION.md) for the exact Admin API and security contract.
+
 For public database targets, use `sslmode=require` plus the separately supplied PEM certificate. The connector pins the resolved public IP, requires the supplied certificate, validates its trust chain, and enforces TLS 1.2 or newer. `sslmode=verify-full` remains rejected because DNS pinning cannot preserve hostname verification; the monitor does not silently downgrade that mode.
 
 ## Documentation
@@ -117,6 +127,7 @@ For public database targets, use `sslmode=require` plus the separately supplied 
 - [Docker acceptance](docs/DOCKER_ACCEPTANCE.md)
 - [Delivery plan](docs/DELIVERY_PLAN.md)
 - [Testing strategy](docs/TESTING.md)
+- [Fault automation and event subscriptions](docs/FAULT_AUTOMATION.md)
 - [Agent-team workflow](docs/AGENT_TEAM_WORKFLOW.md)
 - [Phase 0 progress record](docs/progress/phase-0.md)
 - [Phase 1 progress record](docs/progress/phase-1.md)

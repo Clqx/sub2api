@@ -363,6 +363,8 @@ class Policy(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     unavailable_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     channel_failure_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    native_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    collection_failure_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     quota_warning_remaining: Mapped[float] = mapped_column(Float, default=20.0)
     quota_critical_remaining: Mapped[float] = mapped_column(Float, default=5.0)
     quota_recovery_remaining: Mapped[float] = mapped_column(Float, default=30.0)
@@ -457,10 +459,20 @@ class NotificationChannel(Base):
         ForeignKey("targets.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(160), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), default="ntfy", nullable=False)
     server_url: Mapped[str] = mapped_column(String(2048), nullable=False)
-    topic: Mapped[str] = mapped_column(String(256), nullable=False)
+    topic: Mapped[str] = mapped_column(String(256), default="", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    event_types: Mapped[list[str]] = mapped_column(
+        JSON,
+        default=lambda: ["incident.firing", "incident.escalated", "incident.resolved"],
+        nullable=False,
+    )
+    severities: Mapped[list[str]] = mapped_column(
+        JSON, default=lambda: ["warning", "critical"], nullable=False
+    )
     token_ciphertext: Mapped[str | None] = mapped_column(Text)
+    signing_secret_ciphertext: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -485,6 +497,59 @@ class NotificationOutbox(Base):
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_error: Mapped[str | None] = mapped_column(String(500))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AutomationRule(Base):
+    __tablename__ = "automation_rules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    target_id: Mapped[str | None] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    trigger_rule_key: Mapped[str] = mapped_column(
+        String(100), default="account.unavailable", nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), default="recommend", nullable=False)
+    reason_filters: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=900, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AutomationExecution(Base):
+    __tablename__ = "automation_executions"
+    __table_args__ = (
+        UniqueConstraint("rule_id", "transition_id", name="uq_automation_rule_transition"),
+        Index("ix_automation_due", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    rule_id: Mapped[str | None] = mapped_column(
+        ForeignKey("automation_rules.id", ondelete="SET NULL"), index=True
+    )
+    incident_id: Mapped[str | None] = mapped_column(
+        ForeignKey("incidents.id", ondelete="SET NULL"), index=True
+    )
+    transition_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    target_id: Mapped[str | None] = mapped_column(
+        ForeignKey("targets.id", ondelete="SET NULL"), index=True
+    )
+    external_account_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

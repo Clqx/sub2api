@@ -18,6 +18,8 @@ from app.database import get_session
 from app.models import (
     AccountCurrent,
     AuditEvent,
+    AutomationExecution,
+    AutomationRule,
     Capability,
     ChannelMonitorCurrent,
     CollectionRun,
@@ -34,10 +36,14 @@ from app.models import (
     WorkerHeartbeat,
 )
 from app.schemas import (
+    AccountActionRequest,
     AccountCursorPage,
     AccountResponse,
     AccountUsageStatsResponse,
     ActiveRefreshCapabilityUpdate,
+    AutomationExecutionResponse,
+    AutomationRuleCreate,
+    AutomationRuleResponse,
     CapabilityResponse,
     ChannelCheckResponse,
     ChannelCreate,
@@ -106,6 +112,17 @@ def target_response(target: Target) -> TargetResponse:
 def channel_response(channel: NotificationChannel) -> ChannelResponse:
     result = ChannelResponse.model_validate(channel)
     result.token_configured = bool(channel.token_ciphertext)
+    result.signing_secret_configured = bool(channel.signing_secret_ciphertext)
+    return result
+
+
+def outbox_response(
+    outbox: NotificationOutbox, channel: NotificationChannel | None = None
+) -> OutboxResponse:
+    result = OutboxResponse.model_validate(outbox)
+    if channel is not None:
+        result.channel_name = channel.name
+        result.channel_kind = channel.kind
     return result
 
 
@@ -484,9 +501,7 @@ async def account_usage_stats(
     )
     try:
         async with connector:
-            return await connector.account_usage_stats(
-                account.external_account_id, days=days
-            )
+            return await connector.account_usage_stats(account.external_account_id, days=days)
     except ConnectorError as exc:
         raise _remote_http_error(exc) from exc
 
@@ -701,9 +716,7 @@ async def probe_upstream_billing_batch(
         for account in target_accounts:
             previous_multiplier = upstream_rate_multiplier(account.upstream_billing_probe)
             result = result_by_id.get(account.external_account_id, {})
-            snapshot = (
-                result.get("snapshot") if isinstance(result.get("snapshot"), dict) else None
-            )
+            snapshot = result.get("snapshot") if isinstance(result.get("snapshot"), dict) else None
             if snapshot is not None:
                 account.upstream_billing_probe = snapshot
                 synced = snapshot.get("synced_rate_multiplier")
@@ -771,9 +784,7 @@ async def create_channel_monitor(
     settings: Settings = Depends(get_settings),
     cipher: SecretCipher = Depends(get_cipher),
 ) -> ChannelMonitorResponse:
-    target, connector = await _target_connector_or_404(
-        session, payload.target_id, settings, cipher
-    )
+    target, connector = await _target_connector_or_404(session, payload.target_id, settings, cipher)
     remote_payload = channel_payload(payload.model_dump(), include_target=True)
     try:
         async with connector:
@@ -805,9 +816,7 @@ async def update_channel_monitor(
     cipher: SecretCipher = Depends(get_cipher),
 ) -> ChannelMonitorResponse:
     item = await _required_channel(session, monitor_id)
-    target, connector = await _target_connector_or_404(
-        session, item.target_id, settings, cipher
-    )
+    target, connector = await _target_connector_or_404(session, item.target_id, settings, cipher)
     remote_payload = channel_payload(payload.model_dump(exclude_unset=True))
     try:
         async with connector:
@@ -840,9 +849,7 @@ async def delete_channel_monitor(
     cipher: SecretCipher = Depends(get_cipher),
 ) -> Response:
     item = await _required_channel(session, monitor_id)
-    target, connector = await _target_connector_or_404(
-        session, item.target_id, settings, cipher
-    )
+    target, connector = await _target_connector_or_404(session, item.target_id, settings, cipher)
     try:
         async with connector:
             await connector.delete_channel_monitor(item.external_monitor_id)
@@ -863,9 +870,7 @@ async def delete_channel_monitor(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post(
-    "/channel-monitors/{monitor_id}/run", response_model=list[ChannelCheckResponse]
-)
+@router.post("/channel-monitors/{monitor_id}/run", response_model=list[ChannelCheckResponse])
 async def run_channel_monitor(
     monitor_id: str,
     user: User = Depends(current_user),
@@ -874,9 +879,7 @@ async def run_channel_monitor(
     cipher: SecretCipher = Depends(get_cipher),
 ) -> list[ChannelCheckResponse]:
     item = await _required_channel(session, monitor_id)
-    target, connector = await _target_connector_or_404(
-        session, item.target_id, settings, cipher
-    )
+    target, connector = await _target_connector_or_404(session, item.target_id, settings, cipher)
     try:
         async with connector:
             results = await connector.run_channel_monitor(item.external_monitor_id)
@@ -903,9 +906,7 @@ async def run_channel_monitor(
     return [_channel_check_response(result) for result in results]
 
 
-@router.get(
-    "/channel-monitors/{monitor_id}/history", response_model=list[ChannelCheckResponse]
-)
+@router.get("/channel-monitors/{monitor_id}/history", response_model=list[ChannelCheckResponse])
 async def channel_monitor_history(
     monitor_id: str,
     _: User = Depends(current_user),
@@ -916,9 +917,7 @@ async def channel_monitor_history(
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> list[ChannelCheckResponse]:
     item = await _required_channel(session, monitor_id)
-    _target, connector = await _target_connector_or_404(
-        session, item.target_id, settings, cipher
-    )
+    _target, connector = await _target_connector_or_404(session, item.target_id, settings, cipher)
     try:
         async with connector:
             results = await connector.channel_monitor_history(
@@ -1010,6 +1009,137 @@ async def acknowledge_incident(
     return incident
 
 
+@router.post(
+    "/automation-rules",
+    response_model=AutomationRuleResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_automation_rule(
+    payload: AutomationRuleCreate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRule:
+    if payload.target_id and await session.get(Target, payload.target_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+    rule = AutomationRule(**payload.model_dump(exclude={"confirm_side_effects"}))
+    session.add(rule)
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="automation.rule.create",
+            target_id=payload.target_id,
+            details={"action": payload.action, "mode": payload.mode, "enabled": payload.enabled},
+        )
+    )
+    await session.commit()
+    await session.refresh(rule)
+    return rule
+
+
+@router.get("/automation-rules", response_model=list[AutomationRuleResponse])
+async def list_automation_rules(
+    _: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> list[AutomationRule]:
+    return list(await session.scalars(select(AutomationRule).order_by(AutomationRule.name)))
+
+
+@router.put("/automation-rules/{rule_id}", response_model=AutomationRuleResponse)
+async def update_automation_rule(
+    rule_id: str,
+    payload: AutomationRuleCreate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRule:
+    rule = await session.get(AutomationRule, rule_id)
+    if rule is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "automation rule not found")
+    if payload.target_id and await session.get(Target, payload.target_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+    for key, value in payload.model_dump(exclude={"confirm_side_effects"}).items():
+        setattr(rule, key, value)
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="automation.rule.update",
+            target_id=rule.target_id,
+            details={"rule_id": rule.id, "mode": rule.mode, "enabled": rule.enabled},
+        )
+    )
+    await session.commit()
+    await session.refresh(rule)
+    return rule
+
+
+@router.delete("/automation-rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_automation_rule(
+    rule_id: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    rule = await session.get(AutomationRule, rule_id)
+    if rule is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "automation rule not found")
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="automation.rule.delete",
+            target_id=rule.target_id,
+            details={"rule_id": rule.id},
+        )
+    )
+    await session.delete(rule)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/automation-executions", response_model=list[AutomationExecutionResponse])
+async def list_automation_executions(
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    target_id: str | None = None,
+    execution_status: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> list[AutomationExecution]:
+    stmt = select(AutomationExecution).order_by(AutomationExecution.created_at.desc()).limit(limit)
+    if target_id:
+        stmt = stmt.where(AutomationExecution.target_id == target_id)
+    if execution_status:
+        stmt = stmt.where(AutomationExecution.status == execution_status)
+    return list(await session.scalars(stmt))
+
+
+@router.post(
+    "/automation-executions/{execution_id}/approve",
+    response_model=AutomationExecutionResponse,
+)
+async def approve_automation_execution(
+    execution_id: str,
+    _: AccountActionRequest,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationExecution:
+    execution = await session.get(AutomationExecution, execution_id)
+    if execution is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "automation execution not found")
+    if execution.status not in {"recommended", "failed"}:
+        raise HTTPException(status.HTTP_409_CONFLICT, "execution cannot be queued from its state")
+    execution.mode = "execute"
+    execution.status = "queued"
+    execution.last_error = None
+    execution.finished_at = None
+    session.add(
+        AuditEvent(
+            actor=user.username,
+            action="automation.execution.approve",
+            target_id=execution.target_id,
+            details={"execution_id": execution.id, "action": execution.action},
+        )
+    )
+    await session.commit()
+    await session.refresh(execution)
+    return execution
+
+
 @router.post("/notification-channels", response_model=ChannelResponse, status_code=201)
 async def create_channel(
     payload: ChannelCreate,
@@ -1018,16 +1148,22 @@ async def create_channel(
     cipher: SecretCipher = Depends(get_cipher),
     settings: Settings = Depends(get_settings),
 ) -> ChannelResponse:
-    await validate_remote_url(str(payload.server_url), settings)
+    await validate_notification_url(str(payload.server_url), settings)
     if payload.target_id and await session.get(Target, payload.target_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
     channel = NotificationChannel(
         target_id=payload.target_id,
         name=payload.name,
+        kind=payload.kind,
         server_url=str(payload.server_url),
         topic=payload.topic,
         enabled=payload.enabled,
+        event_types=list(dict.fromkeys(payload.event_types)),
+        severities=list(dict.fromkeys(payload.severities)),
         token_ciphertext=cipher.encrypt_text(payload.token) if payload.token else None,
+        signing_secret_ciphertext=(
+            cipher.encrypt_text(payload.signing_secret) if payload.signing_secret else None
+        ),
     )
     session.add(channel)
     session.add(
@@ -1062,14 +1198,33 @@ async def update_channel(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "channel not found")
     if payload.target_id and await session.get(Target, payload.target_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
-    values = payload.model_dump(exclude_unset=True, exclude={"server_url", "token"})
+    values = payload.model_dump(
+        exclude_unset=True, exclude={"server_url", "token", "signing_secret"}
+    )
+    if values.get("event_types") is not None:
+        values["event_types"] = list(dict.fromkeys(values["event_types"]))
+    if values.get("severities") is not None:
+        values["severities"] = list(dict.fromkeys(values["severities"]))
     for key, value in values.items():
         setattr(channel, key, value)
+    if channel.kind == "ntfy" and not channel.topic:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "topic is required for ntfy")
+    if channel.kind == "ntfy":
+        channel.signing_secret_ciphertext = None
     if payload.server_url is not None:
-        await validate_remote_url(str(payload.server_url), settings)
+        await validate_notification_url(str(payload.server_url), settings)
         channel.server_url = str(payload.server_url)
     if "token" in payload.model_fields_set:
         channel.token_ciphertext = cipher.encrypt_text(payload.token) if payload.token else None
+    if "signing_secret" in payload.model_fields_set:
+        if channel.kind != "webhook" and payload.signing_secret:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "signing_secret is only accepted for webhook channels",
+            )
+        channel.signing_secret_ciphertext = (
+            cipher.encrypt_text(payload.signing_secret) if payload.signing_secret else None
+        )
     session.add(
         AuditEvent(actor=user.username, action="notification.update", target_id=channel.target_id)
     )
@@ -1102,19 +1257,30 @@ async def test_channel(
     channel_id: str,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
-) -> NotificationOutbox:
+) -> OutboxResponse:
     channel = await session.get(NotificationChannel, channel_id)
     if channel is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "channel not found")
-    outbox = NotificationOutbox(
-        transition_id=str(uuid.uuid4()),
-        channel_id=channel.id,
-        payload={
+    payload = (
+        {
+            "event_id": str(uuid.uuid4()),
+            "event_type": "test",
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "target_id": channel.target_id,
+            "message": "Webhook subscription is configured.",
+        }
+        if channel.kind == "webhook"
+        else {
             "title": "Sub2API Monitor test",
             "message": "Notification channel is configured.",
             "priority": 3,
             "tags": ["test_tube"],
-        },
+        }
+    )
+    outbox = NotificationOutbox(
+        transition_id=str(uuid.uuid4()),
+        channel_id=channel.id,
+        payload=payload,
     )
     session.add(outbox)
     session.add(
@@ -1122,7 +1288,7 @@ async def test_channel(
     )
     await session.commit()
     await session.refresh(outbox)
-    return outbox
+    return outbox_response(outbox, channel)
 
 
 @router.get("/runs", response_model=list[RunResponse])
@@ -1143,12 +1309,16 @@ async def list_outbox(
     _: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
     limit: int = Query(default=100, ge=1, le=1000),
-) -> list[NotificationOutbox]:
-    return list(
-        await session.scalars(
-            select(NotificationOutbox).order_by(NotificationOutbox.created_at.desc()).limit(limit)
+) -> list[OutboxResponse]:
+    rows = (
+        await session.execute(
+            select(NotificationOutbox, NotificationChannel)
+            .join(NotificationChannel, NotificationChannel.id == NotificationOutbox.channel_id)
+            .order_by(NotificationOutbox.created_at.desc())
+            .limit(limit)
         )
-    )
+    ).all()
+    return [outbox_response(outbox, channel) for outbox, channel in rows]
 
 
 @router.get("/system/status", response_model=SystemStatus)
@@ -1283,6 +1453,13 @@ async def validate_remote_url(url: str, settings: Settings) -> None:
 async def validate_remote_database_url(url: str, settings: Settings) -> None:
     try:
         await validate_database_url(url, allow_private=settings.allow_private_targets)
+    except ConnectorError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
+async def validate_notification_url(url: str, settings: Settings) -> None:
+    try:
+        await validate_target_url(url, allow_private=settings.allow_private_notification_targets)
     except ConnectorError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 

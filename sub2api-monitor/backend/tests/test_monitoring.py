@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import AccountCurrent
-from app.schemas import UpstreamBillingSettings
+from app.schemas import AutomationRuleCreate, ChannelCreate, UpstreamBillingSettings
 from app.services.monitoring import supports_upstream_billing_probe
 
 
@@ -29,3 +29,33 @@ def test_upstream_billing_interval_matches_target_contract() -> None:
     assert UpstreamBillingSettings(enabled=True, interval_minutes=5).interval_minutes == 5
     with pytest.raises(ValidationError):
         UpstreamBillingSettings(enabled=True, interval_minutes=4)
+
+
+def test_execution_automation_requires_explicit_side_effect_confirmation() -> None:
+    with pytest.raises(ValidationError):
+        AutomationRuleCreate(
+            name="recover",
+            enabled=True,
+            action="recover_state",
+            mode="execute",
+        )
+    rule = AutomationRuleCreate(
+        name="recover",
+        enabled=True,
+        action="recover_state",
+        mode="execute",
+        confirm_side_effects=True,
+    )
+    assert rule.enabled
+
+
+def test_notification_contract_distinguishes_ntfy_and_webhook() -> None:
+    with pytest.raises(ValidationError):
+        ChannelCreate(name="ntfy", server_url="https://ntfy.example.com")
+    webhook = ChannelCreate(
+        name="events",
+        kind="webhook",
+        server_url="https://hooks.example.com/events",
+        signing_secret="signing-secret-long-enough",
+    )
+    assert webhook.topic == ""

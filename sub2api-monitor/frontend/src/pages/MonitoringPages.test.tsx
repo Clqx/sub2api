@@ -7,6 +7,8 @@ import { ChannelsPage } from './ChannelsPage'
 import { AccountsPage } from './AccountsPage'
 import { RatesPage } from './RatesPage'
 import { OperationsPage } from './OperationsPage'
+import { AutomationPage } from './AutomationPage'
+import { NotificationsPage } from './NotificationsPage'
 
 function renderPage(page: ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -109,5 +111,33 @@ describe('monitoring expansion pages', () => {
     expect(await vi.waitFor(() => stats.mock.calls.some(([,days]) => days === 7))).toBe(true)
     fireEvent.click(screen.getByRole('tab',{name:'额度与状态'}))
     expect(await screen.findByText('账号状态')).toBeTruthy()
+  })
+
+  it('renders automation recommendations and approves an execution', async () => {
+    vi.spyOn(api,'targets').mockResolvedValue({items:[{id:'target-1',name:'Prod',base_url:'https://example.com',mode:'api_only',enabled:true,monitoring_readiness:'ready'}],total:1})
+    vi.spyOn(api,'automationRules').mockResolvedValue([{id:'rule-1',target_id:'target-1',name:'Recover temporary faults',enabled:true,trigger_rule_key:'account.unavailable',action:'recover_state',mode:'recommend',reason_filters:['temporarily_unschedulable'],cooldown_seconds:900,created_at:'2026-08-09T00:00:00Z',updated_at:'2026-08-09T00:00:00Z'}])
+    vi.spyOn(api,'automationExecutions').mockResolvedValue([{id:'execution-1',rule_id:'rule-1',incident_id:'incident-1',transition_id:'transition-1',target_id:'target-1',external_account_id:'9',action:'recover_state',mode:'recommend',status:'recommended',attempts:0,result:{availability_reasons:['temporarily_unschedulable']},created_at:'2026-08-09T00:00:00Z'}])
+    const approve=vi.spyOn(api,'approveAutomationExecution').mockResolvedValue({id:'execution-1',rule_id:'rule-1',incident_id:'incident-1',transition_id:'transition-1',target_id:'target-1',external_account_id:'9',action:'recover_state',mode:'execute',status:'queued',attempts:0,result:{},created_at:'2026-08-09T00:00:00Z'})
+    vi.spyOn(window,'confirm').mockReturnValue(true)
+
+    renderPage(<AutomationPage/>)
+
+    expect(await screen.findByText('Recover temporary faults')).toBeTruthy()
+    fireEvent.click(await screen.findByRole('button',{name:'批准 9'}))
+    await vi.waitFor(()=>expect(approve.mock.calls[0]?.[0]).toBe('execution-1'))
+  })
+
+  it('renders signed webhook subscriptions and delivery type', async () => {
+    vi.spyOn(api,'targets').mockResolvedValue({items:[],total:0})
+    vi.spyOn(api,'channels').mockResolvedValue([{id:'hook-1',target_id:null,name:'Event bus',kind:'webhook',server_url:'https://events.example.com/sub2api',topic:'',enabled:true,event_types:['incident.firing','incident.resolved'],severities:['critical'],token_configured:false,signing_secret_configured:true,created_at:'2026-08-09T00:00:00Z'}])
+    vi.spyOn(api,'outbox').mockResolvedValue([{id:'delivery-1',channel_id:'hook-1',channel_name:'Event bus',channel_kind:'webhook',status:'sent',attempts:0,sent_at:'2026-08-09T00:00:01Z',created_at:'2026-08-09T00:00:00Z'}])
+
+    renderPage(<NotificationsPage/>)
+
+    expect((await screen.findAllByText('Event bus')).length).toBeGreaterThan(0)
+    expect(screen.getByText('HMAC')).toBeTruthy()
+    expect(screen.getByText('故障触发 / 故障恢复 · 严重')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button',{name:'Webhook'}))
+    expect((screen.getByRole('textbox',{name:'Webhook 地址'}) as HTMLInputElement).value).toBe('')
   })
 })

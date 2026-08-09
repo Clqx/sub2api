@@ -15,6 +15,7 @@ from app.config import Settings, get_settings
 from app.database import SessionFactory
 from app.models import CollectionRun, RunStatus, Target, WorkerHeartbeat
 from app.security import SecretCipher, ensure_admin
+from app.services.automation import dispatch_automations
 from app.services.collector import collect_run
 from app.services.notifier import dispatch_due
 
@@ -54,7 +55,8 @@ class Worker:
         if run_ids:
             await asyncio.gather(*(self._execute(run_id) for run_id in run_ids))
         async with SessionFactory() as session:
-            await dispatch_due(session, self.cipher)
+            await dispatch_automations(session, self.settings, self.cipher)
+            await dispatch_due(session, self.settings, self.cipher)
 
     async def _heartbeat_loop(self) -> None:
         while True:

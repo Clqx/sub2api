@@ -5,6 +5,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
+EventType = Literal["incident.firing", "incident.escalated", "incident.resolved"]
+EventSeverity = Literal["info", "warning", "critical"]
+
+
+def default_event_types() -> list[EventType]:
+    return ["incident.firing", "incident.escalated", "incident.resolved"]
+
+
+def default_event_severities() -> list[EventSeverity]:
+    return ["warning", "critical"]
+
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -315,6 +326,8 @@ class PolicyCreate(BaseModel):
     enabled: bool = True
     unavailable_enabled: bool = True
     channel_failure_enabled: bool = True
+    native_alerts_enabled: bool = True
+    collection_failure_enabled: bool = True
     quota_warning_remaining: float = Field(default=20, ge=0, le=100)
     quota_critical_remaining: float = Field(default=5, ge=0, le=100)
     quota_recovery_remaining: float = Field(default=30, ge=0, le=100)
@@ -335,6 +348,8 @@ class PolicyResponse(ORMModel):
     enabled: bool
     unavailable_enabled: bool
     channel_failure_enabled: bool
+    native_alerts_enabled: bool
+    collection_failure_enabled: bool
     quota_warning_remaining: float
     quota_critical_remaining: float
     quota_recovery_remaining: float
@@ -362,31 +377,129 @@ class IncidentResponse(ORMModel):
 
 class ChannelCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
+    kind: Literal["ntfy", "webhook"] = "ntfy"
     server_url: HttpUrl
-    topic: str = Field(min_length=1, max_length=256, pattern=r"^[^\s/]+$")
+    topic: str = Field(default="", max_length=256, pattern=r"^[^\s/]*$")
     target_id: str | None = None
     enabled: bool = True
+    event_types: list[EventType] = Field(default_factory=default_event_types, min_length=1)
+    severities: list[EventSeverity] = Field(
+        default_factory=default_event_severities, min_length=1
+    )
     token: str | None = None
+    signing_secret: str | None = Field(default=None, min_length=16, max_length=4096)
+
+    @model_validator(mode="after")
+    def validate_channel_kind(self) -> ChannelCreate:
+        if self.kind == "ntfy" and not self.topic:
+            raise ValueError("topic is required for ntfy channels")
+        if self.kind == "ntfy" and self.signing_secret is not None:
+            raise ValueError("signing_secret is only accepted for webhook channels")
+        return self
 
 
 class ChannelUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
+    kind: Literal["ntfy", "webhook"] | None = None
     server_url: HttpUrl | None = None
-    topic: str | None = Field(default=None, min_length=1, max_length=256, pattern=r"^[^\s/]+$")
+    topic: str | None = Field(default=None, max_length=256, pattern=r"^[^\s/]*$")
     target_id: str | None = None
     enabled: bool | None = None
+    event_types: list[EventType] | None = Field(default=None, min_length=1)
+    severities: list[EventSeverity] | None = Field(
+        default=None, min_length=1
+    )
     token: str | None = None
+    signing_secret: str | None = Field(default=None, min_length=16, max_length=4096)
 
 
 class ChannelResponse(ORMModel):
     id: str
     target_id: str | None
     name: str
+    kind: str
     server_url: str
     topic: str
     enabled: bool
+    event_types: list[str]
+    severities: list[str]
     token_configured: bool = False
+    signing_secret_configured: bool = False
     created_at: datetime
+
+
+class AutomationRuleCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    target_id: str | None = None
+    enabled: bool = False
+    trigger_rule_key: Literal["account.unavailable"] = "account.unavailable"
+    action: Literal[
+        "recover_state",
+        "clear_error",
+        "clear_rate_limit",
+        "clear_temp_unschedulable",
+        "set_schedulable",
+    ]
+    mode: Literal["recommend", "execute"] = "recommend"
+    reason_filters: list[
+        Literal[
+            "status:error",
+            "manually_unschedulable",
+            "rate_limited",
+            "overloaded",
+            "temporarily_unschedulable",
+        ]
+    ] = Field(default_factory=list)
+    cooldown_seconds: int = Field(default=900, ge=300, le=86400)
+    confirm_side_effects: bool = False
+
+    @model_validator(mode="after")
+    def validate_execution_confirmation(self) -> AutomationRuleCreate:
+        if self.enabled and self.mode == "execute" and not self.confirm_side_effects:
+            raise ValueError("confirm_side_effects is required for enabled execution rules")
+        return self
+
+
+class AutomationRuleResponse(ORMModel):
+    id: str
+    target_id: str | None
+    name: str
+    enabled: bool
+    trigger_rule_key: str
+    action: str
+    mode: str
+    reason_filters: list[str]
+    cooldown_seconds: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutomationExecutionResponse(ORMModel):
+    id: str
+    rule_id: str | None
+    incident_id: str | None
+    transition_id: str
+    target_id: str | None
+    external_account_id: str
+    action: str
+    mode: str
+    status: str
+    attempts: int
+    result: dict[str, Any]
+    last_error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class AccountActionRequest(BaseModel):
+    confirm_side_effects: bool = False
+
+    @model_validator(mode="after")
+    def validate_confirmation(self) -> AccountActionRequest:
+        if not self.confirm_side_effects:
+            raise ValueError("confirm_side_effects is required")
+        return self
 
 
 class OutboxResponse(ORMModel):
@@ -394,6 +507,8 @@ class OutboxResponse(ORMModel):
     incident_id: str | None
     transition_id: str
     channel_id: str
+    channel_name: str | None = None
+    channel_kind: str | None = None
     status: str
     attempts: int = Field(description="Number of failed delivery attempts")
     next_attempt_at: datetime

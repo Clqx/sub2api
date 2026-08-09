@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from app.config import Settings
 from app.models import NotificationChannel, NotificationOutbox
 from app.security import SecretCipher
 from app.services import notifier
 
 
 async def test_ntfy_outbox_retries_without_persisting_response_body(
-    db_session, monkeypatch
+    db_session, settings_dict: dict[str, object], monkeypatch
 ) -> None:
     cipher = SecretCipher("test-master-key-that-is-long-enough")
     channel = NotificationChannel(
@@ -42,15 +44,18 @@ async def test_ntfy_outbox_retries_without_persisting_response_body(
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def post(self, _url: str, *, json, headers) -> httpx.Response:
+        async def post(self, _url: httpx.URL, *, content, headers, extensions) -> httpx.Response:
             FakeClient.calls += 1
             FakeClient.authorizations.append(headers.get("Authorization"))
+            assert json.loads(content)["topic"] == "alerts"
+            assert extensions == {}
             status = 503 if FakeClient.calls == 1 else 200
             return httpx.Response(status, json={"sensitive": "must-not-be-stored"})
 
     monkeypatch.setattr(notifier.httpx, "AsyncClient", FakeClient)
 
-    assert await notifier.dispatch_due(db_session, cipher) == 0
+    settings = Settings(**settings_dict, allow_private_notification_targets=True)
+    assert await notifier.dispatch_due(db_session, settings, cipher) == 0
     assert row.status == "pending"
     assert row.attempts == 1
     assert row.last_error == "ntfy returned HTTP 503"
@@ -58,7 +63,7 @@ async def test_ntfy_outbox_retries_without_persisting_response_body(
 
     row.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     await db_session.commit()
-    assert await notifier.dispatch_due(db_session, cipher) == 1
+    assert await notifier.dispatch_due(db_session, settings, cipher) == 1
     await db_session.refresh(row)
     assert row.status == "sent"
     assert row.attempts == 1

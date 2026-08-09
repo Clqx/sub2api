@@ -2,7 +2,7 @@
 
 ## Product Goal
 
-Monitor accounts across multiple Sub2API deployments, identify unavailable or low-quota accounts early, and send deduplicated firing and recovery notifications through ntfy.
+Monitor accounts across multiple Sub2API deployments, identify faults early, publish deduplicated lifecycle events, and execute only explicitly authorized recovery operations.
 
 ## Target Identity
 
@@ -27,6 +27,8 @@ Each deployment is a `target`. Accounts are globally identified by `(target_id, 
 | ALT-01 | Evaluate policies | Support warning, critical, exhausted, unavailable, group-capacity, stale-data, and recovery events. |
 | ALT-02 | Control noise | Apply sustain duration, hysteresis, cooldown, reminder, deduplication, acknowledgement, and silence. |
 | NTF-01 | Publish to ntfy | Route by target/policy, redact content, retry failures durably, and retain delivery history. |
+| EVT-01 | Subscribe to events | Filter lifecycle events by target, type, and severity; deliver through ntfy or signed Webhooks. |
+| AUT-01 | Bound fault automation | Recommend or execute fixed account recovery actions with confirmation, cooldown, idempotency, audit, and verification. |
 | OPS-01 | Self-observability | Expose health, readiness, worker heartbeat, collection runs, and outbox state. |
 | OPS-02 | Aggregate target operations | Expose the target's native traffic, capacity, request/error, alert, log, and system-health telemetry through fixed read-only APIs. |
 | SEC-01 | Protect credentials | Secrets are write-only in APIs, encrypted at rest, redacted from logs, and never exposed to the browser. |
@@ -40,7 +42,8 @@ Each deployment is a `target`. Accounts are globally identified by `(target_id, 
 - Operations: target traffic, latency, concurrency, group capacity, requests/errors, alerts, logs, and system health.
 - Alerts: firing, acknowledged, silenced, resolved, and notification delivery state.
 - Policies: global defaults with per-target overrides.
-- Notifications: ntfy destinations, routing, test publish, and delivery history.
+- Notifications: ntfy/Webhook subscriptions, event filters, test publish, and delivery history.
+- Automation: recovery rules, recommendation approvals, execution outcomes, and verification state.
 - System: worker status, collection runs, audit records, and configuration diagnostics.
 
 ## V1 Defaults
@@ -54,16 +57,17 @@ Each deployment is a `target`. Accounts are globally identified by `(target_id, 
 - Recovery hysteresis: warning recovers above 30%; critical recovers above 10%.
 - Stale threshold: provider-specific, default 20 minutes for actively refreshed quota.
 - Monitoring readiness: account monitoring is enabled only when `accounts.inventory` and `accounts.availability` are supported and currently usable; incomplete targets may be saved as `not_ready` but are excluded from healthy-target counts.
+- Automation: disabled by default, recommendation mode by default, and a five-minute minimum per-rule cooldown.
 
 ## Explicit Non-Goals
 
 - Modifying monitored Sub2API source code.
 - Direct SQL/DDL/DML writes through monitored Sub2API database connections. Separately authorized active API probes may cause documented incidental target-side writes under the Probe Safety contract.
-- General account management actions such as account disablement, credential rotation, or traffic rerouting. Explicitly authorized active quota, billing-rate probe, and channel-monitor operations remain limited to their documented target APIs and do not grant broader management authority.
+- General account management such as deletion, credential rotation, quota resets, imports/exports, proxy or traffic rerouting. Recovery automation is limited to the documented fixed action catalog.
 - Treating API-only access as equivalent to full access.
 - Arbitrary compatibility with forks that replace the core account/API contracts.
 - General infrastructure monitoring unrelated to account health and quota.
-- Multi-channel notification beyond ntfy in V1.
+- Arbitrary outbound integrations or unsigned generic callbacks.
 - AI/LLM analysis or autonomous management in V1.
 
 ## Future Agent Boundary

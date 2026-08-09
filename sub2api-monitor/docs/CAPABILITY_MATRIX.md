@@ -14,6 +14,9 @@ The UI and Hub API expose observed capabilities, not assumptions based on a sele
 | Channel monitor inventory | Optional, target-managed | Discover and operate | Discover and operate | Aggregates status, latency, availability, and history without exposing channel API keys. |
 | Group membership/capacity | Optional | Probe | Probe API and DB | Missing capability is `unsupported`, never zero. |
 | Native operations telemetry | Optional, read-only | Probe and aggregate | Probe and aggregate | Dashboard trends, QPS/TPS, latency, concurrency, account availability, requests/errors, OpenAI tokens, alerts, logs, pipeline health, group usage, and capacity. |
+| Native Ops alert ingestion | Optional, read-only | Mirror and resolve | Mirror and resolve | Polls firing target alerts; incomplete snapshots never resolve known incidents. |
+| Event subscriptions | Optional | ntfy/Webhook | ntfy/Webhook | Target, event-type, and severity filters share the durable outbox; Webhooks support Bearer and HMAC-SHA256. |
+| Account fault automation | Optional, explicit opt-in | Recommend or execute | Recommend or execute | Fixed Admin API allowlist, five-minute minimum cooldown, idempotency, audit, and post-action verification. |
 | API/DB consistency check | Full-mode required | N/A | Must pass | Mismatch blocks full-mode merge. |
 | Target DB fallback | Optional | N/A | Schema/permission probe | Read-only and limited to allowlisted queries. |
 
