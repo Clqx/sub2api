@@ -2,6 +2,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Eye, Search, X } from 'lucide-react'
 import { api } from '../api'
+import { ChartMetricSwitch, InteractiveBarChart } from '../components/InteractiveBarChart'
 import { Empty, ErrorState, Status } from '../components/Status'
 import { formatDateTime, quotaRemainingText, quotaSourceLabel, quotaUsageText } from '../quotaPresentation'
 import type {
@@ -15,6 +16,13 @@ import type {
 
 type DetailView = 'usage' | 'status'
 type StatsDays = 7 | 30 | 90
+type UsageTrendMetric = 'requests' | 'tokens' | 'cost'
+
+const usageTrendMetricOptions = [
+  {value:'requests',label:'请求'},
+  {value:'tokens',label:'Token'},
+  {value:'cost',label:'账号成本'},
+] satisfies Array<{value:UsageTrendMetric;label:string}>
 
 export function AccountsPage() {
   const [search,setSearch] = useState('')
@@ -68,10 +76,29 @@ function UsageHighlight({ title,item,primaryLabel,primaryValue,secondaryLabel,se
 }
 
 function DailyTrend({ history }:{ history:AccountUsageHistory[] }) {
+  const [metric,setMetric]=useState<UsageTrendMetric>('requests')
   if (!history.length) return <section className="usage-section"><h3>每日请求趋势</h3><div className="distribution-empty">暂无趋势数据</div></section>
-  const maxRequests = Math.max(...history.map(item => item.requests ?? 0),1)
-  const labelInterval = history.length > 45 ? 15 : history.length > 20 ? 5 : 1
-  return <section className="usage-section"><h3>每日请求趋势</h3><div className="usage-trend-scroll"><div className="usage-trend" style={{ '--trend-columns':history.length } as React.CSSProperties}>{history.map((item,index) => { const height=item.requests == null ? 0 : Math.max(3,(item.requests/maxRequests)*100); const label=item.label ?? item.date ?? ''; return <div className="trend-column" key={`${item.date ?? label}-${index}`} title={`${label} · 请求 ${formatNumber(item.requests)} · Token ${formatCompact(item.tokens)} · 账号成本 ${formatCost(item.actual_cost)}`}><span className="trend-value">{item.requests == null ? '' : formatCompact(item.requests)}</span><i className={item.requests == null ? 'missing' : ''} style={{ height:`${height}%` }}/><small>{index % labelInterval === 0 || index === history.length-1 ? shortDate(label) : ''}</small></div> })}</div></div></section>
+  const config={
+    requests:{label:'请求数',value:(item:AccountUsageHistory)=>item.requests??null,format:formatNumber,tone:'success' as const},
+    tokens:{label:'Token',value:(item:AccountUsageHistory)=>item.tokens??null,format:formatCompact,tone:'info' as const},
+    cost:{label:'账号成本',value:(item:AccountUsageHistory)=>item.actual_cost??null,format:formatCost,tone:'success' as const},
+  }[metric]
+  const points=history.map((item,index)=>{
+    const label=item.label??item.date??''
+    return {
+      id:`${item.date??label}-${index}`,
+      label:item.date??label,
+      shortLabel:shortDate(label),
+      value:config.value(item),
+      details:[
+        {label:'请求',value:formatNumber(item.requests)},
+        {label:'Token',value:formatCompact(item.tokens)},
+        {label:'账号成本',value:formatCost(item.actual_cost)},
+        {label:'用户计费',value:formatCost(item.user_cost)},
+      ],
+    }
+  })
+  return <section className="usage-section"><div className="usage-section-title"><h3>每日使用趋势</h3><ChartMetricSwitch ariaLabel="每日趋势指标" value={metric} options={usageTrendMetricOptions} onChange={setMetric}/></div><InteractiveBarChart ariaLabel="每日使用趋势" points={points} valueLabel={config.label} valueFormatter={config.format} tone={config.tone}/></section>
 }
 
 function ModelStatsTable({ items }:{ items:AccountModelStat[] }) {

@@ -2,11 +2,29 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, AlertTriangle, Clock3, Cpu, Database, RefreshCw, ServerCog, Users } from 'lucide-react'
 import { api } from '../api'
+import { ChartMetricSwitch, InteractiveBarChart } from '../components/InteractiveBarChart'
 import { Empty, ErrorState, Status } from '../components/Status'
+import type { ReactNode } from 'react'
 import type { OperationsResources, OpsErrorItem, OpsRequestItem } from '../types'
 
 type View = 'overview'|'capacity'|'errors'|'system'
 type TimeRange = '5m'|'30m'|'1h'|'6h'|'24h'
+type ThroughputMetric = 'requests'|'tokens'|'qps'|'tps'
+type ErrorMetric = 'total'|'sla'|'upstream'|'limited'
+
+const throughputMetricOptions = [
+  {value:'requests',label:'请求'},
+  {value:'tokens',label:'Token'},
+  {value:'qps',label:'QPS'},
+  {value:'tps',label:'TPS'},
+] satisfies Array<{value:ThroughputMetric;label:string}>
+
+const errorMetricOptions = [
+  {value:'total',label:'全部'},
+  {value:'sla',label:'SLA'},
+  {value:'upstream',label:'上游'},
+  {value:'limited',label:'限流'},
+] satisfies Array<{value:ErrorMetric;label:string}>
 
 export function OperationsPage() {
   const targets = useQuery({ queryKey:['targets'], queryFn:api.targets })
@@ -36,6 +54,25 @@ export function OperationsPage() {
 function Overview({resources}:{resources:OperationsResources}) {
   const snapshot=resources.ops_snapshot
   const overview=snapshot?.overview
+  const [throughputMetric,setThroughputMetric]=useState<ThroughputMetric>('requests')
+  const throughputConfig={
+    requests:{label:'请求数',value:(point:NonNullable<typeof snapshot>['throughput_trend']['points'][number])=>point.request_count,format:formatNumber,tone:'success' as const},
+    tokens:{label:'Token',value:(point:NonNullable<typeof snapshot>['throughput_trend']['points'][number])=>point.token_consumed,format:formatCompact,tone:'info' as const},
+    qps:{label:'QPS',value:(point:NonNullable<typeof snapshot>['throughput_trend']['points'][number])=>point.qps,format:formatRate,tone:'success' as const},
+    tps:{label:'TPS',value:(point:NonNullable<typeof snapshot>['throughput_trend']['points'][number])=>point.tps,format:formatRate,tone:'info' as const},
+  }[throughputMetric]
+  const throughputPoints=(snapshot?.throughput_trend.points??[]).slice(-72).map(point=>({
+    id:point.bucket_start,
+    label:formatTime(point.bucket_start),
+    shortLabel:shortTime(point.bucket_start),
+    value:throughputConfig.value(point),
+    details:[
+      {label:'请求',value:formatNumber(point.request_count)},
+      {label:'Token',value:formatCompact(point.token_consumed)},
+      {label:'QPS',value:formatRate(point.qps)},
+      {label:'TPS',value:formatRate(point.tps)},
+    ],
+  }))
   const metrics=[
     ['健康评分',overview?.health_score==null?'--':overview.health_score.toFixed(0),Activity],
     ['请求总数',formatNumber(overview?.request_count_total),ServerCog],
@@ -48,7 +85,7 @@ function Overview({resources}:{resources:OperationsResources}) {
   ] as const
   return <>
     <section className="metric-grid ops-metrics">{metrics.map(([label,value,Icon])=><div className="metric" key={label}><div><span>{label}</span><strong>{value}</strong></div><Icon size={20}/></div>)}</section>
-    <section className="content-band ops-section"><SectionTitle title="吞吐趋势" detail={`${snapshot?.throughput_trend.bucket??'--'} 聚合`}/><TrendBars points={snapshot?.throughput_trend.points??[]}/></section>
+    <section className="content-band ops-section"><SectionTitle title="吞吐趋势" detail={`${snapshot?.throughput_trend.bucket??'--'} 聚合`} action={<ChartMetricSwitch ariaLabel="吞吐趋势指标" value={throughputMetric} options={throughputMetricOptions} onChange={setThroughputMetric}/>}/><InteractiveBarChart ariaLabel="吞吐趋势" points={throughputPoints} valueLabel={throughputConfig.label} valueFormatter={throughputConfig.format} tone={throughputConfig.tone}/></section>
     <div className="ops-two-column"><section className="content-band ops-section"><SectionTitle title="延迟分布" detail={`${formatNumber(resources.latency_histogram?.total_requests)} 个请求`}/><SimpleRows items={(resources.latency_histogram?.buckets??[]).map(item=>({label:item.range,value:formatNumber(item.count)}))}/></section><section className="content-band ops-section"><SectionTitle title="OpenAI Token 指标" detail="按模型统计"/><table className="ops-table"><thead><tr><th>模型</th><th>请求</th><th>Token/s</th><th>首 Token</th></tr></thead><tbody>{resources.openai_token_stats?.items.map(item=><tr key={item.model}><td><strong>{item.model}</strong></td><td>{formatNumber(item.request_count)}</td><td>{formatRate(item.avg_tokens_per_sec)}</td><td>{formatDuration(item.avg_first_token_ms)}</td></tr>)}</tbody></table></section></div>
   </>
 }
@@ -71,8 +108,28 @@ function Capacity({resources}:{resources:OperationsResources}) {
 
 function Errors({resources}:{resources:OperationsResources}) {
   const errorPoints=resources.ops_snapshot?.error_trend.points??[]
+  const [errorMetric,setErrorMetric]=useState<ErrorMetric>('total')
+  const errorConfig={
+    total:{label:'错误数',value:(point:typeof errorPoints[number])=>point.error_count_total},
+    sla:{label:'SLA 错误',value:(point:typeof errorPoints[number])=>point.error_count_sla},
+    upstream:{label:'上游错误',value:(point:typeof errorPoints[number])=>point.upstream_error_count_excl_429_529},
+    limited:{label:'限流错误',value:(point:typeof errorPoints[number])=>point.business_limited_count+point.upstream_429_count+point.upstream_529_count},
+  }[errorMetric]
+  const chartPoints=errorPoints.slice(-72).map(point=>({
+    id:point.bucket_start,
+    label:formatTime(point.bucket_start),
+    shortLabel:shortTime(point.bucket_start),
+    value:errorConfig.value(point),
+    details:[
+      {label:'全部',value:formatNumber(point.error_count_total)},
+      {label:'SLA',value:formatNumber(point.error_count_sla)},
+      {label:'上游',value:formatNumber(point.upstream_error_count_excl_429_529)},
+      {label:'限流',value:formatNumber(point.business_limited_count+point.upstream_429_count+point.upstream_529_count)},
+    ],
+  }))
   return <>
-    <div className="ops-two-column"><section className="content-band ops-section"><SectionTitle title="错误趋势" detail="SLA 与上游错误"/><ErrorBars points={errorPoints}/></section><section className="content-band ops-section"><SectionTitle title="状态码分布" detail={`${formatNumber(resources.error_distribution?.total)} 个错误`}/><table className="ops-table"><thead><tr><th>状态码</th><th>总数</th><th>SLA</th><th>业务限流</th></tr></thead><tbody>{resources.error_distribution?.items.map(item=><tr key={item.status_code}><td><strong>{item.status_code}</strong></td><td>{item.total}</td><td>{item.sla}</td><td>{item.business_limited}</td></tr>)}</tbody></table></section></div>
+    <section className="content-band ops-section"><SectionTitle title="错误趋势" detail="SLA、上游与限流错误" action={<ChartMetricSwitch ariaLabel="错误趋势指标" value={errorMetric} options={errorMetricOptions} onChange={setErrorMetric}/>}/><InteractiveBarChart ariaLabel="错误趋势" points={chartPoints} valueLabel={errorConfig.label} valueFormatter={formatNumber} tone="danger"/></section>
+    <section className="content-band ops-section"><SectionTitle title="状态码分布" detail={`${formatNumber(resources.error_distribution?.total)} 个错误`}/><table className="ops-table"><thead><tr><th>状态码</th><th>总数</th><th>SLA</th><th>业务限流</th></tr></thead><tbody>{resources.error_distribution?.items.map(item=><tr key={item.status_code}><td><strong>{item.status_code}</strong></td><td>{item.total}</td><td>{item.sla}</td><td>{item.business_limited}</td></tr>)}</tbody></table></section>
     <ErrorTable title="请求错误" items={resources.request_errors?.items??[]}/><ErrorTable title="上游错误" items={resources.upstream_errors?.items??[]}/><RequestTable items={resources.requests?.items??[]}/>
   </>
 }
@@ -92,14 +149,13 @@ function System({resources}:{resources:OperationsResources}) {
 
 function ErrorTable({title,items}:{title:string;items:OpsErrorItem[]}) { return <section className="content-band ops-section"><SectionTitle title={title} detail={`${items.length} 条最近记录`}/><table className="ops-table"><thead><tr><th>状态</th><th>平台/模型</th><th>阶段</th><th>消息</th><th>时间</th></tr></thead><tbody>{items.map((item,index)=><tr key={item.id??index}><td><Status value={String(item.status_code??item.severity??'error')}/></td><td><strong>{item.platform??'--'}</strong><small>{item.model??item.account_name??''}</small></td><td>{item.phase??'--'}</td><td className="ops-message">{item.message??item.description??item.title??'--'}</td><td>{formatTime(item.created_at??item.fired_at)}</td></tr>)}</tbody></table></section> }
 function RequestTable({items}:{items:OpsRequestItem[]}) { return <section className="content-band ops-section"><SectionTitle title="请求明细" detail={`${items.length} 条最近记录`}/><table className="ops-table"><thead><tr><th>结果</th><th>请求 ID</th><th>平台/模型</th><th>耗时</th><th>时间</th></tr></thead><tbody>{items.map((item,index)=><tr key={`${item.request_id??index}-${item.created_at??''}`}><td><Status value={item.kind??String(item.status_code??'unknown')}/></td><td className="mono-value">{item.request_id??'--'}</td><td><strong>{item.platform??'--'}</strong><small>{item.model??''}</small></td><td>{formatDuration(item.duration_ms)}</td><td>{formatTime(item.created_at)}</td></tr>)}</tbody></table></section> }
-function SectionTitle({title,detail}:{title:string;detail:string}) { return <div className="section-title"><div><h2>{title}</h2><p>{detail}</p></div></div> }
+function SectionTitle({title,detail,action}:{title:string;detail:string;action?:ReactNode}) { return <div className="section-title"><div><h2>{title}</h2><p>{detail}</p></div>{action}</div> }
 function SimpleRows({items}:{items:Array<{label:string;value:string}>}) { const max=Math.max(1,...items.map(item=>Number(item.value.replaceAll(',',''))||0));return <div className="distribution-list">{items.map(item=><div key={item.label}><span>{item.label}</span><i><b style={{width:`${Math.max(2,(Number(item.value.replaceAll(',',''))||0)/max*100)}%`}}/></i><strong>{item.value}</strong></div>)}</div> }
-function TrendBars({points}:{points:Array<{bucket_start:string;request_count:number;token_consumed:number}>}) { const shown=points.slice(-36);const max=Math.max(1,...shown.map(point=>point.request_count));return <div className="trend-bars" aria-label="吞吐趋势">{shown.map(point=><div key={point.bucket_start} title={`${formatTime(point.bucket_start)} · ${point.request_count} 请求`}><i style={{height:`${Math.max(3,point.request_count/max*100)}%`}}/><span>{shortTime(point.bucket_start)}</span></div>)}</div> }
-function ErrorBars({points}:{points:Array<{bucket_start:string;error_count_total:number}>}) { const shown=points.slice(-36);const max=Math.max(1,...shown.map(point=>point.error_count_total));return <div className="trend-bars error-bars" aria-label="错误趋势">{shown.map(point=><div key={point.bucket_start} title={`${formatTime(point.bucket_start)} · ${point.error_count_total} 错误`}><i style={{height:`${Math.max(3,point.error_count_total/max*100)}%`}}/><span>{shortTime(point.bucket_start)}</span></div>)}</div> }
 function SystemMetric({icon:Icon,label,value}:{icon:typeof Activity;label:string;value:string}) { return <div className="system-item"><Icon/><div><small>{label}</small><span>{value}</span></div></div> }
 function number(value:Record<string,unknown>|undefined,key:string) { const item=value?.[key];return typeof item==='number'&&Number.isFinite(item)?item:undefined }
 function boolean(value:Record<string,unknown>|undefined,key:string) { return value?.[key]===true }
 function formatNumber(value?:number|null) { return value==null?'--':new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1}).format(value) }
+function formatCompact(value?:number|null) { return value==null?'--':new Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:2}).format(value) }
 function formatRate(value?:number|null) { return value==null?'--':value.toFixed(value<10?2:0) }
 function formatPercent(value?:number|null) { return value==null?'--':`${value.toFixed(2)}%` }
 function formatRatioPercent(value?:number|null) { return value==null?'--':formatPercent(value*100) }

@@ -73,7 +73,7 @@ describe('monitoring expansion pages', () => {
     vi.spyOn(api, 'targetOperations').mockResolvedValue({
       target_id:'target-1', target_name:'Prod', generated_at:'2026-08-08T00:00:00Z', time_range:'1h', failures:{}, capabilities:{},
       resources:{
-        ops_snapshot:{ generated_at:'2026-08-08T00:00:00Z', overview:{ health_score:98, success_count:120, error_count_total:2, request_count_total:122, token_consumed:5000, sla:0.995, error_rate:0.005, upstream_error_rate:0.002, qps:{current:2,peak:4,avg:1}, tps:{current:50,peak:80,avg:30}, duration:{p95_ms:420}, ttft:{} }, throughput_trend:{bucket:'5m',points:[]}, error_trend:{bucket:'5m',points:[]} },
+        ops_snapshot:{ generated_at:'2026-08-08T00:00:00Z', overview:{ health_score:98, success_count:120, error_count_total:2, request_count_total:122, token_consumed:5000, sla:0.995, error_rate:0.005, upstream_error_rate:0.002, qps:{current:2,peak:4,avg:1}, tps:{current:50,peak:80,avg:30}, duration:{p95_ms:420}, ttft:{} }, throughput_trend:{bucket:'5m',points:[{bucket_start:'2026-08-08T00:00:00Z',request_count:20,token_consumed:400,qps:2,tps:40}]}, error_trend:{bucket:'5m',points:[]} },
         latency_histogram:{total_requests:122,buckets:[]}, openai_token_stats:{items:[],total:0},
         concurrency:{enabled:true,platform:{openai:{platform:'openai',current_in_use:2,max_capacity:10,load_percentage:20,waiting_in_queue:0}},group:{},account:{}},
         account_availability:{enabled:true,platform:{openai:{platform:'openai',available_count:6,total_accounts:7,rate_limit_count:1,error_count:0}},group:{},account:{}},
@@ -88,6 +88,9 @@ describe('monitoring expansion pages', () => {
     expect(screen.getByText('122')).toBeTruthy()
     expect(screen.getByText('99.50%')).toBeTruthy()
     expect(screen.getByText('0.50%')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button',{name:'Token'}))
+    expect(screen.getByRole('button',{name:'Token'}).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getAllByText('400').length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('tab',{name:'容量'}))
     expect(await screen.findByText('Default')).toBeTruthy()
     expect(screen.getByText(/2\.00/)).toBeTruthy()
@@ -113,6 +116,8 @@ describe('monitoring expansion pages', () => {
     expect(await screen.findByText('Codex Key')).toBeTruthy()
     fireEvent.click(screen.getByRole('button',{name:'查看 Codex Key 账号详情'}))
     expect((await screen.findAllByText('64.00K')).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button',{name:'账号成本'}))
+    expect(screen.getByRole('button',{name:'账号成本'}).getAttribute('aria-pressed')).toBe('true')
     expect(screen.getByText('gpt-5.3-codex')).toBeTruthy()
     expect(screen.getAllByText('/v1/responses')).toHaveLength(2)
     fireEvent.click(screen.getByRole('button',{name:'7 天'}))
