@@ -149,3 +149,6 @@ output/
 redeem-platform/.env
 redeem-platform/data/
 redeem-platform/coverage/
+
+# Vitest / Vite cache at repo root
+.vite/
