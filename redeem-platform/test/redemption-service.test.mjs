@@ -110,7 +110,9 @@ databaseTest('product codes keep their benefit snapshot after the product change
   const product = await service.createProduct({
     sku: 'BALANCE-100',
     name: '余额 100',
+    name_en: 'Balance 100',
     description: '测试商品',
+    description_en: 'Test product',
     price: '88',
     currency: 'CNY',
     benefit_type: 'balance',
@@ -134,6 +136,8 @@ databaseTest('product codes keep their benefit snapshot after the product change
 
   assert.equal(generated.product_id, product.id)
   assert.equal(product.icon_url, 'https://cdn.example.com/balance-100.png')
+  assert.equal(product.name_en, 'Balance 100')
+  assert.equal(product.description_en, 'Test product')
   assert.equal(result.product_name, '余额 100')
   assert.equal(result.value, '100')
   assert.equal(calls[0].value, '100')

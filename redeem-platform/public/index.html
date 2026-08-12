@@ -7,21 +7,21 @@
   <title>Sub2API 兑换中心</title>
   <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/styles.css">
-  <script type="module" src="/assets/user.js?v=20260802.1"></script>
+  <script type="module" src="/assets/user.js?v=20260812.1"></script>
 </head>
 <body class="user-page">
   <header class="app-header">
-    <a class="brand" href="/" aria-label="Sub2API 兑换中心">
+    <a class="brand" href="/" aria-label="Sub2API 兑换中心" data-i18n-aria-label="brandLabel">
       <img src="/assets/logo.svg" alt="" width="36" height="36">
       <span>
         <strong>Sub2API</strong>
-        <small>兑换中心</small>
+        <small data-i18n="brandSubtitle">兑换中心</small>
       </span>
     </a>
     <div class="identity-chip" id="identityChip" hidden>
       <span class="identity-avatar" id="identityAvatar">U</span>
       <span class="identity-text">
-        <strong id="identityName">用户</strong>
+        <strong id="identityName" data-i18n="defaultUser">用户</strong>
         <small id="identityEmail"></small>
       </span>
     </div>
@@ -30,14 +30,14 @@
   <main class="user-main">
     <section class="user-heading">
       <p class="eyebrow">ACCOUNT BENEFITS</p>
-      <h1>兑换中心</h1>
+      <h1 data-i18n="pageHeading">兑换中心</h1>
     </section>
 
     <section class="auth-state" id="authState" aria-live="polite">
       <span class="spinner" aria-hidden="true"></span>
       <div>
-        <strong>正在确认账户</strong>
-        <p>请稍候</p>
+        <strong data-i18n="confirmingAccount">正在确认账户</strong>
+        <p data-i18n="pleaseWait">请稍候</p>
       </div>
     </section>
 
@@ -46,13 +46,13 @@
         <div class="section-heading compact">
           <div>
             <p class="eyebrow">PRODUCTS</p>
-            <h2 id="productCatalogTitle">可兑换商品</h2>
+            <h2 id="productCatalogTitle" data-i18n="productsTitle">可兑换商品</h2>
           </div>
         </div>
         <div class="product-list" id="productList"></div>
         <div class="empty-state" id="productEmpty" hidden>
-          <strong>暂无在售商品</strong>
-          <p>商品上架后将在这里显示</p>
+          <strong data-i18n="productsEmptyTitle">暂无在售商品</strong>
+          <p data-i18n="productsEmptyDetail">商品上架后将在这里显示</p>
         </div>
       </section>
 
@@ -60,12 +60,12 @@
         <div class="section-heading">
           <div>
             <p class="eyebrow">REDEEM</p>
-            <h2 id="redeemTitle">输入兑换码</h2>
+            <h2 id="redeemTitle" data-i18n="redeemTitle">输入兑换码</h2>
           </div>
-          <span class="secure-mark">安全连接</span>
+          <span class="secure-mark" data-i18n="secureConnection">安全连接</span>
         </div>
         <form id="redeemForm" novalidate>
-          <label for="redeemCode">兑换码</label>
+          <label for="redeemCode" data-i18n="codeLabel">兑换码</label>
           <div class="code-input-row">
             <input
               id="redeemCode"
@@ -79,7 +79,7 @@
               placeholder="S2-XXXX-XXXX-XXXX"
               required
             >
-            <button class="primary-button" type="submit" id="redeemButton">确认兑换</button>
+            <button class="primary-button" type="submit" id="redeemButton" data-i18n="redeemAction">确认兑换</button>
           </div>
           <p class="field-error" id="redeemError" role="alert" hidden></p>
         </form>
@@ -90,14 +90,14 @@
         <div class="section-heading compact">
           <div>
             <p class="eyebrow">HISTORY</p>
-            <h2 id="historyTitle">最近兑换</h2>
+            <h2 id="historyTitle" data-i18n="historyTitle">最近兑换</h2>
           </div>
-          <button class="text-button" type="button" id="refreshHistory">刷新</button>
+          <button class="text-button" type="button" id="refreshHistory" data-i18n="refresh">刷新</button>
         </div>
         <div class="history-list" id="historyList"></div>
         <div class="empty-state" id="historyEmpty" hidden>
-          <strong>暂无兑换记录</strong>
-          <p>成功兑换后将在这里显示</p>
+          <strong data-i18n="historyEmptyTitle">暂无兑换记录</strong>
+          <p data-i18n="historyEmptyDetail">成功兑换后将在这里显示</p>
         </div>
       </section>
     </div>

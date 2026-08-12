@@ -63,7 +63,9 @@ function displayPublicProduct(row) {
     id: product.id,
     sku: product.sku,
     name: product.name,
+    name_en: product.name_en,
     description: product.description,
+    description_en: product.description_en,
     price: product.price,
     currency: product.currency,
     benefit_type: product.benefit_type,
@@ -314,14 +316,15 @@ export class RedeemDatabase {
       return await this.transaction(async (client) => {
         const result = await client.query(`
           INSERT INTO products (
-            id, sku, name, description, price_micros, currency, benefit_type,
+            id, sku, name, name_en, description, description_en, price_micros, currency, benefit_type,
             value_micros, group_id, validity_days, purchase_url, icon_url, status,
             sort_order, created_by, created_at, updated_at
           ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
           ) RETURNING *
         `, [
-          product.id, product.sku, product.name, product.description, product.priceMicros,
+          product.id, product.sku, product.name, product.nameEn, product.description,
+          product.descriptionEn, product.priceMicros,
           product.currency, product.benefitType, product.valueMicros, product.groupID,
           product.validityDays, product.purchaseURL, product.iconURL, product.status, product.sortOrder,
           actor, at, at,
@@ -345,13 +348,14 @@ export class RedeemDatabase {
         if (!found.rowCount) return { kind: 'not_found' }
         const result = await client.query(`
           UPDATE products SET
-            sku = $1, name = $2, description = $3, price_micros = $4,
-            currency = $5, benefit_type = $6, value_micros = $7, group_id = $8,
-            validity_days = $9, purchase_url = $10, icon_url = $11, status = $12,
-            sort_order = $13, updated_at = $14
-          WHERE id = $15 RETURNING *
+            sku = $1, name = $2, name_en = $3, description = $4, description_en = $5,
+            price_micros = $6, currency = $7, benefit_type = $8, value_micros = $9,
+            group_id = $10, validity_days = $11, purchase_url = $12, icon_url = $13,
+            status = $14, sort_order = $15, updated_at = $16
+          WHERE id = $17 RETURNING *
         `, [
-          product.sku, product.name, product.description, product.priceMicros,
+          product.sku, product.name, product.nameEn, product.description, product.descriptionEn,
+          product.priceMicros,
           product.currency, product.benefitType, product.valueMicros, product.groupID,
           product.validityDays, product.purchaseURL, product.iconURL, product.status, product.sortOrder,
           nowISO(), id,
@@ -392,7 +396,7 @@ export class RedeemDatabase {
 
       const existingResult = await client.query(`
         SELECT r.*, c.code_mask, c.campaign, c.product_id,
-          p.name AS product_name, p.sku AS product_sku
+          p.name AS product_name, p.name_en AS product_name_en, p.sku AS product_sku
         FROM redemptions r
         JOIN redeem_codes c ON c.id = r.code_id
         LEFT JOIN products p ON p.id = c.product_id
@@ -440,7 +444,7 @@ export class RedeemDatabase {
   async getRedemption(id, queryable = this.pool) {
     const result = await queryable.query(`
       SELECT r.*, c.code_mask, c.campaign, c.notes, c.product_id,
-        p.name AS product_name, p.sku AS product_sku
+        p.name AS product_name, p.name_en AS product_name_en, p.sku AS product_sku
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
       LEFT JOIN products p ON p.id = c.product_id
@@ -640,7 +644,7 @@ export class RedeemDatabase {
     const total = Number(totalResult.rows[0].total)
     const rows = await this.pool.query(`
       SELECT r.*, c.code_mask, c.campaign, c.product_id,
-        p.name AS product_name, p.sku AS product_sku
+        p.name AS product_name, p.name_en AS product_name_en, p.sku AS product_sku
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
       LEFT JOIN products p ON p.id = c.product_id
@@ -670,7 +674,7 @@ export class RedeemDatabase {
     const total = Number(totalResult.rows[0].total)
     const rows = await this.pool.query(`
       SELECT r.*, c.code_mask, c.campaign, c.product_id,
-        p.name AS product_name, p.sku AS product_sku
+        p.name AS product_name, p.name_en AS product_name_en, p.sku AS product_sku
       FROM redemptions r
       JOIN redeem_codes c ON c.id = r.code_id
       LEFT JOIN products p ON p.id = c.product_id

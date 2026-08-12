@@ -190,7 +190,9 @@ export class RedemptionService {
     }
     const name = cleanText(input.name, 100)
     if (!name) throw new AppError(400, 'INVALID_PRODUCT_NAME', '商品名称不能为空')
+    const nameEn = cleanText(input.name_en, 100)
     const description = cleanText(input.description, 1000)
+    const descriptionEn = cleanText(input.description_en, 1000)
     const priceMicros = parsePositiveAmount(
       input.price,
       'INVALID_PRODUCT_PRICE',
@@ -212,7 +214,9 @@ export class RedemptionService {
     return {
       sku,
       name,
+      nameEn,
       description,
+      descriptionEn,
       priceMicros,
       currency,
       purchaseURL: validatePurchaseURL(input.purchase_url),

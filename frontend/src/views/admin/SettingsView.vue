@@ -6638,19 +6638,36 @@
                 </div>
 
                 <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <!-- Label -->
+                  <!-- Chinese/default label -->
                   <div>
                     <label
                       class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
                     >
-                      {{ t("admin.settings.customMenu.name") }}
+                      {{ t("admin.settings.customMenu.nameZh") }}
                     </label>
                     <input
                       v-model="item.label"
                       type="text"
                       class="input text-sm"
                       :placeholder="
-                        t('admin.settings.customMenu.namePlaceholder')
+                        t('admin.settings.customMenu.nameZhPlaceholder')
+                      "
+                    />
+                  </div>
+
+                  <!-- English label -->
+                  <div>
+                    <label
+                      class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+                    >
+                      {{ t("admin.settings.customMenu.nameEn") }}
+                    </label>
+                    <input
+                      v-model="item.label_en"
+                      type="text"
+                      class="input text-sm"
+                      :placeholder="
+                        t('admin.settings.customMenu.nameEnPlaceholder')
                       "
                     />
                   </div>
@@ -9488,6 +9505,7 @@ const form = reactive<SettingsForm>({
   custom_menu_items: [] as Array<{
     id: string;
     label: string;
+    label_en?: string;
     icon_svg: string;
     url: string;
     visibility: "user" | "admin";
@@ -10457,6 +10475,7 @@ function addMenuItem() {
   form.custom_menu_items.push({
     id: "",
     label: "",
+    label_en: "",
     icon_svg: "",
     url: "",
     visibility: "user",

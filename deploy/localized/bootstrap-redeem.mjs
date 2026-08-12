@@ -88,6 +88,7 @@ async function ensureRedeemMenu(adminApiKey) {
   const menuItem = {
     id: 'redeem-center',
     label: '兑换中心',
+    label_en: 'Redemption Center',
     icon_svg: redeemMenuIcon,
     url: menuURL,
     visibility: 'user',
@@ -95,6 +96,7 @@ async function ensureRedeemMenu(adminApiKey) {
   }
   const unchanged = existing
     && existing.label === menuItem.label
+    && existing.label_en === menuItem.label_en
     && existing.icon_svg === menuItem.icon_svg
     && existing.url === menuItem.url
     && existing.visibility === menuItem.visibility

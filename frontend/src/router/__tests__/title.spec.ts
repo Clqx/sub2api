@@ -39,11 +39,23 @@ describe('resolveRouteDocumentTitle', () => {
       {
         id: 'scheduler',
         label: '账号调度器',
+        label_en: 'Account Scheduler',
         icon_svg: '',
         url: 'https://example.com',
         visibility: 'admin',
         sort_order: 0
       }
-    ])).toBe('账号调度器 - EzouAPI')
+    ], 'zh')).toBe('账号调度器 - EzouAPI')
+    expect(resolveRouteDocumentTitle(route, 'EzouAPI', [
+      {
+        id: 'scheduler',
+        label: '账号调度器',
+        label_en: 'Account Scheduler',
+        icon_svg: '',
+        url: 'https://example.com',
+        visibility: 'admin',
+        sort_order: 0
+      }
+    ], 'en')).toBe('Account Scheduler - EzouAPI')
   })
 })
