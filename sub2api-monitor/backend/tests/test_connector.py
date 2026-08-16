@@ -102,6 +102,61 @@ async def test_probe_uses_bounded_read_only_endpoints(settings_dict: dict[str, o
 
 
 @pytest.mark.asyncio
+async def test_recent_usage_routes_returns_only_safe_switch_fields(
+    settings_dict: dict[str, object],
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.url.path == "/api/v1/admin/usage"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "id": 12,
+                            "session_id": "session-safe",
+                            "account_id": 7,
+                            "account": {"id": 7, "name": "Fallback"},
+                            "api_key": {"key": "sk-must-not-survive"},
+                            "created_at": "2026-08-16T05:00:00Z",
+                        },
+                        {
+                            "id": 11,
+                            "session_id": None,
+                            "account": {"id": 6, "name": "Ignored"},
+                            "created_at": "2026-08-16T04:59:00Z",
+                        },
+                    ]
+                },
+            },
+        )
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        fact, routes = await connector.recent_usage_routes()
+
+    assert fact.runtime_state == "healthy"
+    assert len(routes) == 1
+    assert routes[0].usage_id == 12
+    assert routes[0].session_id == "session-safe"
+    assert routes[0].external_account_id == "7"
+    assert routes[0].account_name == "Fallback"
+    assert not hasattr(routes[0], "api_key")
+    assert seen[0].url.params["sort_by"] == "id"
+    assert seen[0].url.params["sort_order"] == "desc"
+
+
+@pytest.mark.asyncio
 async def test_passive_usage_never_requests_active_source(settings_dict: dict[str, object]) -> None:
     seen: list[httpx.Request] = []
 
@@ -463,6 +518,27 @@ async def test_connector_pins_validated_dns_address(
 async def test_target_url_rejects_all_userinfo_forms(url: str) -> None:
     with pytest.raises(ConnectorError, match="without user info"):
         await resolve_target_address(url, allow_private=True)
+
+
+async def test_public_target_url_requires_https() -> None:
+    with pytest.raises(ConnectorError, match="must use HTTPS"):
+        await resolve_target_address("http://target.example.com", allow_private=False)
+
+
+async def test_public_connector_cannot_disable_tls_verification(
+    settings_dict: dict[str, object],
+) -> None:
+    connector = Sub2APIConnector(
+        base_url="https://target.example.com",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**{**settings_dict, "allow_private_targets": False}),
+        verify_tls=False,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200)),
+    )
+    with pytest.raises(ConnectorError, match="cannot be disabled"):
+        async with connector:
+            pass
 
 
 @pytest.mark.asyncio

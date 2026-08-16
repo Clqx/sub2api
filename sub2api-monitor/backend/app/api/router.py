@@ -179,9 +179,13 @@ async def create_target_route(
     cipher: SecretCipher = Depends(get_cipher),
     settings: Settings = Depends(get_settings),
 ) -> TargetResponse:
-    await validate_remote_url(str(payload.base_url), settings)
+    await validate_remote_url(str(payload.base_url), settings, verify_tls=payload.verify_tls)
     if payload.database is not None:
-        await validate_remote_database_url(payload.database.database_url, settings)
+        await validate_remote_database_url(
+            payload.database.database_url,
+            settings,
+            ca_certificate=payload.database.ca_certificate,
+        )
     target = await create_target(session, payload, cipher, user.username)
     return target_response(target)
 
@@ -226,10 +230,18 @@ async def update_target_route(
     settings: Settings = Depends(get_settings),
 ) -> TargetResponse:
     target = await required_target(session, target_id)
-    if payload.base_url is not None:
-        await validate_remote_url(str(payload.base_url), settings)
+    if payload.base_url is not None or payload.verify_tls is not None:
+        await validate_remote_url(
+            str(payload.base_url or target.base_url),
+            settings,
+            verify_tls=payload.verify_tls if payload.verify_tls is not None else target.verify_tls,
+        )
     if payload.database is not None:
-        await validate_remote_database_url(payload.database.database_url, settings)
+        await validate_remote_database_url(
+            payload.database.database_url,
+            settings,
+            ca_certificate=payload.database.ca_certificate,
+        )
     try:
         updated = await update_target(session, target, payload, cipher, user.username)
     except ValueError as exc:
@@ -321,7 +333,11 @@ async def queue_collection(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> CollectionRun:
-    target = await required_target(session, target_id)
+    target = await session.scalar(
+        select(Target).where(Target.id == target_id).with_for_update()
+    )
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
     if target.monitoring_readiness != "ready":
         raise HTTPException(status.HTTP_409_CONFLICT, "target must pass probe before collection")
     existing = await session.scalar(
@@ -1607,16 +1623,27 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-async def validate_remote_url(url: str, settings: Settings) -> None:
+async def validate_remote_url(url: str, settings: Settings, *, verify_tls: bool = True) -> None:
     try:
+        if not settings.allow_private_targets and not verify_tls:
+            raise ConnectorError("TLS verification cannot be disabled for public targets")
         await validate_target_url(url, allow_private=settings.allow_private_targets)
     except ConnectorError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
 
-async def validate_remote_database_url(url: str, settings: Settings) -> None:
+async def validate_remote_database_url(
+    url: str,
+    settings: Settings,
+    *,
+    ca_certificate: str | None = None,
+) -> None:
     try:
-        await validate_database_url(url, allow_private=settings.allow_private_targets)
+        await validate_database_url(
+            url,
+            allow_private=settings.allow_private_targets,
+            ca_certificate=ca_certificate,
+        )
     except ConnectorError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 

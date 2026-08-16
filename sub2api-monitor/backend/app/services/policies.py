@@ -343,7 +343,7 @@ async def evaluate_upstream_probe_health(
         subject_id=account.external_account_id,
         rule_key="upstream.billing_probe.failed",
         window_key="",
-        firing=status != "ok",
+        firing=status not in {"ok", "unsupported"},
         severity="critical",
         title=f"[{target_name}] Upstream billing probe failed",
         message=(

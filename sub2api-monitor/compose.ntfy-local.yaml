@@ -1,0 +1,32 @@
+services:
+  api:
+    environment:
+      MONITOR_ALLOW_PRIVATE_NOTIFICATION_TARGETS: "true"
+
+  worker:
+    environment:
+      MONITOR_ALLOW_PRIVATE_NOTIFICATION_TARGETS: "true"
+
+  ntfy:
+    image: binwiederhier/ntfy:v2.27.0
+    command: ["serve", "--cache-file", "/var/cache/ntfy/cache.db"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18081:80"
+    volumes:
+      - ntfy-data:/var/cache/ntfy
+    networks: [monitor-net]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q --tries=1 http://127.0.0.1:80/v1/health -O - | grep -Eo '\"healthy\"\\s*:\\s*true' || exit 1",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  ntfy-data:

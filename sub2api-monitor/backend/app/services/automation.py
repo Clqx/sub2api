@@ -200,16 +200,24 @@ async def dispatch_automations(
             execution.result = {**execution.result, **result}
             execution.last_error = None
             completed += 1
-            active = await session.scalar(
-                select(func.count())
-                .select_from(CollectionRun)
-                .where(
-                    CollectionRun.target_id == target.id,
-                    CollectionRun.status.in_([RunStatus.QUEUED.value, RunStatus.RUNNING.value]),
-                )
+            locked_target = await session.scalar(
+                select(Target).where(Target.id == target.id).with_for_update()
             )
-            if not active:
-                session.add(CollectionRun(target_id=target.id, trigger="automation_verify"))
+            if locked_target is not None:
+                active = await session.scalar(
+                    select(func.count())
+                    .select_from(CollectionRun)
+                    .where(
+                        CollectionRun.target_id == target.id,
+                        CollectionRun.status.in_(
+                            [RunStatus.QUEUED.value, RunStatus.RUNNING.value]
+                        ),
+                    )
+                )
+                if not active:
+                    session.add(
+                        CollectionRun(target_id=locked_target.id, trigger="automation_verify")
+                    )
         except Exception as exc:
             execution.status = "failed"
             execution.last_error = _safe_error(exc)

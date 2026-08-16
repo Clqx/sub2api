@@ -274,7 +274,7 @@ export interface NotificationChannel {
   server_url: string
   topic: string
   enabled: boolean
-  event_types: Array<'incident.firing' | 'incident.escalated' | 'incident.resolved'>
+  event_types: Array<'incident.firing' | 'incident.escalated' | 'incident.resolved' | 'routing.account_switched'>
   severities: Array<'info' | 'warning' | 'critical'>
   token_configured: boolean
   signing_secret_configured: boolean

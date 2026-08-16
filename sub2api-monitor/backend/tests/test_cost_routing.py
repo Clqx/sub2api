@@ -13,6 +13,7 @@ from app.config import Settings
 from app.connectors.sub2api import ProbeFact, normalize_account, normalize_channel_monitor
 from app.models import (
     AccountCurrent,
+    AuditEvent,
     ChannelMonitorCurrent,
     CostRoutingPolicy,
     Incident,
@@ -32,6 +33,7 @@ from app.services.cost_routing import (
     claim_due_cost_routing_policies,
     desired_priority,
     renew_cost_routing_claim,
+    routing_rate_multiplier,
     run_cost_routing_policy,
 )
 from app.services.policies import evaluate_upstream_rate_change, upstream_rate_multiplier
@@ -77,6 +79,31 @@ def test_cost_priority_uses_absolute_multiplier_bands() -> None:
         )
         == 100000
     )
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "configured", "expected"),
+    [
+        (
+            {"status": "ok", "data": {"effective_rate_multiplier": 0.8}},
+            0.3,
+            (0.8, "upstream_probe"),
+        ),
+        ({"status": "unsupported"}, 0.3, (0.3, "account_config")),
+        (
+            {"status": "failed", "data": {"effective_rate_multiplier": 0.2}},
+            0.3,
+            (None, None),
+        ),
+        ({"status": "ok", "data": {}}, 0.3, (None, None)),
+    ],
+)
+def test_routing_rate_multiplier_falls_back_only_for_unsupported_probe(
+    snapshot: dict[str, object],
+    configured: float,
+    expected: tuple[float | None, str | None],
+) -> None:
+    assert routing_rate_multiplier(snapshot, configured) == expected
 
 
 def test_enabling_cost_routing_requires_explicit_side_effect_confirmation() -> None:
@@ -436,6 +463,132 @@ async def test_recommend_mode_chunks_probes_without_priority_writes(
     await db_session.refresh(oauth_account)
     assert oauth_account.routing_desired_priority is None
     assert await db_session.get(RoutingDecision, old_decision.id) is None
+
+
+@pytest.mark.asyncio
+async def test_recommend_mode_adapts_to_configured_account_multipliers(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-account-rates",
+        name="Account rates",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="policy-account-rates",
+        target_id=target.id,
+        enabled=True,
+        mode="recommend",
+        priority_scale=100,
+        unhealthy_priority=10000,
+        minimum_priority=1,
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    db_session.add_all([target, secret, policy])
+    await db_session.commit()
+
+    configured_rates = {"12": 0.3, "16": 0.5, "17": 0.8}
+
+    def inventory():
+        return [
+            normalize_account(
+                {
+                    "id": account_id,
+                    "name": name,
+                    "platform": "openai",
+                    "type": "apikey",
+                    "status": "active",
+                    "schedulable": True,
+                    "priority": 1,
+                    "rate_multiplier": configured_rates[account_id],
+                },
+                now,
+            )
+            for account_id, name in (
+                ("12", "GLM"),
+                ("16", "GLM (Copy)"),
+                ("17", "GLM (Copy) (Copy)"),
+            )
+        ]
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            return ProbeFact("supported", "healthy", "fresh"), inventory()
+
+        async def probe_upstream_billing_batch(self, account_ids: list[str]):
+            return [
+                {
+                    "account_id": account_id,
+                    "snapshot": {"status": "unsupported", "last_error": "HTTP 404"},
+                }
+                for account_id in account_ids
+            ]
+
+        async def set_account_priority(self, _account_id: str, _priority: int):
+            raise AssertionError("recommend mode must not write account priority")
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    settings = Settings(**settings_dict)
+    with caplog.at_level("INFO", logger="app.services.cost_routing"):
+        assert await run_cost_routing_policy(
+            db_session,
+            policy.id,
+            settings,
+            cipher,
+            actor="worker:test",
+        )
+
+    first_decisions = list(
+        await db_session.scalars(select(RoutingDecision).order_by(RoutingDecision.account_name))
+    )
+    assert [decision.observed_multiplier for decision in first_decisions] == [0.3, 0.5, 0.8]
+    assert [decision.desired_priority for decision in first_decisions] == [30, 50, 80]
+    assert {decision.result["cost_source"] for decision in first_decisions} == {
+        "account_config"
+    }
+    assert "account_id=12 multiplier=0.3 cost_source=account_config" in caplog.text
+    assert "account_count=3 change_count=0" in caplog.text
+
+    configured_rates["12"] = 1.2
+    with caplog.at_level("INFO", logger="app.services.cost_routing"):
+        assert await run_cost_routing_policy(
+            db_session,
+            policy.id,
+            settings,
+            cipher,
+            actor="worker:test",
+        )
+
+    changed = list(
+        await db_session.scalars(
+            select(RoutingDecision)
+            .where(RoutingDecision.external_account_id == "12")
+            .order_by(RoutingDecision.created_at)
+        )
+    )
+    assert [decision.desired_priority for decision in changed] == [30, 120]
+    assert changed[-1].reason == "cost_increase"
+    assert "account_id=12 multiplier=1.2 cost_source=account_config" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -827,6 +980,106 @@ async def test_quality_bindings_reject_foreign_or_ineligible_references(db_sessi
     assert error.value.detail["account_ids"] == ["foreign", "oauth"]
     assert error.value.detail["monitor_ids"] == ["foreign-monitor", "wrong-provider"]
     assert await db_session.scalar(select(CostRoutingPolicy)) is None
+
+
+@pytest.mark.asyncio
+async def test_execute_intent_survives_worker_crash_before_outcome(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-crash",
+        name="Crash",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="policy-crash",
+        target_id=target.id,
+        enabled=True,
+        mode="execute",
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    account = _account(target.id, "1", "Crash account", priority=100, multiplier=0.1, now=now)
+    db_session.add_all([target, policy, secret, account])
+    await db_session.commit()
+    inventory = [
+        normalize_account(
+            {
+                "id": "1",
+                "name": "Crash account",
+                "platform": "openai",
+                "type": "apikey",
+                "status": "active",
+                "schedulable": True,
+                "priority": 100,
+            },
+            now,
+        )
+    ]
+
+    class WorkerCrash(BaseException):
+        pass
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            return ProbeFact("supported", "healthy", "fresh"), inventory
+
+        async def probe_upstream_billing_batch(self, _account_ids: list[str]):
+            return [
+                {
+                    "account_id": "1",
+                    "snapshot": {
+                        "status": "ok",
+                        "data": {"effective_rate_multiplier": 0.2},
+                    },
+                }
+            ]
+
+        async def set_account_priority(self, _account_id: str, _priority: int):
+            raise WorkerCrash()
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    with pytest.raises(WorkerCrash):
+        await run_cost_routing_policy(
+            db_session,
+            policy.id,
+            Settings(**settings_dict),
+            cipher,
+            actor="worker:test",
+        )
+
+    decision = await db_session.scalar(select(RoutingDecision))
+    assert decision is not None
+    assert decision.status == "running"
+    started = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "cost_routing.priority.started")
+    )
+    assert started is not None
+
+    await cost_routing._recover_interrupted_routing_decisions(
+        db_session, policy, "worker:recovery"
+    )
+    await db_session.refresh(decision)
+    assert decision.status == "interrupted"
+    assert decision.last_error == "worker stopped before routing outcome was persisted"
 
 
 def _account(

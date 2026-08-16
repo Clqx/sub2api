@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -38,7 +39,10 @@ from app.services.policies import (
     evaluate_upstream_rate_change,
     upstream_rate_multiplier,
 )
+from app.services.routing_usage import observe_actual_account_switches
 from app.services.targets import connector_for_target, target_with_secret
+
+logger = logging.getLogger(__name__)
 
 BATCH_PROBE_LIMIT = 20
 PROBE_BATCH_CONCURRENCY = 10
@@ -64,7 +68,8 @@ class AccountRoutingPlan:
     previous_priority: int | None
     desired_priority: int
     reason: str
-    probe_ok: bool
+    cost_signal_ok: bool
+    cost_source: str | None
     quality_failures: list[str]
     decision: RoutingDecision | None = None
 
@@ -81,6 +86,31 @@ def desired_priority(
         return unhealthy_priority
     calculated = max(minimum_priority, round(multiplier * priority_scale))
     return min(calculated, unhealthy_priority - 1)
+
+
+def routing_rate_multiplier(
+    snapshot: dict[str, Any] | None,
+    configured_multiplier: float | None,
+) -> tuple[float | None, str | None]:
+    """Resolve a trusted cost signal and identify its source."""
+    status = snapshot.get("status") if isinstance(snapshot, dict) else None
+    probed_multiplier = upstream_rate_multiplier(snapshot)
+    if status == "ok" and probed_multiplier is not None:
+        return probed_multiplier, "upstream_probe"
+
+    # Unsupported is an expected capability gap. Other failures stay closed.
+    if status != "unsupported":
+        return None, None
+    if (
+        configured_multiplier is None
+        or isinstance(configured_multiplier, bool)
+        or not isinstance(configured_multiplier, (int, float))
+    ):
+        return None, None
+    value = float(configured_multiplier)
+    if not math.isfinite(value) or value < 0:
+        return None, None
+    return value, "account_config"
 
 
 async def claim_due_cost_routing_policies(
@@ -161,6 +191,7 @@ async def run_cost_routing_policy(
         _release_claim(policy, claim_owner)
         await session.commit()
         return False
+    await _recover_interrupted_routing_decisions(session, policy, actor)
     target_id = policy.target_id
     target = await target_with_secret(session, target_id)
     if target is None:
@@ -187,9 +218,10 @@ async def run_cost_routing_policy(
                 account.external_account_id: account.available for account in previous_accounts
             }
             previous_multipliers = {
-                account.external_account_id: upstream_rate_multiplier(
-                    account.upstream_billing_probe
-                )
+                account.external_account_id: routing_rate_multiplier(
+                    account.upstream_billing_probe,
+                    account.rate_multiplier,
+                )[0]
                 for account in previous_accounts
             }
             accounts = await _sync_inventory_accounts(session, target.id, inventory)
@@ -252,10 +284,13 @@ async def run_cost_routing_policy(
                 synced = snapshot.get("synced_rate_multiplier")
                 if isinstance(synced, (int, float)) and not isinstance(synced, bool):
                     account.rate_multiplier = float(synced)
-                multiplier = upstream_rate_multiplier(snapshot)
-                probe_ok = snapshot.get("status") == "ok" and multiplier is not None
+                multiplier, cost_source = routing_rate_multiplier(
+                    snapshot,
+                    account.rate_multiplier,
+                )
+                cost_signal_ok = cost_source is not None
                 quality_failures = quality_by_account.get(external_account_id, [])
-                healthy = account.available and probe_ok and not quality_failures
+                healthy = account.available and cost_signal_ok and not quality_failures
                 wanted = desired_priority(
                     multiplier,
                     healthy=healthy,
@@ -268,7 +303,7 @@ async def run_cost_routing_policy(
                     was_available=was_available,
                     previous_multiplier=prior_multiplier,
                     multiplier=multiplier,
-                    probe_ok=probe_ok,
+                    cost_signal_ok=cost_signal_ok,
                     quality_failures=quality_failures,
                     desired=wanted,
                 )
@@ -284,8 +319,23 @@ async def run_cost_routing_policy(
                     previous_priority=account.priority,
                     desired_priority=wanted,
                     reason=reason,
-                    probe_ok=probe_ok,
+                    cost_signal_ok=cost_signal_ok,
+                    cost_source=cost_source,
                     quality_failures=quality_failures,
+                )
+                logger.info(
+                    "cost routing account evaluated policy_id=%s target_id=%s "
+                    "account_id=%s multiplier=%s cost_source=%s available=%s "
+                    "previous_priority=%s desired_priority=%s reason=%s",
+                    policy.id,
+                    target.id,
+                    external_account_id,
+                    multiplier,
+                    cost_source or "none",
+                    account.available,
+                    account.priority,
+                    wanted,
+                    reason,
                 )
                 should_record_decision = account.priority != wanted and (
                     policy.mode == "execute"
@@ -305,9 +355,14 @@ async def run_cost_routing_policy(
                         reason=reason,
                         mode=policy.mode,
                         status="recommended" if policy.mode == "recommend" else "running",
-                        result=(
-                            {"quality_failures": quality_failures} if quality_failures else {}
-                        ),
+                        result={
+                            "cost_source": cost_source,
+                            **(
+                                {"quality_failures": quality_failures}
+                                if quality_failures
+                                else {}
+                            ),
+                        },
                         finished_at=now if policy.mode == "recommend" else None,
                     )
                     session.add(decision)
@@ -318,6 +373,28 @@ async def run_cost_routing_policy(
                 plan for plan in plans if plan.decision is not None and policy.mode == "execute"
             ]
             if execute_plans:
+                for plan in execute_plans:
+                    routing_decision = plan.decision
+                    if routing_decision is None:
+                        continue
+                    session.add(
+                        AuditEvent(
+                            actor=actor,
+                            action="cost_routing.priority.started",
+                            target_id=target.id,
+                            details={
+                                "decision_id": routing_decision.id,
+                                "account_id": plan.account.external_account_id,
+                                "previous_priority": plan.previous_priority,
+                                "desired_priority": plan.desired_priority,
+                                "reason": plan.reason,
+                                "cost_source": plan.cost_source,
+                            },
+                        )
+                    )
+                # Persist intent before the first external write. A crash can leave
+                # an interrupted decision, but never an untracked target mutation.
+                await session.commit()
                 semaphore = asyncio.Semaphore(PRIORITY_WRITE_CONCURRENCY)
 
                 async def apply_priority(
@@ -370,6 +447,19 @@ async def run_cost_routing_policy(
                         routing_decision.status = "failed"
                         routing_decision.last_error = error
                         plan.account.routing_status = "failed"
+                    logger.info(
+                        "cost routing priority write policy_id=%s target_id=%s "
+                        "account_id=%s previous_priority=%s desired_priority=%s "
+                        "cost_source=%s status=%s error=%s",
+                        policy.id,
+                        target.id,
+                        plan.account.external_account_id,
+                        plan.previous_priority,
+                        plan.desired_priority,
+                        plan.cost_source or "none",
+                        routing_decision.status,
+                        error or "none",
+                    )
                     session.add(
                         AuditEvent(
                             actor=actor,
@@ -381,6 +471,7 @@ async def run_cost_routing_policy(
                                 "previous_priority": plan.previous_priority,
                                 "desired_priority": plan.desired_priority,
                                 "reason": plan.reason,
+                                "cost_source": plan.cost_source,
                                 "quality_failures": plan.quality_failures,
                                 "error": error,
                             },
@@ -397,6 +488,14 @@ async def run_cost_routing_policy(
                 )
                 await evaluate_upstream_probe_health(session, target.name, plan.account)
                 await _evaluate_routing_incidents(session, target, policy, plan)
+            await _observe_actual_switches(
+                session,
+                target,
+                connector,
+                plans,
+                actor=actor,
+                run_deadline=run_deadline,
+            )
 
         policy.last_run_at = datetime.now(timezone.utc)
         policy.last_error = None
@@ -408,7 +507,9 @@ async def run_cost_routing_policy(
             days=settings.cost_routing_decision_retention_days
         )
         await session.execute(
-            delete(RoutingDecision).where(RoutingDecision.created_at < retention_cutoff)
+            delete(RoutingDecision)
+            .where(RoutingDecision.created_at < retention_cutoff)
+            .execution_options(synchronize_session="fetch")
         )
         await evaluate_cost_routing_run(session, target.id, target.name, None)
         _release_claim(policy, claim_owner)
@@ -426,9 +527,24 @@ async def run_cost_routing_policy(
             )
         )
         await session.commit()
+        logger.info(
+            "cost routing run succeeded policy_id=%s target_id=%s mode=%s "
+            "account_count=%s change_count=%s",
+            policy.id,
+            target.id,
+            policy.mode,
+            policy.last_account_count,
+            policy.last_change_count,
+        )
         return True
     except CostRoutingCancelled as exc:
         reason = _safe_error(exc)
+        logger.info(
+            "cost routing run cancelled policy_id=%s target_id=%s reason=%s",
+            policy_id,
+            target_id,
+            reason,
+        )
         await session.rollback()
         cancelled_policy = await session.get(CostRoutingPolicy, policy_id)
         if cancelled_policy is not None:
@@ -449,6 +565,12 @@ async def run_cost_routing_policy(
         return False
     except Exception as exc:
         error = _safe_error(exc)
+        logger.exception(
+            "cost routing run failed policy_id=%s target_id=%s error_type=%s",
+            policy_id,
+            target_id,
+            exc.__class__.__name__,
+        )
         await session.rollback()
         failed_policy = await session.get(CostRoutingPolicy, policy_id)
         failed_target = await session.get(Target, target_id)
@@ -497,6 +619,58 @@ async def _load_routing_inventory(
         channel_monitors = []
     account_fact, accounts = account_result
     return account_fact, accounts, channel_monitors
+
+
+async def _observe_actual_switches(
+    session: AsyncSession,
+    target: Target,
+    connector: Sub2APIConnector,
+    plans: list[AccountRoutingPlan],
+    *,
+    actor: str,
+    run_deadline: float,
+) -> None:
+    read_routes = getattr(connector, "recent_usage_routes", None)
+    if not callable(read_routes):
+        return
+    remaining = run_deadline - asyncio.get_running_loop().time()
+    if remaining <= 1.0:
+        logger.warning(
+            "cost routing usage observation skipped target_id=%s reason=budget_exhausted",
+            target.id,
+        )
+        return
+    try:
+        fact, routes = await asyncio.wait_for(read_routes(), timeout=min(3.0, remaining - 0.5))
+        if fact.runtime_state != "healthy":
+            logger.warning(
+                "cost routing usage observation unavailable target_id=%s support_state=%s "
+                "runtime_state=%s",
+                target.id,
+                fact.support_state,
+                fact.runtime_state,
+            )
+            return
+        switch_count = await observe_actual_account_switches(
+            session,
+            target_id=target.id,
+            target_name=target.name,
+            routes=routes,
+            eligible_account_ids={plan.account.external_account_id for plan in plans},
+            actor=actor,
+        )
+        logger.info(
+            "cost routing usage routes observed target_id=%s route_count=%s switch_count=%s",
+            target.id,
+            len(routes),
+            switch_count,
+        )
+    except Exception as exc:
+        logger.warning(
+            "cost routing usage observation failed target_id=%s error_type=%s",
+            target.id,
+            exc.__class__.__name__,
+        )
 
 
 async def _sync_inventory_accounts(
@@ -692,7 +866,7 @@ def _routing_reason(
     was_available: bool,
     previous_multiplier: float | None,
     multiplier: float | None,
-    probe_ok: bool,
+    cost_signal_ok: bool,
     quality_failures: list[str],
     desired: int,
 ) -> str:
@@ -700,7 +874,7 @@ def _routing_reason(
         return "unavailable"
     if quality_failures:
         return "quality_failed"
-    if not probe_ok:
+    if not cost_signal_ok:
         return "probe_failed"
     if not was_available:
         return "recovery"
@@ -788,3 +962,38 @@ def _release_claim(policy: CostRoutingPolicy, owner_id: str | None) -> None:
     if owner_id is None or policy.lease_owner == owner_id:
         policy.lease_owner = None
         policy.lease_until = None
+
+
+async def _recover_interrupted_routing_decisions(
+    session: AsyncSession,
+    policy: CostRoutingPolicy,
+    actor: str,
+) -> None:
+    interrupted = list(
+        await session.scalars(
+            select(RoutingDecision).where(
+                RoutingDecision.policy_id == policy.id,
+                RoutingDecision.status == "running",
+            )
+        )
+    )
+    if not interrupted:
+        return
+    now = datetime.now(timezone.utc)
+    for decision in interrupted:
+        decision.status = "interrupted"
+        decision.last_error = "worker stopped before routing outcome was persisted"
+        decision.finished_at = now
+        session.add(
+            AuditEvent(
+                actor=actor,
+                action="cost_routing.priority.interrupted",
+                target_id=decision.target_id,
+                details={
+                    "decision_id": decision.id,
+                    "account_id": decision.external_account_id,
+                    "desired_priority": decision.desired_priority,
+                },
+            )
+        )
+    await session.commit()

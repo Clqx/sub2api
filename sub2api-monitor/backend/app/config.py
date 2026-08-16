@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = Field(default=2.0, ge=0.2, le=60.0)
     worker_concurrency: int = Field(default=8, ge=1, le=100)
     worker_stale_seconds: int = Field(default=60, ge=10, le=3600)
+    history_retention_days: int = Field(default=30, ge=1, le=3650)
+    maintenance_interval_seconds: int = Field(default=3600, ge=60, le=86400)
     cost_routing_decision_retention_days: int = Field(default=30, ge=1, le=365)
     producer_id: str = "hub-worker"
     log_level: str = "INFO"

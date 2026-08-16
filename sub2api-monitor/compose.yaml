@@ -19,6 +19,8 @@ x-backend-environment: &backend-environment
   MONITOR_ACTIVE_QUOTA_ACCOUNT_INTERVAL_SECONDS: ${MONITOR_ACTIVE_QUOTA_ACCOUNT_INTERVAL_SECONDS:-900}
   MONITOR_ACTIVE_QUOTA_MAX_ACCOUNTS_PER_RUN: ${MONITOR_ACTIVE_QUOTA_MAX_ACCOUNTS_PER_RUN:-20}
   MONITOR_COST_ROUTING_DECISION_RETENTION_DAYS: ${MONITOR_COST_ROUTING_DECISION_RETENTION_DAYS:-30}
+  MONITOR_HISTORY_RETENTION_DAYS: ${MONITOR_HISTORY_RETENTION_DAYS:-30}
+  MONITOR_MAINTENANCE_INTERVAL_SECONDS: ${MONITOR_MAINTENANCE_INTERVAL_SECONDS:-3600}
   MONITOR_LOG_LEVEL: ${MONITOR_LOG_LEVEL:-INFO}
 
 x-backend: &backend
@@ -76,7 +78,8 @@ services:
 
   api:
     <<: *backend
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--forwarded-allow-ips=*"]
+    networks: [monitor-net, target-net]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2)"]
       interval: 10s
@@ -86,6 +89,7 @@ services:
   worker:
     <<: *backend
     command: ["python", "-m", "app.worker"]
+    networks: [monitor-net, target-net]
     healthcheck:
       test: ["CMD", "python", "-c", "from pathlib import Path; import time; p=Path('/tmp/sub2api-monitor-worker-health'); raise SystemExit(0 if p.is_file() and time.time()-p.stat().st_mtime < 120 else 1)"]
       interval: 10s
@@ -137,3 +141,6 @@ volumes:
 networks:
   monitor-net:
     driver: bridge
+  target-net:
+    external: true
+    name: sub2api-monitor-target-net

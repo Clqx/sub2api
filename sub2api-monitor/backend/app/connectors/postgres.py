@@ -160,8 +160,15 @@ async def resolve_database_address(database_url: str, *, allow_private: bool) ->
     return str(ipaddress.ip_address(addresses[0][4][0]))
 
 
-async def validate_database_url(database_url: str, *, allow_private: bool) -> None:
-    await resolve_database_address(database_url, allow_private=allow_private)
+async def validate_database_url(
+    database_url: str,
+    *,
+    allow_private: bool,
+    ca_certificate: str | None = None,
+) -> None:
+    pinned_ip = await resolve_database_address(database_url, allow_private=allow_private)
+    if pinned_ip is not None:
+        _require_public_database_tls(database_url, ca_certificate)
 
 
 class Sub2APIPostgresConnector:
@@ -279,6 +286,8 @@ class Sub2APIPostgresConnector:
         pinned_ip = await resolve_database_address(
             self.database_url, allow_private=self.settings.allow_private_targets
         )
+        if pinned_ip is not None:
+            _require_public_database_tls(self.database_url, self.ca_certificate)
         connect_kwargs: dict[str, Any] = {
             "timeout": self.settings.target_db_connect_timeout_seconds
         }
@@ -499,6 +508,19 @@ def _database_ssl_context(ca_certificate: str) -> ssl.SSLContext:
     context.check_hostname = False
     context.verify_mode = ssl.CERT_REQUIRED
     return context
+
+
+def _require_public_database_tls(database_url: str, ca_certificate: str | None) -> None:
+    ssl_modes = [
+        value.casefold() for value in parse_qs(urlparse(database_url).query).get("sslmode", [])
+    ]
+    if len(ssl_modes) != 1 or ssl_modes[0] not in {"require", "verify-ca"}:
+        raise ConnectorError(
+            "public target database URLs must use exactly one sslmode=require or sslmode=verify-ca"
+        )
+    if ca_certificate is None:
+        raise ConnectorError("public target database URLs require a CA certificate")
+    _database_ssl_context(ca_certificate)
 
 
 def _database_connection_error(exc: Exception) -> ConnectorError:

@@ -9,6 +9,7 @@ import { RatesPage } from './RatesPage'
 import { OperationsPage } from './OperationsPage'
 import { AutomationPage } from './AutomationPage'
 import { NotificationsPage } from './NotificationsPage'
+import { TargetsPage } from './TargetsPage'
 
 function renderPage(page: ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -152,5 +153,30 @@ describe('monitoring expansion pages', () => {
     expect(screen.getByText('故障触发 / 故障恢复 · 严重')).toBeTruthy()
     fireEvent.click(screen.getByRole('button',{name:'Webhook'}))
     expect((screen.getByRole('textbox',{name:'Webhook 地址'}) as HTMLInputElement).value).toBe('')
+  })
+
+  it('retries a failed target probe without creating a duplicate target', async () => {
+    vi.spyOn(api,'targets').mockResolvedValue({items:[],total:0})
+    const target = {id:'target-new',name:'Prod',base_url:'https://example.com',mode:'api_only' as const,enabled:false,monitoring_readiness:'not_ready' as const}
+    const readyTarget = {...target,monitoring_readiness:'ready' as const}
+    const create = vi.spyOn(api,'createTarget').mockResolvedValue(target)
+    const probe = vi.spyOn(api,'probeTarget')
+      .mockRejectedValueOnce(new Error('target probe failed'))
+      .mockResolvedValueOnce(readyTarget)
+    vi.spyOn(api,'updateTarget').mockResolvedValue({...readyTarget,enabled:true})
+
+    renderPage(<TargetsPage/>)
+    fireEvent.click(await screen.findByRole('button',{name:'添加目标'}))
+    fireEvent.change(screen.getByLabelText('目标名称'),{target:{value:'Prod'}})
+    fireEvent.change(screen.getByLabelText('Sub2API 地址'),{target:{value:'https://example.com'}})
+    fireEvent.change(screen.getByLabelText('管理员凭据'),{target:{value:'admin-key'}})
+    fireEvent.click(screen.getByRole('button',{name:'保存并探测'}))
+
+    expect(await screen.findByText('target probe failed')).toBeTruthy()
+    expect(create).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button',{name:'重新探测'}))
+    await vi.waitFor(()=>expect(probe).toHaveBeenCalledTimes(2))
+    expect(create).toHaveBeenCalledTimes(1)
+    await vi.waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull())
   })
 })

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.security import SecretCipher, hash_password, verify_password
+from app.security import (
+    SecretCipher,
+    create_session_token,
+    ensure_admin,
+    hash_password,
+    user_for_session_token,
+    verify_password,
+)
 
 
 def test_password_hash_round_trip() -> None:
@@ -23,3 +30,17 @@ def test_secret_cipher_round_trip_and_wrong_key() -> None:
         assert str(exc) == "secret cannot be decrypted"
     else:
         raise AssertionError("ciphertext unexpectedly decrypted with another key")
+
+
+async def test_admin_password_rotation_invalidates_existing_sessions(db_session) -> None:
+    user = await ensure_admin(db_session, "admin", "first-password-long-enough")
+    token, _ = await create_session_token(db_session, user, 12)
+
+    unchanged = await ensure_admin(db_session, "admin", "first-password-long-enough")
+    assert unchanged.id == user.id
+    assert await user_for_session_token(db_session, token) is not None
+
+    rotated = await ensure_admin(db_session, "admin", "second-password-long-enough")
+    assert verify_password("second-password-long-enough", rotated.password_hash)
+    assert not verify_password("first-password-long-enough", rotated.password_hash)
+    assert await user_for_session_token(db_session, token) is None

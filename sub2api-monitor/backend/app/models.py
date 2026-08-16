@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -470,7 +471,12 @@ class NotificationChannel(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     event_types: Mapped[list[str]] = mapped_column(
         JSON,
-        default=lambda: ["incident.firing", "incident.escalated", "incident.resolved"],
+        default=lambda: [
+            "incident.firing",
+            "incident.escalated",
+            "incident.resolved",
+            "routing.account_switched",
+        ],
         nullable=False,
     )
     severities: Mapped[list[str]] = mapped_column(
@@ -622,6 +628,28 @@ class RoutingDecision(Base):
         DateTime(timezone=True), default=utcnow, index=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RoutingSessionState(Base):
+    __tablename__ = "routing_session_states"
+    __table_args__ = (
+        UniqueConstraint("target_id", "session_id", name="uq_routing_session_target_session"),
+        Index("ix_routing_session_state_updated", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    target_id: Mapped[str] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True
+    )
+    session_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    external_account_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    account_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    last_usage_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class WorkerHeartbeat(Base):

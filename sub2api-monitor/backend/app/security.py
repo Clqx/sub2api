@@ -14,6 +14,7 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Session, User
@@ -118,8 +119,23 @@ class SecretCipher:
 async def ensure_admin(session: AsyncSession, username: str, password: str) -> User:
     user = await session.scalar(select(User).where(User.username == username))
     if user is None:
-        user = User(username=username, password_hash=hash_password(password), is_admin=True)
+        password_hash = await asyncio.to_thread(hash_password, password)
+        user = User(username=username, password_hash=password_hash, is_admin=True)
         session.add(user)
+        try:
+            await session.commit()
+            await session.refresh(user)
+        except IntegrityError:
+            # API and worker start together in Compose and may race to bootstrap.
+            await session.rollback()
+            user = await session.scalar(select(User).where(User.username == username))
+            if user is None:
+                raise
+    password_valid = await asyncio.to_thread(verify_password, password, user.password_hash)
+    if not password_valid or not user.is_admin:
+        user.password_hash = await asyncio.to_thread(hash_password, password)
+        user.is_admin = True
+        await session.execute(delete(Session).where(Session.user_id == user.id))
         await session.commit()
         await session.refresh(user)
     return user

@@ -8,6 +8,7 @@ const eventOptions = [
   ['incident.firing','故障触发'],
   ['incident.escalated','级别升级'],
   ['incident.resolved','故障恢复'],
+  ['routing.account_switched','实际账号切换'],
 ] as const
 
 const severityOptions = [

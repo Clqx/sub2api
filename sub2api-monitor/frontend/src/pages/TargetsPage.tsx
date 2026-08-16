@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useState } from 'react'
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Database, ListTree, Plus, Power, PowerOff, RefreshCw, Satellite, Trash2, X } from 'lucide-react'
 import { api } from '../api'
@@ -73,15 +73,30 @@ function Capabilities({ targetId }: { targetId:string }) {
 function TargetDialog({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient()
   const [mode, setMode] = useState<'api_only' | 'full'>('api_only')
+  const createdTargetId = useRef<string | null>(null)
+  const [awaitingProbe, setAwaitingProbe] = useState(false)
   useEffect(() => { const close = (event:KeyboardEvent) => { if (event.key === 'Escape') onClose() }; window.addEventListener('keydown', close); return () => window.removeEventListener('keydown', close) }, [onClose])
   const create = useMutation({
     mutationFn: async ({ body, enable }: { body:Record<string,unknown>; enable:boolean }) => {
-      const target = await api.createTarget(body)
-      const probed = await api.probeTarget(target.id)
-      if (enable && probed.monitoring_readiness === 'ready') await api.updateTarget(target.id, { enabled:true })
+      let targetId = createdTargetId.current
+      if (targetId === null) {
+        const target = await api.createTarget(body)
+        targetId = target.id
+        createdTargetId.current = targetId
+        setAwaitingProbe(true)
+        await qc.invalidateQueries({ queryKey:['targets'] })
+      }
+      const probed = await api.probeTarget(targetId)
+      if (enable && probed.monitoring_readiness === 'ready') await api.updateTarget(targetId, { enabled:true })
       return probed
     },
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey:['targets'] }); onClose() },
+    onSuccess: async () => {
+      createdTargetId.current = null
+      setAwaitingProbe(false)
+      await qc.invalidateQueries({ queryKey:['targets'] })
+      onClose()
+    },
+    onError: async () => { await qc.invalidateQueries({ queryKey:['targets'] }) },
   })
   function submit(e:FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -93,7 +108,7 @@ function TargetDialog({ onClose }: { onClose: () => void }) {
     const database = { database_url:databaseUrl, ...(caCertificate.trim() ? { ca_certificate:caCertificate } : {}) }
     create.mutate({ enable:f.get('enable') === 'on', body:{ name:f.get('name'), base_url:f.get('base_url'), mode, enabled:false, collection_interval_seconds:60, credential:{ auth_type:authType, ...(authType === 'x_api_key' ? { api_key:secret } : { access_token:secret }) }, ...(mode === 'full' ? { database } : {}) } })
   }
-  return <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-labelledby="target-dialog-title"><div className="modal-head"><div><h2 id="target-dialog-title">添加监控目标</h2><p>凭据仅写入后端加密存储</p></div><button className="icon-button" onClick={onClose} aria-label="关闭添加目标"><X/></button></div><form onSubmit={submit}><label>目标名称<input name="name" required placeholder="生产环境"/></label><label>Sub2API 地址<input name="base_url" required type="url" placeholder="https://sub.example.com"/></label><div className="form-row"><label>接入模式<select name="mode" value={mode} onChange={event => setMode(event.target.value as 'api_only' | 'full')}><option value="api_only">API ONLY</option><option value="full">FULL</option></select></label><label>认证方式<select name="auth_type"><option value="x_api_key">x-api-key</option><option value="bearer">Bearer JWT</option></select></label></div><label>管理员凭据<input name="api_key" required type="password" autoComplete="new-password"/></label>{mode === 'full' && <DatabaseFields/>}<label className="check-label"><input name="enable" type="checkbox" defaultChecked/>探测通过后启用自动监控</label><div className="callout">保存后执行 API 与只读数据库能力探测。FULL 模式会校验两侧账号身份，且不会主动调用上游额度接口。</div>{create.isError && <div className="form-error" role="alert">{create.error.message}</div>}<div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" disabled={create.isPending}>{create.isPending ? '保存并探测中' : '保存并探测'}</button></div></form></div></div>
+  return <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-labelledby="target-dialog-title"><div className="modal-head"><div><h2 id="target-dialog-title">添加监控目标</h2><p>凭据仅写入后端加密存储</p></div><button className="icon-button" onClick={onClose} aria-label="关闭添加目标"><X/></button></div><form onSubmit={submit}><label>目标名称<input name="name" required placeholder="生产环境" disabled={awaitingProbe}/></label><label>Sub2API 地址<input name="base_url" required type="url" placeholder="https://sub.example.com" disabled={awaitingProbe}/></label><div className="form-row"><label>接入模式<select name="mode" value={mode} disabled={awaitingProbe} onChange={event => setMode(event.target.value as 'api_only' | 'full')}><option value="api_only">API ONLY</option><option value="full">FULL</option></select></label><label>认证方式<select name="auth_type" disabled={awaitingProbe}><option value="x_api_key">x-api-key</option><option value="bearer">Bearer JWT</option></select></label></div><label>管理员凭据<input name="api_key" required type="password" autoComplete="new-password" disabled={awaitingProbe}/></label>{mode === 'full' && <DatabaseFields disabled={awaitingProbe}/>}<label className="check-label"><input name="enable" type="checkbox" defaultChecked/>探测通过后启用自动监控</label><div className="callout">保存后执行 API 与只读数据库能力探测。FULL 模式会校验两侧账号身份，且不会主动调用上游额度接口。</div>{create.isError && <div className="form-error" role="alert">{create.error.message}</div>}<div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" disabled={create.isPending}>{create.isPending ? (awaitingProbe ? '重新探测中' : '保存并探测中') : (awaitingProbe ? '重新探测' : '保存并探测')}</button></div></form></div></div>
 }
 
 function DatabaseDialog({ target, onClose }: { target:Target; onClose:() => void }) {
@@ -124,7 +139,7 @@ function DatabaseDialog({ target, onClose }: { target:Target; onClose:() => void
   return <div className="modal-backdrop"><div className="modal database-form" role="dialog" aria-modal="true" aria-labelledby="database-dialog-title"><div className="modal-head"><div><h2 id="database-dialog-title">配置只读数据库</h2><p>{target.name} · FULL 模式</p></div><button className="icon-button" onClick={onClose} aria-label="关闭数据库配置"><X/></button></div><form onSubmit={submit}><DatabaseFields/>{configure.isError && <div className="form-error" role="alert">{configure.error.message}</div>}<div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" disabled={configure.isPending}>{configure.isPending ? '保存并探测中' : '保存并探测'}</button></div></form></div></div>
 }
 
-function DatabaseFields() {
+function DatabaseFields({ disabled = false }: { disabled?:boolean }) {
   const [certificate, setCertificate] = useState('')
   const [certificateFile, setCertificateFile] = useState('')
   async function loadCertificate(event:ChangeEvent<HTMLInputElement>) {
@@ -135,7 +150,7 @@ function DatabaseFields() {
     setCertificate(text.includes('-----BEGIN CERTIFICATE-----') ? text : derCertificateToPem(bytes))
     setCertificateFile(file.name)
   }
-  return <><label>只读 PostgreSQL 地址<input name="database_url" required type="text" autoComplete="off" spellCheck={false} placeholder="postgresql://user:password@82.22.63.61:15432/sub2api_loc?sslmode=require"/></label><label>TLS 服务器证书文件（可选，.crt / .pem）<input type="file" accept=".crt,.pem,application/x-x509-ca-cert,application/pem-certificate-chain" onChange={loadCertificate}/>{certificateFile && <span className="field-note">已读取 {certificateFile}，无需再填写 PEM</span>}</label><details className="certificate-fallback"><summary>改用 PEM 文本</summary><label>TLS 服务器证书（可选，PEM）<textarea name="ca_certificate" rows={7} spellCheck={false} value={certificate} onChange={event => setCertificate(event.target.value)} placeholder={'-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----'}/></label></details></>
+  return <><label>只读 PostgreSQL 地址<input name="database_url" required type="text" autoComplete="off" spellCheck={false} disabled={disabled} placeholder="postgresql://user:password@82.22.63.61:15432/sub2api_loc?sslmode=require"/></label><label>TLS 服务器证书文件（公网目标必填，.crt / .pem）<input type="file" disabled={disabled} accept=".crt,.pem,application/x-x509-ca-cert,application/pem-certificate-chain" onChange={loadCertificate}/>{certificateFile && <span className="field-note">已读取 {certificateFile}，无需再填写 PEM</span>}</label><details className="certificate-fallback"><summary>改用 PEM 文本</summary><label>TLS 服务器证书（公网目标必填，PEM）<textarea name="ca_certificate" rows={7} spellCheck={false} disabled={disabled} value={certificate} onChange={event => setCertificate(event.target.value)} placeholder={'-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----'}/></label></details></>
 }
 
 function derCertificateToPem(bytes:Uint8Array) {

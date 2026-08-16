@@ -14,6 +14,7 @@ from app.connectors.postgres import (
     account_identity_fingerprint,
     account_identity_record,
     resolve_database_address,
+    validate_database_url,
 )
 from app.connectors.sub2api import ConnectorError
 
@@ -242,6 +243,7 @@ async def test_public_database_connection_uses_resolved_ip(
 ) -> None:
     connection = FakeConnection({})
     connect_kwargs: dict[str, Any] = {}
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
     async def resolve(*_: Any, **__: Any) -> str:
         return "203.0.113.9"
@@ -251,8 +253,12 @@ async def test_public_database_connection_uses_resolved_ip(
         return connection
 
     monkeypatch.setattr("app.connectors.postgres.resolve_database_address", resolve)
+    monkeypatch.setattr("app.connectors.postgres._database_ssl_context", lambda _: context)
     connector = Sub2APIPostgresConnector(
-        database_url="postgresql://readonly:secret@db.example.com:5432/sub2api",
+        database_url=(
+            "postgresql://readonly:secret@db.example.com:5432/sub2api?sslmode=require"
+        ),
+        ca_certificate="test-ca",
         settings=Settings(**{**settings_dict, "allow_private_targets": False}),
         connect=connect,
     )
@@ -260,6 +266,32 @@ async def test_public_database_connection_uses_resolved_ip(
     await connector.probe()
 
     assert connect_kwargs["host"] == "203.0.113.9"
+    assert connect_kwargs["ssl"] is context
+
+
+async def test_public_database_requires_tls_mode_and_ca(monkeypatch) -> None:
+    async def resolve(*_: Any, **__: Any) -> str:
+        return "203.0.113.9"
+
+    monkeypatch.setattr("app.connectors.postgres.resolve_database_address", resolve)
+    with pytest.raises(ConnectorError, match="sslmode=require"):
+        await validate_database_url(
+            "postgresql://readonly:secret@db.example.com:5432/sub2api",
+            allow_private=False,
+            ca_certificate="test-ca",
+        )
+    with pytest.raises(ConnectorError, match="require a CA certificate"):
+        await validate_database_url(
+            "postgresql://readonly:secret@db.example.com:5432/sub2api?sslmode=require",
+            allow_private=False,
+        )
+    with pytest.raises(ConnectorError, match="exactly one sslmode"):
+        await validate_database_url(
+            "postgresql://readonly:secret@db.example.com:5432/sub2api"
+            "?sslmode=require&sslmode=disable",
+            allow_private=False,
+            ca_certificate="test-ca",
+        )
 
 
 async def test_database_connection_uses_supplied_ca_certificate(

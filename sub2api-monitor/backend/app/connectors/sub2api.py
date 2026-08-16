@@ -154,6 +154,15 @@ class NativeAlertEvent:
     fired_at: datetime | None
 
 
+@dataclass(slots=True)
+class NormalizedUsageRoute:
+    usage_id: int
+    session_id: str
+    external_account_id: str
+    account_name: str
+    used_at: datetime
+
+
 SecretRotatedCallback = Callable[[dict[str, str]], Awaitable[None]]
 
 ACTIVE_USAGE_PLATFORMS = frozenset({"anthropic", "openai"})
@@ -210,6 +219,8 @@ async def resolve_target_address(url: str, *, allow_private: bool) -> str | None
         or parsed.password is not None
     ):
         raise ConnectorError("target URL must be an HTTP(S) URL without user info")
+    if not allow_private and parsed.scheme != "https":
+        raise ConnectorError("public target URLs must use HTTPS")
     if allow_private:
         return None
     try:
@@ -247,6 +258,7 @@ class Sub2APIConnector:
         self.auth_type = auth_type
         self.secret = secret.copy()
         self.settings = settings
+        self.verify_tls = verify_tls
         self.on_secret_rotated = on_secret_rotated
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -257,6 +269,8 @@ class Sub2APIConnector:
         )
 
     async def __aenter__(self) -> Sub2APIConnector:
+        if not self.settings.allow_private_targets and not self.verify_tls:
+            raise ConnectorError("TLS verification cannot be disabled for public targets")
         await validate_target_url(self.base_url, allow_private=self.settings.allow_private_targets)
         return self
 
@@ -409,6 +423,37 @@ class Sub2APIConnector:
         else:
             raise ContractError("account pagination exceeded configured page limit")
         return ProbeFact("supported", "healthy", "fresh"), output
+
+    async def recent_usage_routes(
+        self,
+    ) -> tuple[ProbeFact, list[NormalizedUsageRoute]]:
+        response = await self.request(
+            "GET",
+            "/api/v1/admin/usage",
+            params={
+                "page": 1,
+                "page_size": min(self.settings.connector_page_size, 100),
+                "sort_by": "id",
+                "sort_order": "desc",
+            },
+        )
+        fact = _fact_from_response(response, "usage route inventory")
+        if response.status_code != 200:
+            return fact, []
+        data = _envelope_data(response)
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            return ProbeFact(
+                "unknown", "unavailable", "missing", "invalid usage route response"
+            ), []
+        routes: list[NormalizedUsageRoute] = []
+        for raw in data["items"]:
+            if not isinstance(raw, dict):
+                continue
+            route = normalize_usage_route(raw)
+            if route is not None:
+                routes.append(route)
+        routes.sort(key=lambda item: item.usage_id)
+        return ProbeFact("supported", "healthy", "fresh"), routes
 
     async def account_usage_stats(
         self, external_account_id: str, *, days: int = 30
@@ -1119,6 +1164,38 @@ def normalize_channel_monitor(raw: dict[str, Any]) -> NormalizedChannelMonitor:
     )
 
 
+def normalize_usage_route(raw: dict[str, Any]) -> NormalizedUsageRoute | None:
+    usage_id = _as_int(raw.get("id"))
+    session_id = raw.get("session_id")
+    account = raw.get("account")
+    if not isinstance(account, dict):
+        account = {}
+    account_id = account.get("id", raw.get("account_id"))
+    used_at = _parse_datetime(raw.get("created_at"))
+    if (
+        usage_id is None
+        or usage_id <= 0
+        or not isinstance(session_id, str)
+        or not session_id.strip()
+        or not isinstance(account_id, (str, int))
+        or used_at is None
+    ):
+        return None
+    clean_session_id = _bounded_identifier(session_id, 160)
+    clean_account_id = _bounded_identifier(str(account_id), 160)
+    if not clean_session_id or not clean_account_id:
+        return None
+    return NormalizedUsageRoute(
+        usage_id=usage_id,
+        session_id=clean_session_id,
+        external_account_id=clean_account_id,
+        account_name=_bounded_identifier(
+            str(account.get("name") or f"account-{clean_account_id}"), 160
+        ),
+        used_at=used_at,
+    )
+
+
 def active_usage_supported(account: NormalizedAccount) -> bool:
     return (
         account.platform.lower() in ACTIVE_USAGE_PLATFORMS
@@ -1244,6 +1321,10 @@ def sanitize_monitoring_error(value: str, *, limit: int = 1000) -> str:
     for pattern, replacement in MONITORING_ERROR_SECRET_PATTERNS:
         sanitized = pattern.sub(replacement, sanitized)
     return sanitized[:limit]
+
+
+def _bounded_identifier(value: str, limit: int) -> str:
+    return re.sub(r"[\x00-\x1f\x7f]+", "", value).strip()[:limit]
 
 
 def _sanitize_monitoring_payload(value: Any) -> Any:

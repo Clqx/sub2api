@@ -23,6 +23,7 @@ from app.services.cost_routing import (
     renew_cost_routing_claim,
     run_cost_routing_policy,
 )
+from app.services.maintenance import purge_expired_history
 from app.services.notifier import dispatch_due
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class Worker:
         self._semaphore = asyncio.Semaphore(settings.worker_concurrency)
         self._routing_semaphore = asyncio.Semaphore(max(1, min(4, settings.worker_concurrency)))
         self._health_file = Path("/tmp/sub2api-monitor-worker-health")
+        self._next_maintenance_at = 0.0
 
     async def run_forever(self) -> None:
         async with SessionFactory() as session:
@@ -66,6 +68,15 @@ class Worker:
         async with SessionFactory() as session:
             await dispatch_automations(session, self.settings, self.cipher)
             await dispatch_due(session, self.settings, self.cipher)
+        await self._run_maintenance_if_due()
+
+    async def _run_maintenance_if_due(self) -> None:
+        loop = asyncio.get_running_loop()
+        if loop.time() < self._next_maintenance_at:
+            return
+        async with SessionFactory() as session:
+            await purge_expired_history(session, self.settings)
+        self._next_maintenance_at = loop.time() + self.settings.maintenance_interval_seconds
 
     async def _cost_routing_loop(self) -> None:
         while True:

@@ -5,12 +5,22 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
-EventType = Literal["incident.firing", "incident.escalated", "incident.resolved"]
+EventType = Literal[
+    "incident.firing",
+    "incident.escalated",
+    "incident.resolved",
+    "routing.account_switched",
+]
 EventSeverity = Literal["info", "warning", "critical"]
 
 
 def default_event_types() -> list[EventType]:
-    return ["incident.firing", "incident.escalated", "incident.resolved"]
+    return [
+        "incident.firing",
+        "incident.escalated",
+        "incident.resolved",
+        "routing.account_switched",
+    ]
 
 
 def default_event_severities() -> list[EventSeverity]:

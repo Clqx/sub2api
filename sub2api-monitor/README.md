@@ -24,6 +24,17 @@ docker compose up -d --build --wait
 
 Open `http://127.0.0.1:8080` and sign in with `MONITOR_ADMIN_USERNAME` and `MONITOR_ADMIN_PASSWORD`. Only the web port is published. The monitor database, API, and worker remain on the private Compose network.
 
+For a local ntfy integration environment, layer the dedicated override on the normal stack:
+
+```bash
+docker compose -f compose.yaml -f compose.ntfy-local.yaml up -d --build --wait
+```
+
+The override starts ntfy on `http://127.0.0.1:18081`, persists its cache in the
+`ntfy-data` volume, and permits private notification destinations for the API and worker. Use it
+only on a trusted local network. Configure a channel with server URL `http://ntfy` and inspect the
+resulting topic through the published host port.
+
 For QA fixtures and the end-to-end smoke path:
 
 ```bash
@@ -46,7 +57,9 @@ docker compose -f compose.yaml -f compose.sub2api-local.yaml up -d --build --wai
 
 Create an API-only target with base URL `http://sub2api-loc:8080` and an approved Sub2API Admin API Key. Set `MONITOR_ALLOW_PRIVATE_TARGETS=true` for this trusted private-network deployment. The API network contains only `sub2api-loc`, the monitor API, and the monitor worker. The separate DB network contains only target PostgreSQL, the monitor API, and the monitor worker. Redis, redeem, web, and the monitor database join neither target network. The QA profile is not required for a real target.
 
-Runtime credentials may be supplied directly or through `MONITOR_MASTER_KEY_FILE`, `MONITOR_ADMIN_PASSWORD_FILE`, and `MONITOR_DATABASE_URL_FILE`. PostgreSQL also accepts `MONITOR_DB_PASSWORD_FILE`.
+Runtime credentials may be supplied directly or through `MONITOR_MASTER_KEY_FILE`, `MONITOR_ADMIN_PASSWORD_FILE`, and `MONITOR_DATABASE_URL_FILE`. PostgreSQL also accepts `MONITOR_DB_PASSWORD_FILE`. Changing the configured `MONITOR_ADMIN_PASSWORD` (or its file value) rotates the bootstrap administrator password on the next API or worker start and invalidates that administrator's existing login sessions.
+
+Account observations, quota samples, active-quota attempts, completed collection runs, and expired login sessions are cleaned by the worker. `MONITOR_HISTORY_RETENTION_DAYS` defaults to 30 days, and `MONITOR_MAINTENANCE_INTERVAL_SECONDS` defaults to one hour. Audit, incident, and notification delivery records are not part of this cleanup.
 
 ## Connection Modes
 
@@ -56,6 +69,8 @@ Runtime credentials may be supplied directly or through `MONITOR_MASTER_KEY_FILE
 These are the two required V1 paths. A DB-only connector may be retained as a later compatibility/degraded mode, but is not a V1 onboarding contract.
 
 Capabilities are probed per target. Support, current runtime state, and data freshness are reported independently; unknown values are never converted to zero.
+
+Public Sub2API target URLs and notification destinations must use HTTPS. Plain HTTP is accepted only when the corresponding private-destination opt-in is enabled for an explicitly trusted internal network.
 
 ### FULL read-only database setup
 
@@ -90,7 +105,7 @@ Active usage may make Sub2API contact the upstream provider, refresh a token, up
 
 The **Upstream rates** page aggregates each account's configured cost multiplier and the target's `upstream_billing_probe` snapshot. It preserves the declared effective/resolved multiplier, peak multiplier, attempt time, freshness deadline, next probe time, failure reason, and whether automatic probing or rate synchronization is enabled. Operators can update the target-wide automatic-probe interval, toggle probing per account, and run an immediate probe. A changed resolved multiplier for an enabled OpenAI API-key account creates an `upstream.rate_multiplier.changed` incident and enters the existing ntfy outbox workflow. Immediate probes may contact the account's upstream Sub2API deployment and are audited.
 
-The same page exposes an independent cost-routing controller for OpenAI API-key accounts. Its fixed 30-second cycle and 25-second hard run budget calculate lower numeric priorities for lower effective multipliers, demote unavailable or probe-failed accounts, and can bind accounts to OpenAI channel monitors so missing, stale, disabled, or unhealthy service checks fail closed. Recommendation mode records deduplicated decisions without writing upstream; execute mode rechecks policy state before each priority-only update. Disabling the policy or switching mode cancels pending writes. Distinct multiplier and routing-condition changes notify again, and routing decisions are retained for 30 days by default.
+The same page exposes an independent cost-routing controller for OpenAI API-key accounts. Its fixed 30-second cycle and 25-second hard run budget calculate lower numeric priorities for lower effective multipliers, demote unavailable or probe-failed accounts, and can bind accounts to OpenAI channel monitors so missing, stale, disabled, or unhealthy service checks fail closed. Recommendation mode records deduplicated decisions without writing upstream; execute mode rechecks policy state before each priority-only update. Disabling the policy or switching mode cancels pending writes. Distinct multiplier and routing-condition changes notify again, and routing decisions are retained for 30 days by default. Each run also reads a bounded recent-usage projection containing only usage ID, session ID, account identity, and timestamp. The first observation establishes a baseline; a later account change in the same session emits a deduplicated `routing.account_switched` event through the durable notification outbox without storing prompts, response bodies, or credentials.
 
 ### Channel monitoring
 
