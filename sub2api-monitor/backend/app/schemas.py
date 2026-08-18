@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -10,8 +11,10 @@ EventType = Literal[
     "incident.escalated",
     "incident.resolved",
     "routing.account_switched",
+    "routing.rate_recovered",
 ]
 EventSeverity = Literal["info", "warning", "critical"]
+TELEGRAM_TOKEN_PATTERN = re.compile(r"^\d{6,20}:[A-Za-z0-9_-]{20,}$")
 
 
 def default_event_types() -> list[EventType]:
@@ -20,6 +23,7 @@ def default_event_types() -> list[EventType]:
         "incident.escalated",
         "incident.resolved",
         "routing.account_switched",
+        "routing.rate_recovered",
     ]
 
 
@@ -343,6 +347,12 @@ class PolicyCreate(BaseModel):
     channel_failure_enabled: bool = True
     native_alerts_enabled: bool = True
     collection_failure_enabled: bool = True
+    ttft_enabled: bool = True
+    ttft_percentile: Literal["p50", "p90", "p95", "p99", "avg", "max"] = "p95"
+    ttft_min_samples: int = Field(default=5, ge=1, le=100_000)
+    ttft_warning_ms: int = Field(default=3000, ge=1, le=600_000)
+    ttft_critical_ms: int = Field(default=6000, ge=1, le=600_000)
+    ttft_recovery_ms: int = Field(default=2500, ge=0, le=600_000)
     quota_warning_remaining: float = Field(default=20, ge=0, le=100)
     quota_critical_remaining: float = Field(default=5, ge=0, le=100)
     quota_recovery_remaining: float = Field(default=30, ge=0, le=100)
@@ -353,6 +363,10 @@ class PolicyCreate(BaseModel):
             raise ValueError("critical threshold must not exceed warning")
         if self.quota_recovery_remaining <= self.quota_warning_remaining:
             raise ValueError("recovery threshold must exceed warning")
+        if self.ttft_critical_ms < self.ttft_warning_ms:
+            raise ValueError("TTFT critical threshold must not be below warning")
+        if self.ttft_recovery_ms >= self.ttft_warning_ms:
+            raise ValueError("TTFT recovery threshold must be below warning")
         return self
 
 
@@ -365,6 +379,12 @@ class PolicyResponse(ORMModel):
     channel_failure_enabled: bool
     native_alerts_enabled: bool
     collection_failure_enabled: bool
+    ttft_enabled: bool
+    ttft_percentile: str
+    ttft_min_samples: int
+    ttft_warning_ms: int
+    ttft_critical_ms: int
+    ttft_recovery_ms: int
     quota_warning_remaining: float
     quota_critical_remaining: float
     quota_recovery_remaining: float
@@ -392,7 +412,7 @@ class IncidentResponse(ORMModel):
 
 class ChannelCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
-    kind: Literal["ntfy", "webhook"] = "ntfy"
+    kind: Literal["ntfy", "telegram", "webhook"] = "ntfy"
     server_url: HttpUrl
     topic: str = Field(default="", max_length=256, pattern=r"^[^\s/]*$")
     target_id: str | None = None
@@ -401,21 +421,25 @@ class ChannelCreate(BaseModel):
     severities: list[EventSeverity] = Field(
         default_factory=default_event_severities, min_length=1
     )
-    token: str | None = None
+    token: str | None = Field(default=None, max_length=4096)
     signing_secret: str | None = Field(default=None, min_length=16, max_length=4096)
 
     @model_validator(mode="after")
     def validate_channel_kind(self) -> ChannelCreate:
-        if self.kind == "ntfy" and not self.topic:
-            raise ValueError("topic is required for ntfy channels")
-        if self.kind == "ntfy" and self.signing_secret is not None:
+        if self.kind in {"ntfy", "telegram"} and not self.topic:
+            raise ValueError("topic is required for ntfy and Telegram channels")
+        if self.kind == "telegram" and not self.token:
+            raise ValueError("token is required for Telegram channels")
+        if self.kind == "telegram" and not TELEGRAM_TOKEN_PATTERN.fullmatch(self.token or ""):
+            raise ValueError("invalid Telegram bot token")
+        if self.kind != "webhook" and self.signing_secret is not None:
             raise ValueError("signing_secret is only accepted for webhook channels")
         return self
 
 
 class ChannelUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
-    kind: Literal["ntfy", "webhook"] | None = None
+    kind: Literal["ntfy", "telegram", "webhook"] | None = None
     server_url: HttpUrl | None = None
     topic: str | None = Field(default=None, max_length=256, pattern=r"^[^\s/]*$")
     target_id: str | None = None
@@ -424,7 +448,7 @@ class ChannelUpdate(BaseModel):
     severities: list[EventSeverity] | None = Field(
         default=None, min_length=1
     )
-    token: str | None = None
+    token: str | None = Field(default=None, max_length=4096)
     signing_secret: str | None = Field(default=None, min_length=16, max_length=4096)
 
 
@@ -515,6 +539,7 @@ class CostRoutingPolicyUpdate(BaseModel):
     unhealthy_priority: int = Field(default=100000, ge=2, le=2_000_000_000)
     minimum_priority: int = Field(default=1, ge=0, le=1_999_999_999)
     quality_bindings: dict[str, list[str]] = Field(default_factory=dict)
+    fallback_account_ids: list[str] = Field(default_factory=list, max_length=10_000)
     confirm_side_effects: bool = False
 
     @model_validator(mode="after")
@@ -540,6 +565,12 @@ class CostRoutingPolicyUpdate(BaseModel):
             if monitor_ids:
                 normalized[account_id] = monitor_ids
         self.quality_bindings = normalized
+        fallback_ids = list(
+            dict.fromkeys(item.strip() for item in self.fallback_account_ids if item.strip())
+        )
+        if any(len(item) > 160 for item in fallback_ids):
+            raise ValueError("fallback_account_ids contains an invalid account id")
+        self.fallback_account_ids = fallback_ids
         return self
 
 
@@ -553,6 +584,8 @@ class CostRoutingPolicyResponse(ORMModel):
     unhealthy_priority: int = 100000
     minimum_priority: int = 1
     quality_bindings: dict[str, list[str]] = Field(default_factory=dict)
+    fallback_account_ids: list[str] = Field(default_factory=list)
+    fallback_priorities: dict[str, int] = Field(default_factory=dict)
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
     last_error: str | None = None
@@ -614,6 +647,7 @@ class SystemStatus(BaseModel):
     ready: bool
     worker_last_seen_at: datetime | None
     worker_stale: bool
+    worker_stalled_loops: list[str] = Field(default_factory=list)
     pending_outbox: int
     failed_runs_24h: int
 

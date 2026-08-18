@@ -12,7 +12,42 @@ from app.models import (
     RoutingSessionState,
     Target,
 )
-from app.services.routing_usage import observe_actual_account_switches
+from app.services.routing_usage import observe_actual_account_switches, queue_rate_recovered
+
+
+async def test_rate_recovery_queues_priority_restore_notification(db_session) -> None:
+    now = datetime.now(timezone.utc)
+    target = Target(id="recovery-target", name="Recovery", base_url="https://example.com")
+    channel = NotificationChannel(
+        id="recovery-channel",
+        target_id=target.id,
+        name="Recovery ntfy",
+        server_url="https://ntfy.example.com",
+        topic="routing",
+    )
+    db_session.add_all([target, channel])
+    await db_session.flush()
+
+    await queue_rate_recovered(
+        db_session,
+        target_id=target.id,
+        target_name=target.name,
+        account_id="12",
+        account_name="GLM",
+        previous_multiplier=1.5,
+        multiplier=0.3,
+        previous_priority=1500,
+        priority=300,
+        occurred_at=now,
+        decision_id="decision-recovered",
+    )
+    await db_session.commit()
+
+    outbox = await db_session.scalar(select(NotificationOutbox))
+    assert outbox is not None
+    assert outbox.payload["title"] == "[Recovery] Rate multiplier recovered"
+    assert "x1.5 to x0.3" in outbox.payload["message"]
+    assert "from 1500 to 300" in outbox.payload["message"]
 
 
 async def test_actual_switch_baselines_then_notifies_once(db_session) -> None:

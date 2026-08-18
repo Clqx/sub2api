@@ -39,6 +39,7 @@ CAPABILITY_DEFAULTS: dict[str, tuple[bool, str]] = {
     "ops.upstream_errors": (True, "none"),
     "ops.request_details": (True, "none"),
     "ops.alert_events": (True, "none"),
+    "ops.ttft": (True, "none"),
     "ops.system_logs": (True, "none"),
     "ops.system_log_health": (True, "none"),
     "ops.auth_cache_health": (True, "none"),

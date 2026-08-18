@@ -32,6 +32,7 @@ from app.services import cost_routing
 from app.services.cost_routing import (
     claim_due_cost_routing_policies,
     desired_priority,
+    reconcile_unknown_routing_decisions,
     renew_cost_routing_claim,
     routing_rate_multiplier,
     run_cost_routing_policy,
@@ -225,6 +226,7 @@ async def test_execute_mode_demotes_fault_and_applies_cost_increase(
         ),
     ]
     writes: list[tuple[str, int]] = []
+    expensive_multiplier = {"value": 0.8}
 
     class FakeConnector:
         async def __aenter__(self):
@@ -250,7 +252,7 @@ async def test_execute_mode_demotes_fault_and_applies_cost_increase(
                     "account_id": "2",
                     "snapshot": {
                         "status": "ok",
-                        "data": {"effective_rate_multiplier": 0.8},
+                        "data": {"effective_rate_multiplier": expensive_multiplier["value"]},
                     },
                 },
             ]
@@ -291,6 +293,36 @@ async def test_execute_mode_demotes_fault_and_applies_cost_increase(
     assert "upstream.rate_multiplier.changed" in incident_keys
     assert "cost_routing.priority_changed" in incident_keys
     assert len(list(await db_session.scalars(select(NotificationOutbox)))) >= 3
+
+    expensive_multiplier["value"] = 0.1
+    writes.clear()
+
+    async def fail_after_priority_write(*_args: object) -> None:
+        raise RuntimeError("post-write policy evaluation failed")
+
+    monkeypatch.setattr(cost_routing, "evaluate_account", fail_after_priority_write)
+    assert not await run_cost_routing_policy(
+        db_session,
+        routing_policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+    assert ("2", 100) in writes
+    recovery_decision = await db_session.scalar(
+        select(RoutingDecision).where(RoutingDecision.reason == "cost_decrease")
+    )
+    assert recovery_decision is not None
+    assert recovery_decision.status == "succeeded"
+    recovery_outbox = list(
+        await db_session.scalars(
+            select(NotificationOutbox).where(
+                NotificationOutbox.payload["title"].as_string()
+                == "[Prod] Rate multiplier recovered"
+            )
+        )
+    )
+    assert len(recovery_outbox) == 1
 
 
 @pytest.mark.asyncio
@@ -589,6 +621,100 @@ async def test_recommend_mode_adapts_to_configured_account_multipliers(
     assert [decision.desired_priority for decision in changed] == [30, 120]
     assert changed[-1].reason == "cost_increase"
     assert "account_id=12 multiplier=1.2 cost_source=account_config" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fallback_accounts_ignore_high_multiplier_and_probe_failure(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-fallback",
+        name="Fallback",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="policy-fallback",
+        target_id=target.id,
+        enabled=True,
+        mode="recommend",
+        priority_scale=1000,
+        unhealthy_priority=100000,
+        minimum_priority=1,
+        fallback_account_ids=["high", "probe-failed"],
+        fallback_priorities={"high": 7, "probe-failed": 8},
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    db_session.add_all([target, secret, policy])
+    await db_session.commit()
+
+    inventory = [
+        normalize_account(
+            {
+                "id": account_id,
+                "name": account_id,
+                "platform": "openai",
+                "type": "apikey",
+                "status": "active",
+                "schedulable": True,
+                "priority": 500,
+                "rate_multiplier": 2,
+            },
+            now,
+        )
+        for account_id in ("high", "probe-failed")
+    ]
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            return ProbeFact("supported", "healthy", "fresh"), inventory
+
+        async def probe_upstream_billing_batch(self, account_ids: list[str]):
+            return [
+                {
+                    "account_id": account_id,
+                    "snapshot": (
+                        {"status": "ok", "data": {"effective_rate_multiplier": 2}}
+                        if account_id == "high"
+                        else {"status": "failed", "last_error": "timeout"}
+                    ),
+                }
+                for account_id in account_ids
+            ]
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    assert await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+
+    decisions = list(
+        await db_session.scalars(select(RoutingDecision).order_by(RoutingDecision.account_name))
+    )
+    assert [decision.desired_priority for decision in decisions] == [7, 8]
+    assert {decision.reason for decision in decisions} == {"fallback_protected"}
+    assert [decision.observed_multiplier for decision in decisions] == [2, None]
 
 
 @pytest.mark.asyncio
@@ -981,6 +1107,25 @@ async def test_quality_bindings_reject_foreign_or_ineligible_references(db_sessi
     assert error.value.detail["monitor_ids"] == ["foreign-monitor", "wrong-provider"]
     assert await db_session.scalar(select(CostRoutingPolicy)) is None
 
+    saved = await update_cost_routing_policy(
+        target.id,
+        CostRoutingPolicyUpdate(fallback_account_ids=["valid"]),
+        User(username="admin", password_hash="unused"),
+        db_session,
+    )
+    assert saved.fallback_account_ids == ["valid"]
+    assert saved.fallback_priorities == {"valid": 100}
+
+    valid.priority = 900
+    await db_session.commit()
+    saved = await update_cost_routing_policy(
+        target.id,
+        CostRoutingPolicyUpdate(fallback_account_ids=["valid"]),
+        User(username="admin", password_hash="unused"),
+        db_session,
+    )
+    assert saved.fallback_priorities == {"valid": 100}
+
 
 @pytest.mark.asyncio
 async def test_execute_intent_survives_worker_crash_before_outcome(
@@ -1075,11 +1220,599 @@ async def test_execute_intent_survives_worker_crash_before_outcome(
     assert started is not None
 
     await cost_routing._recover_interrupted_routing_decisions(
-        db_session, policy, "worker:recovery"
+        db_session,
+        policy,
+        "worker:recovery",
+        target_name=target.name,
+        actual_priorities={"1": 100},
     )
     await db_session.refresh(decision)
     assert decision.status == "interrupted"
     assert decision.last_error == "worker stopped before routing outcome was persisted"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_rate_recovery_reconciles_actual_priority_and_queues_notice(
+    db_session,
+) -> None:
+    now = datetime.now(timezone.utc)
+    target = Target(id="target-reconcile", name="Reconcile", base_url="https://example.com")
+    policy = CostRoutingPolicy(
+        id="policy-reconcile",
+        target_id=target.id,
+        enabled=True,
+        mode="execute",
+    )
+    channel = NotificationChannel(
+        id="channel-reconcile",
+        target_id=target.id,
+        name="Recovery alerts",
+        server_url="https://ntfy.example.com",
+        topic="alerts",
+    )
+    decision = RoutingDecision(
+        id="decision-reconcile",
+        policy_id=policy.id,
+        target_id=target.id,
+        external_account_id="1",
+        account_name="Recovered account",
+        observed_multiplier=0.1,
+        previous_priority=800,
+        desired_priority=100,
+        reason="cost_decrease",
+        mode="execute",
+        status="running",
+        result={"previous_multiplier": 0.8},
+        created_at=now,
+    )
+    db_session.add_all([target, policy, channel, decision])
+    await db_session.commit()
+
+    await cost_routing._recover_interrupted_routing_decisions(
+        db_session,
+        policy,
+        "worker:recovery",
+        target_name=target.name,
+        actual_priorities={"1": 100},
+    )
+
+    await db_session.refresh(decision)
+    assert decision.status == "succeeded"
+    assert decision.last_error is None
+    assert decision.result["reconciled_after_interruption"] is True
+    outbox = await db_session.scalar(
+        select(NotificationOutbox).where(
+            NotificationOutbox.transition_id.is_not(None),
+            NotificationOutbox.channel_id == channel.id,
+        )
+    )
+    assert outbox is not None
+    assert outbox.payload["title"] == "[Reconcile] Rate multiplier recovered"
+    audit = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "cost_routing.priority.reconciled")
+    )
+    assert audit is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "blocked_state",
+    ["policy_disabled", "target_disabled", "target_not_ready"],
+)
+async def test_applied_priority_with_lost_response_is_reconciled_and_notified(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_state: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-lost-response",
+        name="Lost response",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="policy-lost-response",
+        target_id=target.id,
+        enabled=True,
+        mode="execute",
+        priority_scale=1000,
+        unhealthy_priority=100000,
+        minimum_priority=1,
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    channel = NotificationChannel(
+        id="channel-lost-response",
+        target_id=target.id,
+        name="Recovery alerts",
+        server_url="https://ntfy.example.com",
+        topic="alerts",
+    )
+    existing_account = _account(
+        target.id,
+        "1",
+        "Recovered account",
+        priority=800,
+        multiplier=0.8,
+        now=now,
+    )
+    db_session.add_all([target, secret, policy, channel, existing_account])
+    await db_session.commit()
+
+    applied_priority = {"value": 800}
+    multiplier = {"value": 0.1}
+    calls = {"accounts": 0, "probes": 0, "writes": 0}
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def accounts(self):
+            calls["accounts"] += 1
+            account = normalize_account(
+                {
+                    "id": "1",
+                    "name": "Recovered account",
+                    "platform": "openai",
+                    "type": "apikey",
+                    "status": "active",
+                    "schedulable": True,
+                    "priority": applied_priority["value"],
+                    "rate_multiplier": multiplier["value"],
+                },
+                now,
+            )
+            return ProbeFact("supported", "healthy", "fresh"), [account]
+
+        async def probe_upstream_billing_batch(self, _account_ids: list[str]):
+            calls["probes"] += 1
+            return [
+                {
+                    "account_id": "1",
+                    "snapshot": {
+                        "status": "ok",
+                        "data": {"effective_rate_multiplier": multiplier["value"]},
+                    },
+                }
+            ]
+
+        async def set_account_priority(self, _account_id: str, priority: int):
+            calls["writes"] += 1
+            applied_priority["value"] = priority
+            raise TimeoutError("response lost after apply")
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    assert await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+    uncertain = await db_session.scalar(
+        select(RoutingDecision).where(RoutingDecision.policy_id == policy.id)
+    )
+    assert uncertain is not None
+    assert uncertain.status == "running"
+    assert uncertain.finished_at is None
+    assert uncertain.result["outcome_unknown"] is True
+
+    if blocked_state == "policy_disabled":
+        policy.enabled = False
+    elif blocked_state == "target_disabled":
+        target.enabled = False
+    else:
+        target.monitoring_readiness = "not_ready"
+    await db_session.commit()
+    calls.update(accounts=0, probes=0, writes=0)
+
+    # A fresh read that has not observed the desired priority keeps the outcome
+    # reconcilable instead of prematurely declaring the mutation failed.
+    applied_priority["value"] = 800
+    assert (
+        await reconcile_unknown_routing_decisions(
+            db_session,
+            Settings(**settings_dict),
+            cipher,
+            actor="worker:reconcile",
+        )
+        == 0
+    )
+    await db_session.refresh(uncertain)
+    assert uncertain.status == "running"
+    assert uncertain.finished_at is None
+    assert uncertain.result["reconcile_actual_priority"] == 800
+    assert uncertain.result["reconcile_mismatch_attempts"] == 1
+    pending_outbox = list(await db_session.scalars(select(NotificationOutbox)))
+    assert all(
+        item.payload.get("title") != "[Lost response] Rate multiplier recovered"
+        for item in pending_outbox
+    )
+
+    assert (
+        await reconcile_unknown_routing_decisions(
+            db_session,
+            Settings(**settings_dict),
+            cipher,
+            actor="worker:reconcile",
+        )
+        == 0
+    )
+    await db_session.refresh(uncertain)
+    assert uncertain.status == "running"
+    assert uncertain.result["reconcile_mismatch_attempts"] == 2
+
+    applied_priority["value"] = 100
+    assert (
+        await reconcile_unknown_routing_decisions(
+            db_session,
+            Settings(**settings_dict),
+            cipher,
+            actor="worker:reconcile",
+        )
+        == 1
+    )
+    assert (
+        await reconcile_unknown_routing_decisions(
+            db_session,
+            Settings(**settings_dict),
+            cipher,
+            actor="worker:reconcile",
+        )
+        == 0
+    )
+    await db_session.refresh(uncertain)
+    assert uncertain.status == "succeeded"
+    assert uncertain.result["reconciled_after_interruption"] is True
+    assert calls == {"accounts": 3, "probes": 0, "writes": 0}
+    recovery_outbox = [
+        item
+        for item in await db_session.scalars(
+            select(NotificationOutbox).where(NotificationOutbox.channel_id == channel.id)
+        )
+        if item.payload.get("title") == "[Lost response] Rate multiplier recovered"
+    ]
+    assert len(recovery_outbox) == 1
+    audits = list(
+        await db_session.scalars(
+            select(AuditEvent).where(AuditEvent.action == "cost_routing.priority.reconciled")
+        )
+    )
+    assert len(audits) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_enabled", [True, False])
+async def test_unknown_mismatch_threshold_allows_only_active_policy_to_retry(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    policy_enabled: bool,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-mismatch-limit",
+        name="Mismatch limit",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="policy-mismatch-limit",
+        target_id=target.id,
+        enabled=policy_enabled,
+        mode="execute",
+        priority_scale=1000,
+        unhealthy_priority=100000,
+        minimum_priority=1,
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    account = _account(
+        target.id,
+        "1",
+        "Pending account",
+        priority=800,
+        multiplier=0.8,
+        now=now,
+    )
+    decision = RoutingDecision(
+        id="decision-mismatch-limit",
+        policy_id=policy.id,
+        target_id=target.id,
+        external_account_id="1",
+        account_name="Pending account",
+        observed_multiplier=0.1,
+        previous_priority=800,
+        desired_priority=100,
+        reason="cost_decrease",
+        mode="execute",
+        status="running",
+        result={"outcome_unknown": True, "previous_multiplier": 0.8},
+    )
+    db_session.add_all([target, secret, policy, account, decision])
+    await db_session.commit()
+
+    inventory_mode = {"value": "error"}
+    writes: list[tuple[str, int]] = []
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def accounts(self):
+            if inventory_mode["value"] == "error":
+                return ProbeFact("supported", "unavailable", "missing", "temporary error"), []
+            if inventory_mode["value"] == "missing":
+                return ProbeFact("supported", "healthy", "fresh"), []
+            return ProbeFact("supported", "healthy", "fresh"), [
+                normalize_account(
+                    {
+                        "id": "1",
+                        "name": "Pending account",
+                        "platform": "openai",
+                        "type": "apikey",
+                        "status": "active",
+                        "schedulable": True,
+                        "priority": 800,
+                        "rate_multiplier": 0.1,
+                    },
+                    now,
+                )
+            ]
+
+        async def probe_upstream_billing_batch(self, _account_ids: list[str]):
+            return [
+                {
+                    "account_id": "1",
+                    "snapshot": {
+                        "status": "ok",
+                        "data": {"effective_rate_multiplier": 0.1},
+                    },
+                }
+            ]
+
+        async def set_account_priority(self, account_id: str, priority: int):
+            writes.append((account_id, priority))
+            return {"priority": priority}
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    settings = Settings(**settings_dict)
+
+    for mode in ("error", "missing"):
+        inventory_mode["value"] = mode
+        assert (
+            await reconcile_unknown_routing_decisions(
+                db_session,
+                settings,
+                cipher,
+                actor="worker:reconcile",
+            )
+            == 0
+        )
+        await db_session.refresh(decision)
+        assert "reconcile_mismatch_attempts" not in decision.result
+
+    inventory_mode["value"] = "mismatch"
+    for attempt in range(1, 4):
+        assert (
+            await reconcile_unknown_routing_decisions(
+                db_session,
+                settings,
+                cipher,
+                actor="worker:reconcile",
+            )
+            == 0
+        )
+        await db_session.refresh(decision)
+        assert decision.result["reconcile_mismatch_attempts"] == attempt
+        assert decision.status == ("failed" if attempt == 3 else "running")
+
+    assert decision.finished_at is not None
+    failure_audits = list(
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action == "cost_routing.priority.reconciliation_failed"
+            )
+        )
+    )
+    assert len(failure_audits) == 1
+
+    ran = await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        settings,
+        cipher,
+        actor="worker:test",
+    )
+    assert ran is policy_enabled
+    assert writes == ([('1', 100)] if policy_enabled else [])
+    decisions = list(
+        await db_session.scalars(
+            select(RoutingDecision).order_by(RoutingDecision.created_at, RoutingDecision.id)
+        )
+    )
+    assert len(decisions) == (2 if policy_enabled else 1)
+    if policy_enabled:
+        assert decisions[-1].status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_worker_reconciles_unknown_outcomes_without_due_policies(
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import worker as worker_module
+    from app.worker import Worker
+
+    calls = {"reconcile": 0, "claim": 0, "dispatch": 0}
+
+    class FakeSessionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    def fake_session_factory() -> FakeSessionContext:
+        return FakeSessionContext()
+
+    async def fake_reconcile(*_args: object, **_kwargs: object) -> int:
+        calls["reconcile"] += 1
+        return 1
+
+    async def fake_claim(*_args: object, **_kwargs: object) -> list[str]:
+        calls["claim"] += 1
+        return []
+
+    async def fake_dispatch(*_args: object, **_kwargs: object) -> int:
+        calls["dispatch"] += 1
+        return 1
+
+    monkeypatch.setattr(worker_module, "SessionFactory", fake_session_factory)
+    monkeypatch.setattr(worker_module, "reconcile_unknown_routing_decisions", fake_reconcile)
+    monkeypatch.setattr(worker_module, "claim_due_cost_routing_policies", fake_claim)
+    monkeypatch.setattr(worker_module, "dispatch_due", fake_dispatch)
+
+    await Worker(Settings(**settings_dict))._cost_routing_tick()
+
+    assert calls == {"reconcile": 1, "claim": 1, "dispatch": 1}
+
+
+@pytest.mark.asyncio
+async def test_policy_run_keeps_unknown_mismatch_reconcilable(
+    db_session,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cipher = SecretCipher(str(settings_dict["master_key"]))
+    target = Target(
+        id="target-unknown-mismatch",
+        name="Unknown",
+        base_url="https://example.com",
+        enabled=True,
+        monitoring_readiness="ready",
+    )
+    policy = CostRoutingPolicy(
+        id="policy-unknown-mismatch",
+        target_id=target.id,
+        enabled=True,
+        mode="execute",
+    )
+    secret = TargetSecret(
+        target_id=target.id,
+        auth_type="x_api_key",
+        ciphertext=cipher.encrypt_json({"api_key": "test-admin-key"}),
+    )
+    account = _account(
+        target.id,
+        "1",
+        "Pending account",
+        priority=800,
+        multiplier=0.8,
+        now=now,
+    )
+    decision = RoutingDecision(
+        id="decision-unknown-mismatch",
+        policy_id=policy.id,
+        target_id=target.id,
+        external_account_id="1",
+        account_name="Pending account",
+        observed_multiplier=0.1,
+        previous_priority=800,
+        desired_priority=100,
+        reason="cost_decrease",
+        mode="execute",
+        status="running",
+        result={"outcome_unknown": True, "previous_multiplier": 0.8},
+    )
+    db_session.add_all([target, secret, policy, account, decision])
+    await db_session.commit()
+
+    writes: list[tuple[str, int]] = []
+
+    class FakeConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def accounts(self):
+            return ProbeFact("supported", "healthy", "fresh"), [
+                normalize_account(
+                    {
+                        "id": "1",
+                        "name": "Pending account",
+                        "platform": "openai",
+                        "type": "apikey",
+                        "status": "active",
+                        "schedulable": True,
+                        "priority": 800,
+                        "rate_multiplier": 0.1,
+                    },
+                    now,
+                )
+            ]
+
+        async def probe_upstream_billing_batch(self, _account_ids: list[str]):
+            return [
+                {
+                    "account_id": "1",
+                    "snapshot": {
+                        "status": "ok",
+                        "data": {"effective_rate_multiplier": 0.1},
+                    },
+                }
+            ]
+
+        async def set_account_priority(self, account_id: str, priority: int):
+            writes.append((account_id, priority))
+            return {"priority": priority}
+
+    async def fake_connector(*_args: object):
+        return FakeConnector()
+
+    monkeypatch.setattr(cost_routing, "connector_for_target", fake_connector)
+    assert await run_cost_routing_policy(
+        db_session,
+        policy.id,
+        Settings(**settings_dict),
+        cipher,
+        actor="worker:test",
+    )
+
+    await db_session.refresh(decision)
+    assert decision.status == "running"
+    assert decision.finished_at is None
+    assert decision.result["reconcile_actual_priority"] == 800
+    assert writes == []
+    decisions = list(await db_session.scalars(select(RoutingDecision)))
+    assert [item.id for item in decisions] == [decision.id]
 
 
 def _account(

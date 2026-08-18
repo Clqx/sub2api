@@ -59,3 +59,21 @@ def test_notification_contract_distinguishes_ntfy_and_webhook() -> None:
         signing_secret="signing-secret-long-enough",
     )
     assert webhook.topic == ""
+
+
+def test_telegram_channel_requires_valid_bot_token_and_chat_id() -> None:
+    with pytest.raises(ValidationError):
+        ChannelCreate(
+            name="telegram",
+            kind="telegram",
+            server_url="https://api.telegram.org",
+            topic="-1001234567890",
+        )
+    channel = ChannelCreate(
+        name="telegram",
+        kind="telegram",
+        server_url="https://api.telegram.org",
+        topic="-1001234567890",
+        token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghi",
+    )
+    assert channel.topic == "-1001234567890"

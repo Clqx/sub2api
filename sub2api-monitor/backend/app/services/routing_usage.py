@@ -16,6 +16,88 @@ from app.models import (
 )
 
 ROUTING_SWITCH_EVENT = "routing.account_switched"
+ROUTING_RATE_RECOVERED_EVENT = "routing.rate_recovered"
+
+
+async def queue_rate_recovered(
+    session: AsyncSession,
+    *,
+    target_id: str,
+    target_name: str,
+    account_id: str,
+    account_name: str,
+    previous_multiplier: float | None,
+    multiplier: float,
+    previous_priority: int | None,
+    priority: int,
+    occurred_at: datetime,
+    decision_id: str,
+) -> None:
+    channels = list(
+        await session.scalars(
+            select(NotificationChannel).where(
+                NotificationChannel.enabled.is_(True),
+                or_(
+                    NotificationChannel.target_id == target_id,
+                    NotificationChannel.target_id.is_(None),
+                ),
+            )
+        )
+    )
+    event_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"sub2api-monitor:{target_id}:{ROUTING_RATE_RECOVERED_EVENT}:{decision_id}",
+        )
+    )
+    title = f"[{target_name}] Rate multiplier recovered"
+    multiplier_change = (
+        f"multiplier dropped from x{previous_multiplier:g} to x{multiplier:g}"
+        if previous_multiplier is not None
+        else f"multiplier recovered to x{multiplier:g}"
+    )
+    message = (
+        f"Account {account_name} ({account_id}) {multiplier_change}; "
+        f"routing priority restored from {previous_priority} to {priority}"
+    )
+    for channel in channels:
+        if (
+            ROUTING_RATE_RECOVERED_EVENT not in channel.event_types
+            or "warning" not in channel.severities
+        ):
+            continue
+        payload = (
+            {
+                "event_id": event_id,
+                "event_type": ROUTING_RATE_RECOVERED_EVENT,
+                "occurred_at": occurred_at.isoformat(),
+                "target_id": target_id,
+                "severity": "warning",
+                "rate_recovery": {
+                    "decision_id": decision_id,
+                    "account_id": account_id,
+                    "account_name": account_name,
+                    "previous_multiplier": previous_multiplier,
+                    "multiplier": multiplier,
+                    "previous_priority": previous_priority,
+                    "priority": priority,
+                },
+            }
+            if channel.kind == "webhook"
+            else {
+                "title": title,
+                "message": message[:1000],
+                "priority": 3,
+                "tags": ["arrow_heading_down", "routing-rate-recovered"],
+            }
+        )
+        session.add(
+            NotificationOutbox(
+                transition_id=event_id,
+                channel_id=channel.id,
+                payload=payload,
+            )
+        )
 
 
 async def observe_actual_account_switches(

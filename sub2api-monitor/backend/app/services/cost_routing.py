@@ -39,7 +39,7 @@ from app.services.policies import (
     evaluate_upstream_rate_change,
     upstream_rate_multiplier,
 )
-from app.services.routing_usage import observe_actual_account_switches
+from app.services.routing_usage import observe_actual_account_switches, queue_rate_recovered
 from app.services.targets import connector_for_target, target_with_secret
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,8 @@ COST_ROUTING_RUN_BUDGET_SECONDS = 25.0
 COST_ROUTING_INVENTORY_TIMEOUT_SECONDS = 8.0
 COST_ROUTING_WRITE_TIMEOUT_SECONDS = 5.0
 COST_ROUTING_WRITE_RESERVE_SECONDS = 6.0
+COST_ROUTING_RECONCILIATION_LEASE_SECONDS = 30
+COST_ROUTING_RECONCILIATION_MISMATCH_LIMIT = 3
 
 ExecutionModeGuard = Callable[[str, str | None], Awaitable[str | None]]
 
@@ -71,6 +73,7 @@ class AccountRoutingPlan:
     cost_signal_ok: bool
     cost_source: str | None
     quality_failures: list[str]
+    fallback_protected: bool
     decision: RoutingDecision | None = None
 
 
@@ -170,6 +173,235 @@ async def renew_cost_routing_claim(
     return renewed_policy_id is not None
 
 
+async def reconcile_unknown_routing_decisions(
+    session: AsyncSession,
+    settings: Settings,
+    cipher: SecretCipher,
+    *,
+    actor: str,
+    limit: int = 20,
+) -> int:
+    """Reconcile uncertain writes without running the cost-routing policy."""
+    if limit <= 0:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    claim_id = uuid_str()
+    candidates = list(
+        await session.scalars(
+            select(RoutingDecision)
+            .where(RoutingDecision.status == "running", RoutingDecision.target_id.is_not(None))
+            .order_by(RoutingDecision.created_at, RoutingDecision.id)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    claimed: list[tuple[str, str]] = []
+    for decision in candidates:
+        result = decision.result if isinstance(decision.result, dict) else {}
+        if result.get("outcome_unknown") is not True:
+            continue
+        if not _reconciliation_claim_expired(result.get("reconcile_lease_until"), now):
+            continue
+        target_id = decision.target_id
+        if target_id is None:
+            continue
+        decision.result = {
+            **result,
+            "reconcile_claim_id": claim_id,
+            "reconcile_lease_until": (
+                now + timedelta(seconds=COST_ROUTING_RECONCILIATION_LEASE_SECONDS)
+            ).isoformat(),
+        }
+        claimed.append((decision.id, target_id))
+        if len(claimed) >= limit:
+            break
+    if not claimed:
+        await session.commit()
+        return 0
+    await session.commit()
+
+    target_ids = sorted({target_id for _, target_id in claimed})
+    targets: dict[str, Target] = {}
+    target_errors: dict[str, str] = {}
+    for target_id in target_ids:
+        target = await target_with_secret(session, target_id)
+        if target is None:
+            target_errors[target_id] = "target no longer exists"
+        else:
+            targets[target_id] = target
+
+    async def read_priorities(
+        target: Target,
+    ) -> tuple[str, dict[str, int | None] | None, str | None]:
+        try:
+            connector = await connector_for_target(session, target, settings, cipher)
+            async with connector:
+                fact, inventory = await asyncio.wait_for(
+                    connector.accounts(), timeout=COST_ROUTING_INVENTORY_TIMEOUT_SECONDS
+                )
+            if fact.runtime_state != "healthy":
+                reason = sanitize_monitoring_error(
+                    fact.reason or "account inventory unavailable",
+                    limit=500,
+                )
+                return target.id, None, reason
+            return (
+                target.id,
+                {item.external_account_id: item.priority for item in inventory},
+                None,
+            )
+        except Exception as exc:
+            return target.id, None, _safe_error(exc)
+
+    inventory_results = await asyncio.gather(
+        *(read_priorities(target) for target in targets.values())
+    )
+    priorities_by_target: dict[str, dict[str, int | None]] = {}
+    for target_id, priorities, error in inventory_results:
+        if priorities is None:
+            target_errors[target_id] = error or "account inventory unavailable"
+        else:
+            priorities_by_target[target_id] = priorities
+
+    reconciled = 0
+    completed_at = datetime.now(timezone.utc)
+    claimed_ids = [decision_id for decision_id, _ in claimed]
+    claimed_decisions = list(
+        await session.scalars(
+            select(RoutingDecision)
+            .where(RoutingDecision.id.in_(claimed_ids))
+            .order_by(RoutingDecision.created_at, RoutingDecision.id)
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
+    )
+    for decision in claimed_decisions:
+        result = decision.result if isinstance(decision.result, dict) else {}
+        if decision.status != "running" or result.get("reconcile_claim_id") != claim_id:
+            continue
+        target_id = decision.target_id
+        target = targets.get(target_id or "")
+        priorities = priorities_by_target.get(target_id or "")
+        error = target_errors.get(target_id or "")
+        actual_priority = (
+            priorities.get(decision.external_account_id) if priorities is not None else None
+        )
+        next_result = {
+            key: value
+            for key, value in result.items()
+            if key not in {"reconcile_claim_id", "reconcile_lease_until"}
+        }
+        next_result["reconcile_last_attempt_at"] = completed_at.isoformat()
+        if error is not None:
+            next_result["reconcile_last_error"] = error
+            logger.warning(
+                "cost routing reconciliation unavailable target_id=%s account_id=%s "
+                "decision_id=%s error=%s",
+                target_id,
+                decision.external_account_id,
+                decision.id,
+                error,
+            )
+        elif decision.external_account_id not in (priorities or {}):
+            next_result["reconcile_last_error"] = "account missing from fresh inventory"
+            logger.warning(
+                "cost routing reconciliation account missing target_id=%s account_id=%s "
+                "decision_id=%s",
+                target_id,
+                decision.external_account_id,
+                decision.id,
+            )
+        elif actual_priority != decision.desired_priority:
+            next_result, mismatch_attempts, terminal = _record_reconciliation_mismatch(
+                next_result,
+                actual_priority=actual_priority,
+                attempted_at=completed_at,
+            )
+            if terminal:
+                decision.status = "failed"
+                decision.last_error = next_result["reconcile_last_error"]
+                decision.finished_at = completed_at
+                session.add(
+                    AuditEvent(
+                        actor=actor,
+                        action="cost_routing.priority.reconciliation_failed",
+                        target_id=target_id,
+                        details={
+                            "decision_id": decision.id,
+                            "account_id": decision.external_account_id,
+                            "desired_priority": decision.desired_priority,
+                            "actual_priority": actual_priority,
+                            "mismatch_attempts": mismatch_attempts,
+                        },
+                    )
+                )
+                logger.warning(
+                    "cost routing reconciliation failed target_id=%s account_id=%s "
+                    "actual_priority=%s desired_priority=%s attempts=%s decision_id=%s",
+                    target_id,
+                    decision.external_account_id,
+                    actual_priority,
+                    decision.desired_priority,
+                    mismatch_attempts,
+                    decision.id,
+                )
+            else:
+                logger.info(
+                    "cost routing reconciliation pending target_id=%s account_id=%s "
+                    "actual_priority=%s desired_priority=%s attempts=%s decision_id=%s",
+                    target_id,
+                    decision.external_account_id,
+                    actual_priority,
+                    decision.desired_priority,
+                    mismatch_attempts,
+                    decision.id,
+                )
+        else:
+            next_result.pop("reconcile_last_error", None)
+            next_result.pop("reconcile_actual_priority", None)
+            next_result["actual_priority"] = actual_priority
+            next_result["reconciled_after_interruption"] = True
+            decision.status = "succeeded"
+            decision.last_error = None
+            decision.finished_at = completed_at
+            if (
+                target is not None
+                and decision.reason == "cost_decrease"
+                and decision.observed_multiplier is not None
+            ):
+                await _queue_reconciled_rate_recovery(
+                    session,
+                    decision,
+                    target_name=target.name,
+                    occurred_at=completed_at,
+                )
+            session.add(
+                AuditEvent(
+                    actor=actor,
+                    action="cost_routing.priority.reconciled",
+                    target_id=target_id,
+                    details={
+                        "decision_id": decision.id,
+                        "account_id": decision.external_account_id,
+                        "desired_priority": decision.desired_priority,
+                        "actual_priority": actual_priority,
+                    },
+                )
+            )
+            reconciled += 1
+            logger.info(
+                "cost routing reconciliation succeeded target_id=%s account_id=%s "
+                "priority=%s decision_id=%s",
+                target_id,
+                decision.external_account_id,
+                actual_priority,
+                decision.id,
+            )
+        decision.result = next_result
+    await session.commit()
+    return reconciled
+
+
 async def run_cost_routing_policy(
     session: AsyncSession,
     policy_id: str,
@@ -191,7 +423,6 @@ async def run_cost_routing_policy(
         _release_claim(policy, claim_owner)
         await session.commit()
         return False
-    await _recover_interrupted_routing_decisions(session, policy, actor)
     target_id = policy.target_id
     target = await target_with_secret(session, target_id)
     if target is None:
@@ -207,6 +438,25 @@ async def run_cost_routing_policy(
             )
             if inventory_fact.runtime_state != "healthy":
                 raise RuntimeError(inventory_fact.reason or "account inventory unavailable")
+            await _recover_interrupted_routing_decisions(
+                session,
+                policy,
+                actor,
+                target_name=target.name,
+                actual_priorities={
+                    item.external_account_id: item.priority for item in inventory
+                },
+            )
+            unresolved_account_ids = {
+                decision.external_account_id
+                for decision in await session.scalars(
+                    select(RoutingDecision).where(
+                        RoutingDecision.policy_id == policy.id,
+                        RoutingDecision.status == "running",
+                    )
+                )
+                if decision.result.get("outcome_unknown") is True
+            }
             previous_accounts = list(
                 await session.scalars(
                     select(AccountCurrent)
@@ -290,14 +540,28 @@ async def run_cost_routing_policy(
                 )
                 cost_signal_ok = cost_source is not None
                 quality_failures = quality_by_account.get(external_account_id, [])
-                healthy = account.available and cost_signal_ok and not quality_failures
-                wanted = desired_priority(
-                    multiplier,
-                    healthy=healthy,
-                    priority_scale=policy.priority_scale,
-                    minimum_priority=policy.minimum_priority,
-                    unhealthy_priority=policy.unhealthy_priority,
+                fallback_protected = (
+                    external_account_id in policy.fallback_account_ids
+                    and account.available
+                    and not quality_failures
                 )
+                if fallback_protected:
+                    baseline = policy.fallback_priorities.get(
+                        external_account_id, policy.minimum_priority
+                    )
+                    wanted = max(
+                        policy.minimum_priority,
+                        min(int(baseline), policy.unhealthy_priority - 1),
+                    )
+                else:
+                    healthy = account.available and cost_signal_ok and not quality_failures
+                    wanted = desired_priority(
+                        multiplier,
+                        healthy=healthy,
+                        priority_scale=policy.priority_scale,
+                        minimum_priority=policy.minimum_priority,
+                        unhealthy_priority=policy.unhealthy_priority,
+                    )
                 reason = _routing_reason(
                     account=account,
                     was_available=was_available,
@@ -305,13 +569,19 @@ async def run_cost_routing_policy(
                     multiplier=multiplier,
                     cost_signal_ok=cost_signal_ok,
                     quality_failures=quality_failures,
+                    fallback_protected=fallback_protected,
                     desired=wanted,
                 )
                 previous_desired_priority = account.routing_desired_priority
                 previous_routing_status = account.routing_status
                 account.routing_desired_priority = wanted
                 account.routing_updated_at = now
-                account.routing_status = "in_sync" if account.priority == wanted else policy.mode
+                if external_account_id in unresolved_account_ids:
+                    account.routing_status = "outcome_unknown"
+                else:
+                    account.routing_status = (
+                        "in_sync" if account.priority == wanted else policy.mode
+                    )
                 plan = AccountRoutingPlan(
                     account=account,
                     previous_multiplier=prior_multiplier,
@@ -322,25 +592,31 @@ async def run_cost_routing_policy(
                     cost_signal_ok=cost_signal_ok,
                     cost_source=cost_source,
                     quality_failures=quality_failures,
+                    fallback_protected=fallback_protected,
                 )
                 logger.info(
                     "cost routing account evaluated policy_id=%s target_id=%s "
                     "account_id=%s multiplier=%s cost_source=%s available=%s "
-                    "previous_priority=%s desired_priority=%s reason=%s",
+                    "fallback_protected=%s previous_priority=%s desired_priority=%s reason=%s",
                     policy.id,
                     target.id,
                     external_account_id,
                     multiplier,
                     cost_source or "none",
                     account.available,
+                    fallback_protected,
                     account.priority,
                     wanted,
                     reason,
                 )
-                should_record_decision = account.priority != wanted and (
-                    policy.mode == "execute"
-                    or previous_desired_priority != wanted
-                    or previous_routing_status not in {"recommend", "recommended"}
+                should_record_decision = (
+                    external_account_id not in unresolved_account_ids
+                    and account.priority != wanted
+                    and (
+                        policy.mode == "execute"
+                        or previous_desired_priority != wanted
+                        or previous_routing_status not in {"recommend", "recommended"}
+                    )
                 )
                 if should_record_decision:
                     decision = RoutingDecision(
@@ -357,6 +633,16 @@ async def run_cost_routing_policy(
                         status="recommended" if policy.mode == "recommend" else "running",
                         result={
                             "cost_source": cost_source,
+                            **(
+                                {"previous_multiplier": prior_multiplier}
+                                if prior_multiplier is not None
+                                else {}
+                            ),
+                            **(
+                                {"fallback_protected": True}
+                                if fallback_protected
+                                else {}
+                            ),
                             **(
                                 {"quality_failures": quality_failures}
                                 if quality_failures
@@ -399,7 +685,13 @@ async def run_cost_routing_policy(
 
                 async def apply_priority(
                     plan: AccountRoutingPlan,
-                ) -> tuple[AccountRoutingPlan, dict[str, Any] | None, str | None, bool]:
+                ) -> tuple[
+                    AccountRoutingPlan,
+                    dict[str, Any] | None,
+                    str | None,
+                    bool,
+                    bool,
+                ]:
                     async with semaphore:
                         latest_mode = await _current_execution_mode(
                             session,
@@ -409,10 +701,16 @@ async def run_cost_routing_policy(
                             refresh_session=False,
                         )
                         if latest_mode != "execute":
-                            return plan, None, None, True
+                            return plan, None, None, True, False
                         remaining = run_deadline - loop.time()
                         if remaining <= 0:
-                            return plan, None, "cost routing write deadline exceeded", False
+                            return (
+                                plan,
+                                None,
+                                "cost routing write deadline exceeded",
+                                False,
+                                False,
+                            )
                         try:
                             result = await asyncio.wait_for(
                                 connector.set_account_priority(
@@ -421,16 +719,21 @@ async def run_cost_routing_policy(
                                 ),
                                 timeout=min(COST_ROUTING_WRITE_TIMEOUT_SECONDS, remaining),
                             )
-                            return plan, result, None, False
+                            return plan, result, None, False, False
                         except Exception as exc:
-                            return plan, None, _safe_error(exc), False
+                            # Once the connector call starts, an exception cannot prove
+                            # that the upstream rejected the mutation. Reconcile it
+                            # against fresh inventory before retrying or notifying.
+                            return plan, None, _safe_error(exc), False, True
 
                 outcomes = await asyncio.gather(*(apply_priority(plan) for plan in execute_plans))
-                for plan, priority_result, error, cancelled in outcomes:
+                for plan, priority_result, error, cancelled, outcome_unknown in outcomes:
                     routing_decision = plan.decision
                     if routing_decision is None:
                         continue
-                    routing_decision.finished_at = datetime.now(timezone.utc)
+                    outcome_at = datetime.now(timezone.utc)
+                    routing_decision.finished_at = None if outcome_unknown else outcome_at
+                    audit_status = routing_decision.status
                     if cancelled:
                         routing_decision.status = "cancelled"
                         plan.account.routing_status = "cancelled"
@@ -442,11 +745,50 @@ async def run_cost_routing_policy(
                         }
                         plan.account.priority = plan.desired_priority
                         plan.account.routing_status = "succeeded"
-                        plan.account.routing_applied_at = routing_decision.finished_at
+                        plan.account.routing_applied_at = outcome_at
+                        if (
+                            plan.reason == "cost_decrease"
+                            and plan.previous_multiplier is not None
+                            and plan.multiplier is not None
+                        ):
+                            await queue_rate_recovered(
+                                session,
+                                target_id=target.id,
+                                target_name=target.name,
+                                account_id=plan.account.external_account_id,
+                                account_name=plan.account.name,
+                                previous_multiplier=plan.previous_multiplier,
+                                multiplier=plan.multiplier,
+                                previous_priority=plan.previous_priority,
+                                priority=plan.desired_priority,
+                                occurred_at=outcome_at,
+                                decision_id=routing_decision.id,
+                            )
+                            logger.info(
+                                "cost routing rate recovered target_id=%s account_id=%s "
+                                "multiplier=%s->%s priority=%s->%s decision_id=%s",
+                                target.id,
+                                plan.account.external_account_id,
+                                plan.previous_multiplier,
+                                plan.multiplier,
+                                plan.previous_priority,
+                                plan.desired_priority,
+                                routing_decision.id,
+                            )
+                    elif outcome_unknown:
+                        routing_decision.result = {
+                            **routing_decision.result,
+                            "outcome_unknown": True,
+                        }
+                        routing_decision.last_error = error
+                        plan.account.routing_status = "running"
+                        audit_status = "outcome_unknown"
                     else:
                         routing_decision.status = "failed"
                         routing_decision.last_error = error
                         plan.account.routing_status = "failed"
+                    if audit_status == "running":
+                        audit_status = routing_decision.status
                     logger.info(
                         "cost routing priority write policy_id=%s target_id=%s "
                         "account_id=%s previous_priority=%s desired_priority=%s "
@@ -463,7 +805,7 @@ async def run_cost_routing_policy(
                     session.add(
                         AuditEvent(
                             actor=actor,
-                            action=f"cost_routing.priority.{routing_decision.status}",
+                            action=f"cost_routing.priority.{audit_status}",
                             target_id=target.id,
                             details={
                                 "decision_id": routing_decision.id,
@@ -477,6 +819,9 @@ async def run_cost_routing_policy(
                             },
                         )
                     )
+                # External writes cannot be rolled back. Persist their outcomes and
+                # notification outbox before later incident/usage evaluation.
+                await session.commit()
 
             for plan in plans:
                 await evaluate_account(session, target.name, plan.account, [])
@@ -868,12 +1213,15 @@ def _routing_reason(
     multiplier: float | None,
     cost_signal_ok: bool,
     quality_failures: list[str],
+    fallback_protected: bool,
     desired: int,
 ) -> str:
     if not account.available:
         return "unavailable"
     if quality_failures:
         return "quality_failed"
+    if fallback_protected:
+        return "fallback_protected"
     if not cost_signal_ok:
         return "probe_failed"
     if not was_available:
@@ -964,10 +1312,94 @@ def _release_claim(policy: CostRoutingPolicy, owner_id: str | None) -> None:
         policy.lease_until = None
 
 
+def _reconciliation_claim_expired(value: object, now: datetime) -> bool:
+    if not isinstance(value, str):
+        return True
+    try:
+        expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= now
+
+
+def _record_reconciliation_mismatch(
+    result: dict[str, Any],
+    *,
+    actual_priority: int | None,
+    attempted_at: datetime,
+) -> tuple[dict[str, Any], int, bool]:
+    raw_attempts = result.get("reconcile_mismatch_attempts", 0)
+    previous_attempts = (
+        int(raw_attempts)
+        if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool)
+        else 0
+    )
+    mismatch_attempts = max(0, previous_attempts) + 1
+    terminal = mismatch_attempts >= COST_ROUTING_RECONCILIATION_MISMATCH_LIMIT
+    error = (
+        "desired priority not observed after "
+        f"{mismatch_attempts} healthy inventory checks"
+        if terminal
+        else "desired priority not observed yet"
+    )
+    return (
+        {
+            **result,
+            "reconcile_actual_priority": actual_priority,
+            "reconcile_last_attempt_at": attempted_at.isoformat(),
+            "reconcile_last_error": error,
+            "reconcile_mismatch_attempts": mismatch_attempts,
+            **({"reconciliation_terminal": True} if terminal else {}),
+        },
+        mismatch_attempts,
+        terminal,
+    )
+
+
+def _decision_previous_multiplier(decision: RoutingDecision) -> float | None:
+    raw_previous_multiplier = decision.result.get("previous_multiplier")
+    if (
+        isinstance(raw_previous_multiplier, (int, float))
+        and not isinstance(raw_previous_multiplier, bool)
+        and math.isfinite(float(raw_previous_multiplier))
+    ):
+        return float(raw_previous_multiplier)
+    return None
+
+
+async def _queue_reconciled_rate_recovery(
+    session: AsyncSession,
+    decision: RoutingDecision,
+    *,
+    target_name: str,
+    occurred_at: datetime,
+) -> None:
+    if decision.target_id is None or decision.observed_multiplier is None:
+        return
+    await queue_rate_recovered(
+        session,
+        target_id=decision.target_id,
+        target_name=target_name,
+        account_id=decision.external_account_id,
+        account_name=decision.account_name,
+        previous_multiplier=_decision_previous_multiplier(decision),
+        multiplier=decision.observed_multiplier,
+        previous_priority=decision.previous_priority,
+        priority=decision.desired_priority,
+        occurred_at=occurred_at,
+        decision_id=decision.id,
+    )
+
+
 async def _recover_interrupted_routing_decisions(
     session: AsyncSession,
     policy: CostRoutingPolicy,
     actor: str,
+    *,
+    target_name: str,
+    actual_priorities: dict[str, int | None],
 ) -> None:
     interrupted = list(
         await session.scalars(
@@ -981,18 +1413,59 @@ async def _recover_interrupted_routing_decisions(
         return
     now = datetime.now(timezone.utc)
     for decision in interrupted:
-        decision.status = "interrupted"
-        decision.last_error = "worker stopped before routing outcome was persisted"
+        account_present = decision.external_account_id in actual_priorities
+        actual_priority = actual_priorities.get(decision.external_account_id)
+        reconciled = actual_priority == decision.desired_priority
+        audit_action: str
+        if reconciled:
+            decision.status = "succeeded"
+            decision.last_error = None
+            decision.result = {
+                **decision.result,
+                "actual_priority": actual_priority,
+                "reconciled_after_interruption": True,
+            }
+            if decision.reason == "cost_decrease" and decision.observed_multiplier is not None:
+                await _queue_reconciled_rate_recovery(
+                    session,
+                    decision,
+                    target_name=target_name,
+                    occurred_at=now,
+                )
+            audit_action = "cost_routing.priority.reconciled"
+        elif decision.result.get("outcome_unknown") is True:
+            if not account_present:
+                decision.result = {
+                    **decision.result,
+                    "reconcile_last_attempt_at": now.isoformat(),
+                    "reconcile_last_error": "account missing from fresh inventory",
+                }
+                continue
+            decision.result, _, terminal = _record_reconciliation_mismatch(
+                decision.result,
+                actual_priority=actual_priority,
+                attempted_at=now,
+            )
+            if not terminal:
+                continue
+            decision.status = "failed"
+            decision.last_error = decision.result["reconcile_last_error"]
+            audit_action = "cost_routing.priority.reconciliation_failed"
+        else:
+            decision.status = "interrupted"
+            decision.last_error = "worker stopped before routing outcome was persisted"
+            audit_action = "cost_routing.priority.interrupted"
         decision.finished_at = now
         session.add(
             AuditEvent(
                 actor=actor,
-                action="cost_routing.priority.interrupted",
+                action=audit_action,
                 target_id=decision.target_id,
                 details={
                     "decision_id": decision.id,
                     "account_id": decision.external_account_id,
                     "desired_priority": decision.desired_priority,
+                    "actual_priority": actual_priority,
                 },
             )
         )

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Activity, AlertTriangle, Clock3, Cpu, Database, RefreshCw, ServerCog, Users } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Activity, AlertTriangle, Clock3, Cpu, Database, RefreshCw, Save, ServerCog, Users } from 'lucide-react'
 import { api } from '../api'
 import { ChartMetricSwitch, InteractiveBarChart } from '../components/InteractiveBarChart'
 import { Empty, ErrorState, Status } from '../components/Status'
 import type { ReactNode } from 'react'
-import type { OperationsResources, OpsErrorItem, OpsRequestItem } from '../types'
+import type { AlertPolicy, OperationsResources, OpsErrorItem, OpsRequestItem } from '../types'
 
 type View = 'overview'|'capacity'|'errors'|'system'
 type TimeRange = '5m'|'30m'|'1h'|'6h'|'24h'
@@ -46,12 +46,12 @@ export function OperationsPage() {
     <div className="view-tabs" role="tablist" aria-label="运行监控视图">{([['overview','概览'],['capacity','容量'],['errors','请求与错误'],['system','系统']] as const).map(([key,label])=><button key={key} role="tab" aria-selected={view===key} className={view===key?'active':''} onClick={()=>setView(key)}>{label}</button>)}</div>
     {targets.isError ? <ErrorState error={targets.error}/> : !targets.isLoading && !targets.data?.items.length ? <Empty title="没有监控目标" detail="先添加并探测一个 Sub2API 目标"/> : query.isError ? <ErrorState error={query.error}/> : query.isLoading || !resources ? <div className="inline-loading">正在读取目标运行指标…</div> : <>
       {Object.keys(query.data?.failures??{}).length>0 && <div className="coverage-warning"><AlertTriangle size={16}/><span>部分接口不可用：{Object.keys(query.data?.failures??{}).join('、')}</span></div>}
-      {view==='overview' && <Overview resources={resources}/>} {view==='capacity' && <Capacity resources={resources}/>} {view==='errors' && <Errors resources={resources}/>} {view==='system' && <System resources={resources}/>}
+      {view==='overview' && <Overview resources={resources} targetId={targetId} targetName={targets.data?.items.find(target=>target.id===targetId)?.name??targetId}/>} {view==='capacity' && <Capacity resources={resources}/>} {view==='errors' && <Errors resources={resources}/>} {view==='system' && <System resources={resources}/>}
     </>}
   </>
 }
 
-function Overview({resources}:{resources:OperationsResources}) {
+function Overview({resources,targetId,targetName}:{resources:OperationsResources;targetId:string;targetName:string}) {
   const snapshot=resources.ops_snapshot
   const overview=snapshot?.overview
   const [throughputMetric,setThroughputMetric]=useState<ThroughputMetric>('requests')
@@ -82,12 +82,70 @@ function Overview({resources}:{resources:OperationsResources}) {
     ['当前 TPS',formatRate(overview?.tps.current),Clock3],
     ['Token 消耗',formatNumber(overview?.token_consumed),Database],
     ['P95 延迟',formatDuration(overview?.duration.p95_ms),Clock3],
+    ['首 Token P95',formatDuration(overview?.ttft.p95_ms),Clock3],
+    ['首 Token 样本',formatNumber(overview?.ttft_sample_count),Activity],
   ] as const
   return <>
     <section className="metric-grid ops-metrics">{metrics.map(([label,value,Icon])=><div className="metric" key={label}><div><span>{label}</span><strong>{value}</strong></div><Icon size={20}/></div>)}</section>
+    <TtftPolicySettings targetId={targetId} targetName={targetName}/>
     <section className="content-band ops-section"><SectionTitle title="吞吐趋势" detail={`${snapshot?.throughput_trend.bucket??'--'} 聚合`} action={<ChartMetricSwitch ariaLabel="吞吐趋势指标" value={throughputMetric} options={throughputMetricOptions} onChange={setThroughputMetric}/>}/><InteractiveBarChart ariaLabel="吞吐趋势" points={throughputPoints} valueLabel={throughputConfig.label} valueFormatter={throughputConfig.format} tone={throughputConfig.tone}/></section>
     <div className="ops-two-column"><section className="content-band ops-section"><SectionTitle title="延迟分布" detail={`${formatNumber(resources.latency_histogram?.total_requests)} 个请求`}/><SimpleRows items={(resources.latency_histogram?.buckets??[]).map(item=>({label:item.range,value:formatNumber(item.count)}))}/></section><section className="content-band ops-section"><SectionTitle title="OpenAI Token 指标" detail="按模型统计"/><table className="ops-table"><thead><tr><th>模型</th><th>请求</th><th>Token/s</th><th>首 Token</th></tr></thead><tbody>{resources.openai_token_stats?.items.map(item=><tr key={item.model}><td><strong>{item.model}</strong></td><td>{formatNumber(item.request_count)}</td><td>{formatRate(item.avg_tokens_per_sec)}</td><td>{formatDuration(item.avg_first_token_ms)}</td></tr>)}</tbody></table></section></div>
   </>
+}
+
+function TtftPolicySettings({targetId,targetName}:{targetId:string;targetName:string}) {
+  const qc=useQueryClient()
+  const policies=useQuery({queryKey:['policies'],queryFn:api.policies})
+  const orderedPolicies=[...(policies.data??[])].sort((left,right)=>left.id.localeCompare(right.id))
+  const targetPolicy=orderedPolicies.find(policy=>policy.target_id===targetId)
+  const inheritedPolicy=targetPolicy??orderedPolicies.find(policy=>!policy.target_id)
+  const [values,setValues]=useState({enabled:true,percentile:'p95' as AlertPolicy['ttft_percentile'],minSamples:5,warning:3000,critical:6000,recovery:2500})
+  useEffect(()=>{
+    if(!inheritedPolicy)return
+    setValues({
+      enabled:inheritedPolicy.ttft_enabled,
+      percentile:inheritedPolicy.ttft_percentile,
+      minSamples:inheritedPolicy.ttft_min_samples,
+      warning:inheritedPolicy.ttft_warning_ms,
+      critical:inheritedPolicy.ttft_critical_ms,
+      recovery:inheritedPolicy.ttft_recovery_ms,
+    })
+  },[inheritedPolicy])
+  const save=useMutation({
+    mutationFn:()=>{
+      const source=inheritedPolicy
+      const body={
+        name:targetPolicy?.name??`${targetName} TTFT`,target_id:targetId,
+        enabled:source?.enabled??true,
+        unavailable_enabled:source?.unavailable_enabled??true,
+        channel_failure_enabled:source?.channel_failure_enabled??true,
+        native_alerts_enabled:source?.native_alerts_enabled??true,
+        collection_failure_enabled:source?.collection_failure_enabled??true,
+        quota_warning_remaining:source?.quota_warning_remaining??20,
+        quota_critical_remaining:source?.quota_critical_remaining??5,
+        quota_recovery_remaining:source?.quota_recovery_remaining??30,
+        ttft_enabled:values.enabled,
+        ttft_percentile:values.percentile,
+        ttft_min_samples:values.minSamples,
+        ttft_warning_ms:values.warning,
+        ttft_critical_ms:values.critical,
+        ttft_recovery_ms:values.recovery,
+      }
+      return targetPolicy?api.updatePolicy(targetPolicy.id,body):api.createPolicy(body)
+    },
+    onSuccess:()=>qc.invalidateQueries({queryKey:['policies']}),
+  })
+  const valid=values.recovery<values.warning&&values.warning<=values.critical
+  return <section className="content-band ops-section"><SectionTitle title="首 Token 告警" detail="5 分钟流式请求窗口"/><div className="routing-controls ttft-controls">
+    <label className="switch-label"><input type="checkbox" checked={values.enabled} onChange={event=>setValues(current=>({...current,enabled:event.target.checked}))}/>启用</label>
+    <label>统计分位<select value={values.percentile} onChange={event=>setValues(current=>({...current,percentile:event.target.value as AlertPolicy['ttft_percentile']}))}><option value="p50">P50</option><option value="p90">P90</option><option value="p95">P95</option><option value="p99">P99</option><option value="avg">平均</option><option value="max">最大</option></select></label>
+    <label>最少样本<input type="number" min="1" max="100000" value={values.minSamples} onChange={event=>setValues(current=>({...current,minSamples:Number(event.target.value)}))}/></label>
+    <label>警告（ms）<input type="number" min="1" max="600000" value={values.warning} onChange={event=>setValues(current=>({...current,warning:Number(event.target.value)}))}/></label>
+    <label>严重（ms）<input type="number" min="1" max="600000" value={values.critical} onChange={event=>setValues(current=>({...current,critical:Number(event.target.value)}))}/></label>
+    <label>恢复（ms）<input type="number" min="0" max="600000" value={values.recovery} onChange={event=>setValues(current=>({...current,recovery:Number(event.target.value)}))}/></label>
+    <button className="primary" disabled={!valid||save.isPending} onClick={()=>save.mutate()}><Save size={16}/>保存</button>
+    {save.isError&&<span className="form-error">{String(save.error)}</span>}
+  </div></section>
 }
 
 function Capacity({resources}:{resources:OperationsResources}) {

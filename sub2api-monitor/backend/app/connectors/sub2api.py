@@ -772,6 +772,34 @@ class Sub2APIConnector:
             "failures": failures,
         }
 
+    async def ttft_overview(
+        self, time_range: str = "5m"
+    ) -> tuple[ProbeFact, dict[str, Any] | None]:
+        if time_range not in MONITORING_TIME_RANGES:
+            raise ValueError("unsupported monitoring time range")
+        response = await self.request(
+            "GET",
+            "/api/v1/admin/ops/dashboard/snapshot-v2",
+            params={"time_range": time_range},
+        )
+        fact = _fact_from_response(response, "TTFT overview")
+        if response.status_code != 200:
+            return fact, None
+        data = _envelope_data(response)
+        overview = data.get("overview") if isinstance(data, dict) else None
+        if not isinstance(overview, dict):
+            return (
+                ProbeFact("unknown", "unavailable", "missing", "invalid TTFT overview response"),
+                None,
+            )
+        sanitized = _sanitize_monitoring_payload(overview)
+        if not isinstance(sanitized, dict):
+            return (
+                ProbeFact("unknown", "unavailable", "missing", "invalid TTFT overview payload"),
+                None,
+            )
+        return fact, sanitized
+
     async def native_alert_events(
         self, *, limit: int = 100
     ) -> tuple[ProbeFact, list[NativeAlertEvent], bool]:

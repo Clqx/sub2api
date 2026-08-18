@@ -20,6 +20,7 @@ from app.services.collector import collect_run
 from app.services.cost_routing import (
     COST_ROUTING_LEASE_SECONDS,
     claim_due_cost_routing_policies,
+    reconcile_unknown_routing_decisions,
     renew_cost_routing_claim,
     run_cost_routing_policy,
 )
@@ -39,6 +40,12 @@ class Worker:
         self._routing_semaphore = asyncio.Semaphore(max(1, min(4, settings.worker_concurrency)))
         self._health_file = Path("/tmp/sub2api-monitor-worker-health")
         self._next_maintenance_at = 0.0
+        initialized_at = datetime.now(timezone.utc)
+        self._critical_loop_started_at: dict[str, datetime] = {}
+        self._critical_loop_completed_at: dict[str, datetime] = {
+            "main": initialized_at,
+            "cost_routing": initialized_at,
+        }
 
     async def run_forever(self) -> None:
         async with SessionFactory() as session:
@@ -49,10 +56,14 @@ class Worker:
         cost_routing_task = asyncio.create_task(self._cost_routing_loop())
         try:
             while True:
+                self._critical_loop_started_at["main"] = datetime.now(timezone.utc)
                 try:
                     await self.tick()
                 except Exception:
                     logger.exception("worker tick failed")
+                finally:
+                    self._critical_loop_started_at.pop("main", None)
+                    self._critical_loop_completed_at["main"] = datetime.now(timezone.utc)
                 await asyncio.sleep(self.settings.worker_poll_seconds)
         finally:
             heartbeat_task.cancel()
@@ -67,7 +78,12 @@ class Worker:
             await asyncio.gather(*(self._execute(run_id) for run_id in run_ids))
         async with SessionFactory() as session:
             await dispatch_automations(session, self.settings, self.cipher)
-            await dispatch_due(session, self.settings, self.cipher)
+            await dispatch_due(
+                session,
+                self.settings,
+                self.cipher,
+                claim_owner=self.worker_id,
+            )
         await self._run_maintenance_if_due()
 
     async def _run_maintenance_if_due(self) -> None:
@@ -80,22 +96,42 @@ class Worker:
 
     async def _cost_routing_loop(self) -> None:
         while True:
+            self._critical_loop_started_at["cost_routing"] = datetime.now(timezone.utc)
             try:
-                async with SessionFactory() as session:
-                    policy_ids = await claim_due_cost_routing_policies(
-                        session,
-                        owner_id=self.worker_id,
-                        limit=self.settings.worker_concurrency,
-                    )
-                if policy_ids:
-                    await asyncio.gather(
-                        *(self._execute_cost_routing(policy_id) for policy_id in policy_ids)
-                    )
-                    async with SessionFactory() as session:
-                        await dispatch_due(session, self.settings, self.cipher)
+                await self._cost_routing_tick()
             except Exception:
                 logger.exception("cost routing tick failed")
+            finally:
+                self._critical_loop_started_at.pop("cost_routing", None)
+                self._critical_loop_completed_at["cost_routing"] = datetime.now(timezone.utc)
             await asyncio.sleep(min(self.settings.worker_poll_seconds, 2.0))
+
+    async def _cost_routing_tick(self) -> None:
+        async with SessionFactory() as session:
+            reconciled_count = await reconcile_unknown_routing_decisions(
+                session,
+                self.settings,
+                self.cipher,
+                actor=f"worker:{self.worker_id}",
+                limit=self.settings.worker_concurrency,
+            )
+            policy_ids = await claim_due_cost_routing_policies(
+                session,
+                owner_id=self.worker_id,
+                limit=self.settings.worker_concurrency,
+            )
+        if policy_ids:
+            await asyncio.gather(
+                *(self._execute_cost_routing(policy_id) for policy_id in policy_ids)
+            )
+        if reconciled_count or policy_ids:
+            async with SessionFactory() as session:
+                await dispatch_due(
+                    session,
+                    self.settings,
+                    self.cipher,
+                    claim_owner=self.worker_id,
+                )
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -106,15 +142,35 @@ class Worker:
             await asyncio.sleep(min(self.settings.worker_poll_seconds, 5.0))
 
     async def _heartbeat(self) -> None:
+        now = datetime.now(timezone.utc)
+        stalled_cutoff = now - timedelta(seconds=self.settings.worker_stale_seconds)
+        stalled_loops = sorted(
+            name
+            for name, started_at in self._critical_loop_started_at.items()
+            if started_at < stalled_cutoff
+        )
         async with SessionFactory() as session:
             heartbeat = await session.get(WorkerHeartbeat, self.worker_id)
             if heartbeat is None:
                 heartbeat = WorkerHeartbeat(worker_id=self.worker_id)
                 session.add(heartbeat)
-            heartbeat.last_seen_at = datetime.now(timezone.utc)
-            heartbeat.details = {"pid": os.getpid(), "version": "0.1.0"}
+            heartbeat.last_seen_at = now
+            heartbeat.details = {
+                "pid": os.getpid(),
+                "version": "0.1.0",
+                "critical_loop_stalled": stalled_loops,
+                "critical_loop_started_at": {
+                    name: value.isoformat()
+                    for name, value in self._critical_loop_started_at.items()
+                },
+                "critical_loop_completed_at": {
+                    name: value.isoformat()
+                    for name, value in self._critical_loop_completed_at.items()
+                },
+            }
             await session.commit()
-        self._health_file.touch()
+        if not stalled_loops:
+            self._health_file.touch()
 
     async def _recover_stale_runs(self, *, recover_same_host: bool = False) -> None:
         now = datetime.now(timezone.utc)

@@ -28,7 +28,7 @@ describe('monitoring expansion pages', () => {
       total: 1,
     })
     vi.spyOn(api, 'upstreamBillingSettings').mockResolvedValue({ enabled: true, interval_minutes: 30 })
-    vi.spyOn(api, 'costRoutingPolicy').mockResolvedValue({ id:'routing-1',target_id:'target-1',enabled:true,mode:'recommend',probe_interval_seconds:30,priority_scale:1000,unhealthy_priority:100000,minimum_priority:1,quality_bindings:{'9':['5']},last_account_count:1,last_change_count:0 })
+    vi.spyOn(api, 'costRoutingPolicy').mockResolvedValue({ id:'routing-1',target_id:'target-1',enabled:true,mode:'recommend',probe_interval_seconds:30,priority_scale:1000,unhealthy_priority:100000,minimum_priority:1,quality_bindings:{'9':['5']},fallback_account_ids:['9'],fallback_priorities:{'9':200},last_account_count:1,last_change_count:0 })
     vi.spyOn(api, 'channelMonitors').mockResolvedValue([{id:'channel-1',target_id:'target-1',external_monitor_id:'5',name:'Relay quality',provider:'openai',api_mode:'responses',endpoint:'https://example.com',api_key_masked:'***',api_key_decrypt_failed:false,primary_model:'gpt-5',extra_models:[],group_name:'',enabled:true,interval_seconds:30,jitter_seconds:0,last_checked_at:'2026-08-09T00:00:00Z',primary_status:'operational',primary_latency_ms:120,availability_7d:100,extra_models_status:[],extra_headers:{},body_override_mode:'off',observed_at:'2026-08-09T00:00:00Z'}])
     vi.spyOn(api, 'routingDecisions').mockResolvedValue([{id:'decision-1',policy_id:'routing-1',target_id:'target-1',external_account_id:'9',account_name:'Relay',observed_multiplier:.16,previous_priority:200,desired_priority:160,reason:'cost_decrease',mode:'recommend',status:'recommended',result:{},created_at:'2026-08-09T00:00:00Z'}])
     const accounts = vi.spyOn(api, 'accounts').mockResolvedValue({
@@ -52,6 +52,7 @@ describe('monitoring expansion pages', () => {
     expect(screen.getByText('倍率下降')).toBeTruthy()
     expect(screen.queryByText('OAuth account')).toBeNull()
     expect((screen.getByRole('checkbox',{name:'Relay 绑定 Relay quality'}) as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByRole('checkbox',{name:'Relay 设为兜底账号'}) as HTMLInputElement).checked).toBe(true)
     expect(accounts.mock.calls[0]?.[0]).toContain('platform=openai')
     expect(accounts.mock.calls[0]?.[0]).toContain('account_type=apikey')
   })
@@ -74,7 +75,7 @@ describe('monitoring expansion pages', () => {
     vi.spyOn(api, 'targetOperations').mockResolvedValue({
       target_id:'target-1', target_name:'Prod', generated_at:'2026-08-08T00:00:00Z', time_range:'1h', failures:{}, capabilities:{},
       resources:{
-        ops_snapshot:{ generated_at:'2026-08-08T00:00:00Z', overview:{ health_score:98, success_count:120, error_count_total:2, request_count_total:122, token_consumed:5000, sla:0.995, error_rate:0.005, upstream_error_rate:0.002, qps:{current:2,peak:4,avg:1}, tps:{current:50,peak:80,avg:30}, duration:{p95_ms:420}, ttft:{} }, throughput_trend:{bucket:'5m',points:[{bucket_start:'2026-08-08T00:00:00Z',request_count:20,token_consumed:400,qps:2,tps:40}]}, error_trend:{bucket:'5m',points:[]} },
+        ops_snapshot:{ generated_at:'2026-08-08T00:00:00Z', overview:{ health_score:98, success_count:120, error_count_total:2, request_count_total:122, token_consumed:5000, sla:0.995, error_rate:0.005, upstream_error_rate:0.002, qps:{current:2,peak:4,avg:1}, tps:{current:50,peak:80,avg:30}, duration:{p95_ms:420}, ttft:{p95_ms:850}, ttft_sample_count:37 }, throughput_trend:{bucket:'5m',points:[{bucket_start:'2026-08-08T00:00:00Z',request_count:20,token_consumed:400,qps:2,tps:40}]}, error_trend:{bucket:'5m',points:[]} },
         latency_histogram:{total_requests:122,buckets:[]}, openai_token_stats:{items:[],total:0},
         concurrency:{enabled:true,platform:{openai:{platform:'openai',current_in_use:2,max_capacity:10,load_percentage:20,waiting_in_queue:0}},group:{},account:{}},
         account_availability:{enabled:true,platform:{openai:{platform:'openai',available_count:6,total_accounts:7,rate_limit_count:1,error_count:0}},group:{},account:{}},
@@ -82,6 +83,7 @@ describe('monitoring expansion pages', () => {
         groups:[{id:3,name:'Default',platform:'openai',status:'active',rate_multiplier:1}], group_usage:[{group_id:3,today_cost:2,total_cost:30}], group_capacity:[{group_id:3,concurrency_used:2,concurrency_max:10,sessions_used:1,sessions_max:5,rpm_used:3,rpm_max:100}],
       },
     })
+    vi.spyOn(api,'policies').mockResolvedValue([{id:'policy-1',target_id:'target-1',name:'Prod',enabled:true,unavailable_enabled:true,channel_failure_enabled:true,native_alerts_enabled:true,collection_failure_enabled:true,ttft_enabled:true,ttft_percentile:'p95',ttft_min_samples:5,ttft_warning_ms:3000,ttft_critical_ms:6000,ttft_recovery_ms:2500,quota_warning_remaining:20,quota_critical_remaining:5,quota_recovery_remaining:30,created_at:'2026-08-08T00:00:00Z',updated_at:'2026-08-08T00:00:00Z'}])
 
     renderPage(<OperationsPage />)
 
@@ -89,6 +91,9 @@ describe('monitoring expansion pages', () => {
     expect(screen.getByText('122')).toBeTruthy()
     expect(screen.getByText('99.50%')).toBeTruthy()
     expect(screen.getByText('0.50%')).toBeTruthy()
+    expect(screen.getByText('850 ms')).toBeTruthy()
+    expect(screen.getByText('37')).toBeTruthy()
+    expect(screen.getByText('首 Token 告警')).toBeTruthy()
     fireEvent.click(screen.getByRole('button',{name:'Token'}))
     expect(screen.getByRole('button',{name:'Token'}).getAttribute('aria-pressed')).toBe('true')
     expect(screen.getAllByText('400').length).toBeGreaterThan(0)
@@ -153,6 +158,9 @@ describe('monitoring expansion pages', () => {
     expect(screen.getByText('故障触发 / 故障恢复 · 严重')).toBeTruthy()
     fireEvent.click(screen.getByRole('button',{name:'Webhook'}))
     expect((screen.getByRole('textbox',{name:'Webhook 地址'}) as HTMLInputElement).value).toBe('')
+    fireEvent.click(screen.getByRole('button',{name:'Telegram'}))
+    expect((screen.getByRole('textbox',{name:'Telegram Bot API 地址'}) as HTMLInputElement).value).toBe('https://api.telegram.org')
+    expect(screen.getByRole('textbox',{name:'Chat ID / @频道'})).toBeTruthy()
   })
 
   it('retries a failed target probe without creating a duplicate target', async () => {

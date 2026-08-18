@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     target_db_fallback_minutes: int = Field(default=60, ge=0, le=240)
     allow_private_targets: bool = False
     allow_private_notification_targets: bool = False
+    telegram_api_allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["api.telegram.org"], min_length=1, max_length=20
+    )
+    notification_dispatch_concurrency: int = Field(default=8, ge=1, le=50)
+    notification_claim_seconds: int = Field(default=120, ge=30, le=900)
     worker_poll_seconds: float = Field(default=2.0, ge=0.2, le=60.0)
     worker_concurrency: int = Field(default=8, ge=1, le=100)
     worker_stale_seconds: int = Field(default=60, ge=10, le=3600)
@@ -47,6 +52,24 @@ class Settings(BaseSettings):
     cost_routing_decision_retention_days: int = Field(default=30, ge=1, le=365)
     producer_id: str = "hub-worker"
     log_level: str = "INFO"
+
+    @field_validator("telegram_api_allowed_hosts")
+    @classmethod
+    def validate_telegram_api_allowed_hosts(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            host = item.strip().rstrip(".").casefold()
+            if (
+                not host
+                or "/" in host
+                or ":" in host
+                or "*" in host
+                or host.startswith(".")
+            ):
+                raise ValueError("Telegram API allowlist entries must be exact host names")
+            if host not in normalized:
+                normalized.append(host)
+        return normalized
 
     @model_validator(mode="before")
     @classmethod

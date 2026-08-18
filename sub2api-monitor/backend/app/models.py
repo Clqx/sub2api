@@ -71,6 +71,7 @@ class IncidentStatus(str, enum.Enum):
 
 class OutboxStatus(str, enum.Enum):
     PENDING = "pending"
+    DELIVERING = "delivering"
     SENT = "sent"
     DEAD = "dead"
 
@@ -371,6 +372,14 @@ class Policy(Base):
     channel_failure_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     native_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     collection_failure_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    ttft_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    ttft_percentile: Mapped[str] = mapped_column(
+        String(10), default="p95", nullable=False
+    )
+    ttft_min_samples: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    ttft_warning_ms: Mapped[int] = mapped_column(Integer, default=3000, nullable=False)
+    ttft_critical_ms: Mapped[int] = mapped_column(Integer, default=6000, nullable=False)
+    ttft_recovery_ms: Mapped[int] = mapped_column(Integer, default=2500, nullable=False)
     quota_warning_remaining: Mapped[float] = mapped_column(Float, default=20.0)
     quota_critical_remaining: Mapped[float] = mapped_column(Float, default=5.0)
     quota_recovery_remaining: Mapped[float] = mapped_column(Float, default=30.0)
@@ -476,6 +485,7 @@ class NotificationChannel(Base):
             "incident.escalated",
             "incident.resolved",
             "routing.account_switched",
+            "routing.rate_recovered",
         ],
         nullable=False,
     )
@@ -492,6 +502,7 @@ class NotificationOutbox(Base):
     __table_args__ = (
         UniqueConstraint("transition_id", "channel_id", name="uq_outbox_transition_channel"),
         Index("ix_outbox_due", "status", "next_attempt_at"),
+        Index("ix_outbox_claim", "status", "lease_expires_at", "next_attempt_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
@@ -506,6 +517,8 @@ class NotificationOutbox(Base):
     status: Mapped[str] = mapped_column(String(20), default=OutboxStatus.PENDING.value, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    lease_owner: Mapped[str | None] = mapped_column(String(160))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(500))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -580,6 +593,10 @@ class CostRoutingPolicy(Base):
     unhealthy_priority: Mapped[int] = mapped_column(Integer, default=100000, nullable=False)
     minimum_priority: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     quality_bindings: Mapped[dict[str, list[str]]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    fallback_account_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    fallback_priorities: Mapped[dict[str, int]] = mapped_column(
         JSON, default=dict, nullable=False
     )
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

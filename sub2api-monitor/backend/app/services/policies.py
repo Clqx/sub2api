@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,7 +20,11 @@ from app.models import (
     NotificationOutbox,
     Policy,
     QuotaSample,
+    Target,
 )
+
+TTFT_RULE_KEY = "response.ttft.high"
+TTFT_WINDOW_KEY = "streaming"
 
 
 def incident_fingerprint(
@@ -34,19 +39,68 @@ def incident_fingerprint(
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-async def policy_for_target(session: AsyncSession, target_id: str) -> Policy:
-    policy = await session.scalar(
+async def policy_for_target(
+    session: AsyncSession,
+    target_id: str,
+    *,
+    populate_existing: bool = False,
+) -> Policy | None:
+    locked_target_ids = await lock_ttft_target_rows(session, [target_id])
+    if target_id not in locked_target_ids:
+        return None
+    statement = (
         select(Policy)
         .where(
             Policy.enabled.is_(True), or_(Policy.target_id == target_id, Policy.target_id.is_(None))
         )
         .order_by(Policy.target_id.is_(None), Policy.id)
     )
+    if populate_existing:
+        statement = statement.execution_options(populate_existing=True)
+    policy = await session.scalar(statement)
     if policy is None:
         policy = Policy(name="Default", target_id=None)
         session.add(policy)
         await session.flush()
     return policy
+
+
+async def lock_ttft_target_rows(
+    session: AsyncSession,
+    target_ids: Iterable[str],
+) -> set[str]:
+    """Serialize target policy/incident lifecycle changes without blocking FK checks."""
+    ordered_ids = sorted(set(target_ids))
+    if not ordered_ids:
+        return set()
+    return set(
+        await session.scalars(
+            select(Target.id)
+            .where(Target.id.in_(ordered_ids))
+            .order_by(Target.id)
+            # On PostgreSQL, key_share=True without read=True renders
+            # FOR NO KEY UPDATE. It serializes lifecycle writers and conflicts
+            # with DELETE while remaining compatible with FK KEY SHARE locks.
+            .with_for_update(key_share=True)
+        )
+    )
+
+
+async def effective_policy_ids_for_targets(
+    session: AsyncSession, target_ids: Iterable[str]
+) -> dict[str, str | None]:
+    """Snapshot policy selection without creating the implicit default policy."""
+    result: dict[str, str | None] = {}
+    for target_id in sorted(set(target_ids)):
+        result[target_id] = await session.scalar(
+            select(Policy.id)
+            .where(
+                Policy.enabled.is_(True),
+                or_(Policy.target_id == target_id, Policy.target_id.is_(None)),
+            )
+            .order_by(Policy.target_id.is_(None), Policy.id)
+        )
+    return result
 
 
 async def _queue_transition(
@@ -113,6 +167,34 @@ async def _queue_automation_transition(
     await schedule_automations(session, incident, transition)
 
 
+async def _resolve_incident(
+    session: AsyncSession,
+    incident: Incident,
+    *,
+    reason: str,
+    title: str | None = None,
+    message: str | None = None,
+) -> None:
+    if incident.status == IncidentStatus.RESOLVED.value:
+        return
+    old = incident.status
+    incident.status = IncidentStatus.RESOLVED.value
+    incident.resolved_at = datetime.now(timezone.utc)
+    if title is not None:
+        incident.title = title
+    if message is not None:
+        incident.message = message
+    transition = IncidentTransition(
+        incident_id=incident.id,
+        from_status=old,
+        to_status=IncidentStatus.RESOLVED.value,
+        reason=reason,
+    )
+    session.add(transition)
+    await session.flush()
+    await _queue_transition(session, incident, transition, "incident.resolved")
+
+
 async def _set_incident(
     session: AsyncSession,
     *,
@@ -127,6 +209,7 @@ async def _set_incident(
     message: str,
     subject_type: str = "account",
     notify_on_change: bool = False,
+    update_details_without_notification: bool = False,
 ) -> None:
     fingerprint = incident_fingerprint(
         target_id, policy.id, subject_type, subject_id, rule_key, window_key
@@ -204,19 +287,13 @@ async def _set_incident(
             session.add(transition)
             await session.flush()
             await _queue_transition(session, incident, transition, "incident.firing")
+        elif update_details_without_notification and (
+            incident.title != title or incident.message != message
+        ):
+            incident.title = title
+            incident.message = message
     elif incident is not None and incident.status != IncidentStatus.RESOLVED.value:
-        old = incident.status
-        incident.status = IncidentStatus.RESOLVED.value
-        incident.resolved_at = now
-        transition = IncidentTransition(
-            incident_id=incident.id,
-            from_status=old,
-            to_status=IncidentStatus.RESOLVED.value,
-            reason="condition recovered",
-        )
-        session.add(transition)
-        await session.flush()
-        await _queue_transition(session, incident, transition, "incident.resolved")
+        await _resolve_incident(session, incident, reason="condition recovered")
 
 
 async def evaluate_account(
@@ -226,6 +303,8 @@ async def evaluate_account(
     quotas: list[QuotaSample],
 ) -> None:
     policy = await policy_for_target(session, account.target_id)
+    if policy is None:
+        return
     if policy.unavailable_enabled:
         await _set_incident(
             session,
@@ -307,6 +386,8 @@ async def evaluate_upstream_rate_change(
         abs_tol=1e-9,
     )
     policy = await policy_for_target(session, account.target_id)
+    if policy is None:
+        return
     await _set_incident(
         session,
         target_id=account.target_id,
@@ -336,6 +417,8 @@ async def evaluate_upstream_probe_health(
     status = snapshot.get("status") if isinstance(snapshot, dict) else None
     error = snapshot.get("last_error") if isinstance(snapshot, dict) else None
     policy = await policy_for_target(session, account.target_id)
+    if policy is None:
+        return
     await _set_incident(
         session,
         target_id=account.target_id,
@@ -358,6 +441,8 @@ async def evaluate_channel(
     session: AsyncSession, target_name: str, channel: ChannelMonitorCurrent
 ) -> None:
     policy = await policy_for_target(session, channel.target_id)
+    if policy is None:
+        return
     if not policy.channel_failure_enabled:
         return
     unhealthy = channel.enabled and channel.primary_status in {"failed", "error"}
@@ -380,10 +465,222 @@ async def evaluate_channel(
     )
 
 
+async def resolve_ttft_incidents_for_policy(
+    session: AsyncSession,
+    policy_id: str,
+    *,
+    reason: str,
+    target_id: str | None = None,
+) -> None:
+    conditions = [
+        Incident.policy_id == policy_id,
+        Incident.rule_key == TTFT_RULE_KEY,
+        Incident.status != IncidentStatus.RESOLVED.value,
+    ]
+    if target_id is not None:
+        conditions.append(Incident.target_id == target_id)
+    incidents = list(
+        await session.scalars(
+            select(Incident).where(*conditions)
+        )
+    )
+    for incident in incidents:
+        await _resolve_incident(
+            session,
+            incident,
+            reason=reason,
+            title=f"{incident.title} (monitoring stopped)",
+            message=(
+                f"TTFT alert closed because {reason}; this does not indicate metric recovery."
+            ),
+        )
+
+
+async def resolve_replaced_effective_ttft_policies(
+    session: AsyncSession,
+    previous_policy_ids: Mapping[str, str | None],
+) -> None:
+    current_policy_ids = await effective_policy_ids_for_targets(
+        session, previous_policy_ids
+    )
+    for target_id, previous_policy_id in previous_policy_ids.items():
+        if (
+            previous_policy_id is None
+            or current_policy_ids[target_id] == previous_policy_id
+        ):
+            continue
+        await resolve_ttft_incidents_for_policy(
+            session,
+            previous_policy_id,
+            target_id=target_id,
+            reason="TTFT policy superseded",
+        )
+
+
+async def _resolve_superseded_ttft_policy_incidents(
+    session: AsyncSession,
+    target_id: str,
+    active_policy_id: str,
+) -> None:
+    incidents = list(
+        await session.scalars(
+            select(Incident).where(
+                Incident.target_id == target_id,
+                Incident.rule_key == TTFT_RULE_KEY,
+                Incident.policy_id != active_policy_id,
+                Incident.status != IncidentStatus.RESOLVED.value,
+            )
+        )
+    )
+    for incident in incidents:
+        await _resolve_incident(
+            session,
+            incident,
+            reason="TTFT policy superseded",
+            message=(
+                "TTFT alert closed because another policy now applies; "
+                "this does not indicate metric recovery."
+            ),
+        )
+
+
+async def _canonicalize_ttft_incident(
+    session: AsyncSession,
+    target_id: str,
+    policy: Policy,
+    *,
+    valid_observation: bool = False,
+) -> None:
+    canonical_fingerprint = incident_fingerprint(
+        target_id,
+        policy.id,
+        "target",
+        target_id,
+        TTFT_RULE_KEY,
+        TTFT_WINDOW_KEY,
+    )
+    canonical = await session.scalar(
+        select(Incident).where(Incident.fingerprint == canonical_fingerprint)
+    )
+    legacy = list(
+        await session.scalars(
+            select(Incident)
+            .where(
+                Incident.target_id == target_id,
+                Incident.policy_id == policy.id,
+                Incident.subject_type == "target",
+                Incident.subject_id == target_id,
+                Incident.rule_key == TTFT_RULE_KEY,
+                Incident.fingerprint != canonical_fingerprint,
+                Incident.status != IncidentStatus.RESOLVED.value,
+            )
+            .order_by(Incident.fired_at.desc(), Incident.id)
+        )
+    )
+    if canonical is None and legacy:
+        canonical = legacy.pop(0)
+        canonical.window_key = TTFT_WINDOW_KEY
+        canonical.fingerprint = canonical_fingerprint
+        await session.flush()
+    if canonical is None or (
+        canonical.status == IncidentStatus.RESOLVED.value and not valid_observation
+    ):
+        # When a canonical historical row already exists, retain any active legacy
+        # incident while the current metric is unknown. A valid observation will
+        # reconcile it without treating missing data as recovery.
+        return
+    for incident in legacy:
+        await _resolve_incident(
+            session,
+            incident,
+            reason="TTFT incident identity superseded",
+            message=(
+                "Legacy TTFT alert closed after a valid observation was evaluated "
+                "using the stable TTFT incident identity."
+            ),
+        )
+
+
+async def evaluate_ttft(
+    session: AsyncSession,
+    target_id: str,
+    target_name: str,
+    overview: dict[str, Any] | None,
+) -> None:
+    locked_target_ids = await lock_ttft_target_rows(session, [target_id])
+    if target_id not in locked_target_ids:
+        return
+    # The session may already contain a policy loaded before a concurrent API
+    # update. Refresh it only after acquiring the target lifecycle lock.
+    policy = await policy_for_target(session, target_id, populate_existing=True)
+    if policy is None:
+        return
+    await _resolve_superseded_ttft_policy_incidents(session, target_id, policy.id)
+    if not policy.ttft_enabled:
+        await resolve_ttft_incidents_for_policy(
+            session,
+            policy.id,
+            reason="TTFT monitoring is disabled",
+        )
+        return
+    await _canonicalize_ttft_incident(session, target_id, policy)
+    if not isinstance(overview, dict):
+        return
+    sample_count = overview.get("ttft_sample_count")
+    ttft = overview.get("ttft")
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, (int, float))
+        or int(sample_count) < policy.ttft_min_samples
+        or not isinstance(ttft, dict)
+    ):
+        return
+    metric_key = f"{policy.ttft_percentile}_ms"
+    value = ttft.get(metric_key)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        return
+    observed_ms = float(value)
+    firing = observed_ms >= policy.ttft_warning_ms
+    if not firing and observed_ms > policy.ttft_recovery_ms:
+        return
+    await _canonicalize_ttft_incident(
+        session,
+        target_id,
+        policy,
+        valid_observation=True,
+    )
+    severity = "critical" if observed_ms >= policy.ttft_critical_ms else "warning"
+    await _set_incident(
+        session,
+        target_id=target_id,
+        policy=policy,
+        subject_id=target_id,
+        subject_type="target",
+        rule_key=TTFT_RULE_KEY,
+        window_key=TTFT_WINDOW_KEY,
+        firing=firing,
+        severity=severity,
+        title=f"[{target_name}] Time to first token is high",
+        message=(
+            f"{policy.ttft_percentile.upper()} time to first token is "
+            f"{observed_ms:g}ms across {int(sample_count)} streaming samples; "
+            f"warning={policy.ttft_warning_ms}ms, critical={policy.ttft_critical_ms}ms"
+        ),
+        update_details_without_notification=True,
+    )
+
+
 async def evaluate_collection_health(
     session: AsyncSession, target_id: str, target_name: str, error: str | None
 ) -> None:
     policy = await policy_for_target(session, target_id)
+    if policy is None:
+        return
     if not policy.collection_failure_enabled:
         return
     await _set_incident(
@@ -408,6 +705,8 @@ async def evaluate_cost_routing_run(
     error: str | None,
 ) -> None:
     policy = await policy_for_target(session, target_id)
+    if policy is None:
+        return
     await _set_incident(
         session,
         target_id=target_id,
@@ -440,6 +739,8 @@ async def evaluate_routing_action(
     detail: str | None = None,
 ) -> None:
     policy = await policy_for_target(session, target_id)
+    if policy is None:
+        return
     if error is not None:
         rule_key = "cost_routing.priority_update_failed"
         title = f"[{target_name}] Routing priority update failed"
@@ -495,6 +796,8 @@ async def evaluate_native_alerts(
     complete: bool,
 ) -> None:
     policy = await policy_for_target(session, target_id)
+    if policy is None:
+        return
     if not policy.native_alerts_enabled:
         return
     seen: set[str] = set()

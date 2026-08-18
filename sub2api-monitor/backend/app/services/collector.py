@@ -30,6 +30,7 @@ from app.services.policies import (
     evaluate_channel,
     evaluate_collection_health,
     evaluate_native_alerts,
+    evaluate_ttft,
     evaluate_upstream_rate_change,
     upstream_rate_multiplier,
 )
@@ -90,6 +91,11 @@ async def collect_run(
                 )
                 native_alerts = []
                 native_alerts_complete = False
+            try:
+                ttft_fact, ttft_overview = await connector.ttft_overview("5m")
+            except Exception as exc:
+                ttft_fact = ProbeFact("unknown", "unavailable", "missing", _safe_error(exc))
+                ttft_overview = None
             if accounts_fact.runtime_state == "healthy":
                 (
                     passive_results,
@@ -132,6 +138,13 @@ async def collect_run(
         await apply_probe_fact(session, target.id, "channels.monitor", channel_fact, now)
         await apply_probe_fact(
             session, target.id, "ops.alert_events", native_alert_fact, now
+        )
+        await apply_probe_fact(session, target.id, "ops.ttft", ttft_fact, now)
+        await evaluate_ttft(
+            session,
+            target.id,
+            target.name,
+            ttft_overview if ttft_fact.runtime_state == "healthy" else None,
         )
         if native_alert_fact.runtime_state == "healthy":
             await evaluate_native_alerts(

@@ -1,10 +1,10 @@
 # Sub2API Monitor
 
-Independent monitoring center for multiple Sub2API deployments. It observes account availability and quota, evaluates alert policies, and delivers notifications through ntfy without changing monitored Sub2API source code.
+Independent monitoring center for multiple Sub2API deployments. It observes account availability, quota, cost routing, and first-token latency, evaluates alert policies, and delivers notifications through ntfy, Telegram, or signed Webhooks.
 
 ## Project Status
 
-Phase 1 and the current Phase 2 slices are complete. The runnable system supports multiple API-only or API+read-only-DB targets, account availability, passive and explicitly opted-in active quota observations, upstream billing-rate discovery, channel uptime monitoring, alert incidents, durable ntfy delivery, and an operations UI. The current source of truth is [docs/STATUS.md](docs/STATUS.md).
+Phase 1 and the current Phase 2 slices are complete. The runnable system supports multiple API-only or API+read-only-DB targets, account availability, passive and explicitly opted-in active quota observations, upstream billing-rate discovery, cost routing, channel uptime and TTFT monitoring, alert incidents, durable multi-channel delivery, and an operations UI. The current source of truth is [docs/STATUS.md](docs/STATUS.md).
 
 ## Stack
 
@@ -12,7 +12,7 @@ Phase 1 and the current Phase 2 slices are complete. The runnable system support
 - Frontend: React, TypeScript, Vite, TanStack Query, TanStack Table, React Router
 - State: dedicated PostgreSQL owned by this project
 - Delivery: Docker images and Docker Compose
-- Notifications: ntfy JSON publish API with durable retry outbox
+- Notifications: ntfy, Telegram Bot API, and signed Webhooks with a durable retry outbox
 
 ## Quick Start
 
@@ -105,7 +105,7 @@ Active usage may make Sub2API contact the upstream provider, refresh a token, up
 
 The **Upstream rates** page aggregates each account's configured cost multiplier and the target's `upstream_billing_probe` snapshot. It preserves the declared effective/resolved multiplier, peak multiplier, attempt time, freshness deadline, next probe time, failure reason, and whether automatic probing or rate synchronization is enabled. Operators can update the target-wide automatic-probe interval, toggle probing per account, and run an immediate probe. A changed resolved multiplier for an enabled OpenAI API-key account creates an `upstream.rate_multiplier.changed` incident and enters the existing ntfy outbox workflow. Immediate probes may contact the account's upstream Sub2API deployment and are audited.
 
-The same page exposes an independent cost-routing controller for OpenAI API-key accounts. Its fixed 30-second cycle and 25-second hard run budget calculate lower numeric priorities for lower effective multipliers, demote unavailable or probe-failed accounts, and can bind accounts to OpenAI channel monitors so missing, stale, disabled, or unhealthy service checks fail closed. Recommendation mode records deduplicated decisions without writing upstream; execute mode rechecks policy state before each priority-only update. Disabling the policy or switching mode cancels pending writes. Distinct multiplier and routing-condition changes notify again, and routing decisions are retained for 30 days by default. Each run also reads a bounded recent-usage projection containing only usage ID, session ID, account identity, and timestamp. The first observation establishes a baseline; a later account change in the same session emits a deduplicated `routing.account_switched` event through the durable notification outbox without storing prompts, response bodies, or credentials.
+The same page exposes an independent cost-routing controller for OpenAI API-key accounts. Its fixed 30-second cycle and 25-second hard run budget calculate lower numeric priorities for lower effective multipliers, demote unavailable or probe-failed accounts, and can bind accounts to OpenAI channel monitors so missing, stale, disabled, or unhealthy service checks fail closed. Selected fallback accounts retain a captured baseline priority when only their multiplier is high or their billing probe fails; unavailable accounts and failed quality bindings still fail closed. Recommendation mode records deduplicated decisions without writing upstream; execute mode rechecks policy state before each priority-only update. Disabling the policy or switching mode cancels pending writes. A multiplier drop immediately restores the lower priority and emits `routing.rate_recovered`. This affects new or reselected sessions; the monitor does not clear Sub2API's existing sticky-session cache. Each run also reads a bounded recent-usage projection containing only usage ID, session ID, account identity, and timestamp. The first observation establishes a baseline; a later account change in the same session emits a deduplicated `routing.account_switched` event through the durable notification outbox without storing prompts, response bodies, or credentials.
 
 ### Channel monitoring
 
@@ -113,7 +113,7 @@ The **Channel monitors** page aggregates target-owned OpenAI, Anthropic, Gemini,
 
 ### Native operations monitoring
 
-The **Operations** page aggregates the monitored target's existing read-only Ops APIs. Its overview, capacity, request/error, and system views cover dashboard trends, QPS/TPS, latency distribution, OpenAI token statistics, platform and user concurrency, account availability, group inventory/usage/capacity, request and upstream errors, request details, alert events, background jobs, system logs, auth-cache health, ingress health, and log-pipeline health. The connector calls only a fixed endpoint allowlist with bounded page sizes and recursively removes credentials, tokens, headers, passwords, and request bodies before returning data to the monitor UI.
+The **Operations** page aggregates the monitored target's existing read-only Ops APIs. Its overview includes exact streaming TTFT sample counts and configurable first-token percentile alerts. The default policy evaluates five-minute P95 after at least five samples, warns at 3000 ms, escalates at 6000 ms, and resolves below 2500 ms. Capacity, request/error, and system views cover dashboard trends, QPS/TPS, latency distribution, OpenAI token statistics, platform and user concurrency, account availability, group inventory/usage/capacity, request and upstream errors, request details, alert events, background jobs, system logs, auth-cache health, ingress health, and log-pipeline health. The connector calls only a fixed endpoint allowlist with bounded page sizes and recursively removes credentials, tokens, headers, passwords, and request bodies before returning data to the monitor UI.
 
 ### Account usage analytics
 
@@ -121,9 +121,11 @@ The **Accounts** page shows each account's configured multiplier and group membe
 
 ### Fault discovery and event subscriptions
 
-Scheduled collection failures and the target's firing native Ops alerts enter the same deduplicated incident lifecycle as account, quota, rate, and channel faults. Subscriptions can be global or target-scoped, filter firing/escalated/resolved events and severity, and deliver through ntfy or Webhook. Webhooks support encrypted Bearer credentials and optional HMAC-SHA256 signatures while retaining the durable outbox, retry, and delivery history.
+Scheduled collection failures and the target's firing native Ops alerts enter the same deduplicated incident lifecycle as account, quota, rate, TTFT, and channel faults. Subscriptions can be global or target-scoped, filter incident and routing events by severity, and deliver through ntfy, Telegram, or Webhook. Telegram Bot Tokens, Webhook Bearer credentials, and optional HMAC-SHA256 secrets are encrypted at rest while retaining the durable outbox, retry, and delivery history. Telegram tokens are inserted below the normal HTTP request logging layer so they are not exposed in request URLs.
 
-Notification destinations are revalidated and DNS-pinned on every delivery. Private notification endpoints are blocked by default even when private Sub2API targets are enabled; set `MONITOR_ALLOW_PRIVATE_NOTIFICATION_TARGETS=true` only for explicitly trusted internal ntfy or Webhook endpoints.
+Notification destinations are revalidated and DNS-pinned on every delivery. Private notification endpoints are blocked by default even when private Sub2API targets are enabled; set `MONITOR_ALLOW_PRIVATE_NOTIFICATION_TARGETS=true` only for explicitly trusted internal endpoints. Telegram uses `https://api.telegram.org` by default and fails closed for every other host. A trusted HTTPS Bot API proxy must be explicitly listed in the JSON array `MONITOR_TELEGRAM_API_ALLOWED_HOSTS`; changing a channel type or URL authority clears its stored credentials, so the new token must be entered in the same update.
+
+The notification outbox uses short database claims with expiring leases. Network delivery happens after row locks are released, is limited by `MONITOR_NOTIFICATION_DISPATCH_CONCURRENCY`, and is retried after an interrupted worker lets its claim expire. `MONITOR_NOTIFICATION_CLAIM_SECONDS` controls the lease duration. Delivery is at-least-once if a worker stops after the remote service accepts a request but before the result is persisted; Webhook consumers should deduplicate with `X-Sub2API-Monitor-Delivery`.
 
 ### Bounded account recovery automation
 

@@ -414,6 +414,41 @@ async def test_monitoring_snapshot_covers_ops_groups_and_redacts_secrets(
 
 
 @pytest.mark.asyncio
+async def test_ttft_overview_preserves_exact_streaming_sample_count(
+    settings_dict: dict[str, object],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/admin/ops/dashboard/snapshot-v2"
+        assert request.url.params["time_range"] == "5m"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "overview": {
+                        "ttft_sample_count": 12,
+                        "ttft": {"p95_ms": 1450},
+                        "access_token": "must-not-survive",
+                    }
+                },
+            },
+        )
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        fact, overview = await connector.ttft_overview()
+
+    assert fact.runtime_state == "healthy"
+    assert overview == {"ttft_sample_count": 12, "ttft": {"p95_ms": 1450}}
+
+
+@pytest.mark.asyncio
 async def test_account_usage_stats_is_bounded_sanitized_and_encoded(
     settings_dict: dict[str, object],
 ) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
@@ -38,6 +39,7 @@ from app.models import (
     WorkerHeartbeat,
 )
 from app.schemas import (
+    TELEGRAM_TOKEN_PATTERN,
     AccountActionRequest,
     AccountCursorPage,
     AccountResponse,
@@ -92,9 +94,14 @@ from app.services.monitoring import (
     target_connector,
     upsert_channel_monitor,
 )
+from app.services.notifier import validate_telegram_server_url
 from app.services.policies import (
+    effective_policy_ids_for_targets,
     evaluate_channel,
     evaluate_upstream_rate_change,
+    lock_ttft_target_rows,
+    resolve_replaced_effective_ttft_policies,
+    resolve_ttft_incidents_for_policy,
     upstream_rate_multiplier,
 )
 from app.services.targets import (
@@ -255,7 +262,19 @@ async def delete_target_route(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    target = await required_target(session, target_id)
+    target = await session.scalar(
+        select(Target).where(Target.id == target_id).with_for_update()
+    )
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+    # Keep the lifecycle lock order consistent with policy updates. PostgreSQL
+    # applies the same Policy locks later for the target's ON DELETE cascade.
+    await session.scalars(
+        select(Policy.id)
+        .where(Policy.target_id == target_id)
+        .order_by(Policy.id)
+        .with_for_update()
+    )
     session.add(AuditEvent(actor=user.username, action="target.delete", target_id=target.id))
     await session.flush()
     await session.delete(target)
@@ -609,13 +628,17 @@ async def update_cost_routing_policy(
     session: AsyncSession = Depends(get_session),
 ) -> CostRoutingPolicy:
     await required_target(session, target_id)
-    if payload.quality_bindings:
-        bound_account_ids = set(payload.quality_bindings)
+    referenced_account_ids = set(payload.quality_bindings) | set(payload.fallback_account_ids)
+    accounts: list[AccountCurrent] = []
+    unknown_quality_accounts: list[str] = []
+    unknown_fallback_accounts: list[str] = []
+    unknown_monitors: list[str] = []
+    if referenced_account_ids:
         accounts = list(
             await session.scalars(
                 select(AccountCurrent).where(
                     AccountCurrent.target_id == target_id,
-                    AccountCurrent.external_account_id.in_(bound_account_ids),
+                    AccountCurrent.external_account_id.in_(referenced_account_ids),
                 )
             )
         )
@@ -625,7 +648,11 @@ async def update_cost_routing_policy(
             if account.platform.casefold() == "openai"
             and account.account_type.casefold() == "apikey"
         }
-        unknown_accounts = sorted(bound_account_ids - eligible_account_ids)
+        unknown_quality_accounts = sorted(set(payload.quality_bindings) - eligible_account_ids)
+        unknown_fallback_accounts = sorted(
+            set(payload.fallback_account_ids) - eligible_account_ids
+        )
+    if payload.quality_bindings:
         bound_monitor_ids = {
             monitor_id
             for monitor_ids in payload.quality_bindings.values()
@@ -645,26 +672,44 @@ async def update_cost_routing_policy(
             if monitor.provider.casefold() == "openai"
         }
         unknown_monitors = sorted(bound_monitor_ids - eligible_monitor_ids)
-        if unknown_accounts or unknown_monitors:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                {
-                    "message": (
-                        "quality bindings must reference this target's OpenAI API-key "
-                        "accounts and OpenAI channel monitors"
-                    ),
-                    "account_ids": unknown_accounts,
-                    "monitor_ids": unknown_monitors,
-                },
-            )
+    if unknown_quality_accounts or unknown_fallback_accounts or unknown_monitors:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {
+                "message": (
+                    "routing controls must reference this target's OpenAI API-key "
+                    "accounts and OpenAI channel monitors"
+                ),
+                "account_ids": unknown_quality_accounts,
+                "fallback_account_ids": unknown_fallback_accounts,
+                "monitor_ids": unknown_monitors,
+            },
+        )
     policy = await session.scalar(
         select(CostRoutingPolicy).where(CostRoutingPolicy.target_id == target_id)
     )
     if policy is None:
         policy = CostRoutingPolicy(target_id=target_id)
         session.add(policy)
+    existing_fallback_priorities = policy.fallback_priorities or {}
+    account_by_id = {account.external_account_id: account for account in accounts}
+    fallback_priorities: dict[str, int] = {}
+    for account_id in payload.fallback_account_ids:
+        existing_priority = existing_fallback_priorities.get(account_id)
+        baseline: int | None
+        if isinstance(existing_priority, int) and not isinstance(existing_priority, bool):
+            baseline = existing_priority
+        else:
+            baseline = account_by_id[account_id].priority
+            if baseline is None:
+                baseline = payload.minimum_priority
+        fallback_priorities[account_id] = max(
+            payload.minimum_priority,
+            min(int(baseline), payload.unhealthy_priority - 1),
+        )
     for key, value in payload.model_dump(exclude={"confirm_side_effects"}).items():
         setattr(policy, key, value)
+    policy.fallback_priorities = fallback_priorities
     policy.next_run_at = datetime.now(timezone.utc) if policy.enabled else None
     session.add(
         AuditEvent(
@@ -678,6 +723,8 @@ async def update_cost_routing_policy(
                 "priority_scale": policy.priority_scale,
                 "unhealthy_priority": policy.unhealthy_priority,
                 "minimum_priority": policy.minimum_priority,
+                "fallback_account_ids": policy.fallback_account_ids,
+                "fallback_priorities": policy.fallback_priorities,
             },
         )
     )
@@ -1116,8 +1163,21 @@ async def create_policy(
 ) -> Policy:
     if payload.target_id and await session.get(Target, payload.target_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+    affected_target_ids = (
+        {payload.target_id}
+        if payload.target_id is not None
+        else set(await session.scalars(select(Target.id)))
+    )
+    locked_target_ids = await lock_ttft_target_rows(session, affected_target_ids)
+    if payload.target_id is not None and payload.target_id not in locked_target_ids:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+    previous_policy_ids = await effective_policy_ids_for_targets(
+        session, affected_target_ids
+    )
     policy = Policy(**payload.model_dump())
     session.add(policy)
+    await session.flush()
+    await resolve_replaced_effective_ttft_policies(session, previous_policy_ids)
     session.add(
         AuditEvent(actor=user.username, action="policy.create", target_id=payload.target_id)
     )
@@ -1140,14 +1200,59 @@ async def update_policy_route(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Policy:
-    policy = await session.get(Policy, policy_id)
-    if policy is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "policy not found")
-    if payload.target_id and await session.get(Target, payload.target_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+    actor = user.username
+    while True:
+        policy_snapshot = await session.scalar(
+            select(Policy)
+            .where(Policy.id == policy_id)
+            .execution_options(populate_existing=True)
+        )
+        if policy_snapshot is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "policy not found")
+        snapshot_target_id = policy_snapshot.target_id
+        if snapshot_target_id is None or payload.target_id is None:
+            affected_target_ids = set(await session.scalars(select(Target.id)))
+        else:
+            affected_target_ids = {snapshot_target_id, payload.target_id}
+        locked_target_ids = await lock_ttft_target_rows(session, affected_target_ids)
+        if payload.target_id is not None and payload.target_id not in locked_target_ids:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+        policy = await session.scalar(
+            select(Policy)
+            .where(Policy.id == policy_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if policy is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "policy not found")
+        if policy.target_id == snapshot_target_id:
+            break
+        # The binding changed while target locks were being acquired. Release
+        # them and recompute the complete target-first lock set.
+        await session.rollback()
+
+    previous_target_id = policy.target_id
+    previous_enabled = policy.enabled
+    previous_ttft_enabled = policy.ttft_enabled
+    previous_policy_ids = await effective_policy_ids_for_targets(
+        session, affected_target_ids
+    )
     for key, value in payload.model_dump().items():
         setattr(policy, key, value)
-    session.add(AuditEvent(actor=user.username, action="policy.update", target_id=policy.target_id))
+    await session.flush()
+    if (
+        (previous_enabled and not policy.enabled)
+        or (previous_ttft_enabled and not policy.ttft_enabled)
+        or previous_target_id != policy.target_id
+    ):
+        reason = (
+            "TTFT policy target changed"
+            if previous_target_id != policy.target_id
+            else "TTFT monitoring is disabled"
+        )
+        await resolve_ttft_incidents_for_policy(session, policy.id, reason=reason)
+    await resolve_replaced_effective_ttft_policies(session, previous_policy_ids)
+    session.add(AuditEvent(actor=actor, action="policy.update", target_id=policy.target_id))
     await session.commit()
     await session.refresh(policy)
     return policy
@@ -1329,6 +1434,12 @@ async def create_channel(
     settings: Settings = Depends(get_settings),
 ) -> ChannelResponse:
     await validate_notification_url(str(payload.server_url), settings)
+    validate_telegram_channel(
+        payload.kind,
+        str(payload.server_url),
+        bool(payload.token),
+        settings,
+    )
     if payload.target_id and await session.get(Target, payload.target_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
     channel = NotificationChannel(
@@ -1373,13 +1484,66 @@ async def update_channel(
     cipher: SecretCipher = Depends(get_cipher),
     settings: Settings = Depends(get_settings),
 ) -> ChannelResponse:
-    channel = await session.get(NotificationChannel, channel_id)
-    if channel is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "channel not found")
-    if payload.target_id and await session.get(Target, payload.target_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+    actor = user.username
+    requested_server_url = (
+        str(payload.server_url) if payload.server_url is not None else None
+    )
+    notification_url_validated = False
+    while True:
+        channel_snapshot = await session.scalar(
+            select(NotificationChannel)
+            .where(NotificationChannel.id == channel_id)
+            .execution_options(populate_existing=True)
+        )
+        if channel_snapshot is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "channel not found")
+        if requested_server_url is not None and not notification_url_validated:
+            await validate_notification_url(requested_server_url, settings)
+            notification_url_validated = True
+        snapshot_target_id = channel_snapshot.target_id
+        affected_target_ids = {
+            target_id
+            for target_id in (snapshot_target_id, payload.target_id)
+            if target_id is not None
+        }
+        locked_target_ids = await lock_ttft_target_rows(session, affected_target_ids)
+        if payload.target_id is not None and payload.target_id not in locked_target_ids:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
+        channel = await session.scalar(
+            select(NotificationChannel)
+            .where(NotificationChannel.id == channel_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if channel is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "channel not found")
+        if channel.target_id == snapshot_target_id:
+            break
+        await session.rollback()
+
+    new_kind = payload.kind if payload.kind is not None else channel.kind
+    new_server_url = (
+        requested_server_url if requested_server_url is not None else channel.server_url
+    )
+    credential_boundary_changed = (
+        new_kind != channel.kind
+        or notification_authority(new_server_url) != notification_authority(channel.server_url)
+    )
+    token_was_submitted = "token" in payload.model_fields_set
+    effective_token_configured = (
+        bool(payload.token)
+        if token_was_submitted
+        else bool(channel.token_ciphertext) and not credential_boundary_changed
+    )
+    validate_telegram_channel(
+        new_kind,
+        new_server_url,
+        effective_token_configured,
+        settings,
+    )
     values = payload.model_dump(
-        exclude_unset=True, exclude={"server_url", "token", "signing_secret"}
+        exclude_unset=True,
+        exclude={"kind", "server_url", "token", "signing_secret"},
     )
     if values.get("event_types") is not None:
         values["event_types"] = list(dict.fromkeys(values["event_types"]))
@@ -1387,16 +1551,32 @@ async def update_channel(
         values["severities"] = list(dict.fromkeys(values["severities"]))
     for key, value in values.items():
         setattr(channel, key, value)
-    if channel.kind == "ntfy" and not channel.topic:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "topic is required for ntfy")
-    if channel.kind == "ntfy":
-        channel.signing_secret_ciphertext = None
-    if payload.server_url is not None:
-        await validate_notification_url(str(payload.server_url), settings)
-        channel.server_url = str(payload.server_url)
-    if "token" in payload.model_fields_set:
+    channel.kind = new_kind
+    if channel.kind in {"ntfy", "telegram"} and not channel.topic:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "topic is required for ntfy and Telegram channels",
+        )
+    channel.server_url = new_server_url
+    if credential_boundary_changed and not token_was_submitted:
+        channel.token_ciphertext = None
+    if token_was_submitted:
+        if (
+            channel.kind == "telegram"
+            and payload.token
+            and not TELEGRAM_TOKEN_PATTERN.fullmatch(payload.token)
+        ):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "invalid Telegram bot token",
+            )
         channel.token_ciphertext = cipher.encrypt_text(payload.token) if payload.token else None
-    if "signing_secret" in payload.model_fields_set:
+    signing_secret_was_submitted = "signing_secret" in payload.model_fields_set
+    if channel.kind != "webhook":
+        channel.signing_secret_ciphertext = None
+    elif credential_boundary_changed and not signing_secret_was_submitted:
+        channel.signing_secret_ciphertext = None
+    if signing_secret_was_submitted:
         if channel.kind != "webhook" and payload.signing_secret:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1406,7 +1586,7 @@ async def update_channel(
             cipher.encrypt_text(payload.signing_secret) if payload.signing_secret else None
         )
     session.add(
-        AuditEvent(actor=user.username, action="notification.update", target_id=channel.target_id)
+        AuditEvent(actor=actor, action="notification.update", target_id=channel.target_id)
     )
     await session.commit()
     await session.refresh(channel)
@@ -1512,13 +1692,20 @@ async def system_status(
     )
     now = datetime.now(timezone.utc)
     heartbeat_at = _aware(heartbeat.last_seen_at) if heartbeat else None
-    stale = heartbeat_at is None or heartbeat_at < now - timedelta(
+    stalled_loops = (
+        list(heartbeat.details.get("critical_loop_stalled") or []) if heartbeat else []
+    )
+    stale = bool(stalled_loops) or heartbeat_at is None or heartbeat_at < now - timedelta(
         seconds=settings.worker_stale_seconds
     )
     pending = await session.scalar(
         select(func.count())
         .select_from(NotificationOutbox)
-        .where(NotificationOutbox.status == OutboxStatus.PENDING.value)
+        .where(
+            NotificationOutbox.status.in_(
+                [OutboxStatus.PENDING.value, OutboxStatus.DELIVERING.value]
+            )
+        )
     )
     failed_since = now - timedelta(hours=24)
     failed = await session.scalar(
@@ -1534,6 +1721,7 @@ async def system_status(
         ready=not stale,
         worker_last_seen_at=heartbeat_at,
         worker_stale=stale,
+        worker_stalled_loops=stalled_loops,
         pending_outbox=int(pending or 0),
         failed_runs_24h=int(failed or 0),
     )
@@ -1653,6 +1841,35 @@ async def validate_notification_url(url: str, settings: Settings) -> None:
         await validate_target_url(url, allow_private=settings.allow_private_notification_targets)
     except ConnectorError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
+def validate_telegram_channel(
+    kind: str,
+    server_url: str,
+    token_configured: bool,
+    settings: Settings,
+) -> None:
+    if kind != "telegram":
+        return
+    if not token_configured:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "token is required for Telegram channels",
+        )
+    try:
+        validate_telegram_server_url(server_url, settings.telegram_api_allowed_hosts)
+    except ConnectorError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Telegram server_url must be an HTTPS base URL on the trusted host allowlist",
+        ) from exc
+
+
+def notification_authority(url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.casefold()
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return scheme, (parsed.hostname or "").rstrip(".").casefold(), parsed.port or default_port
 
 
 async def _target_connector_or_404(

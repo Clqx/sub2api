@@ -31,6 +31,7 @@ export function RatesPage() {
   const [unhealthyPriority, setUnhealthyPriority] = useState(100000);
   const [minimumPriority, setMinimumPriority] = useState(1);
   const [qualityBindings, setQualityBindings] = useState<Record<string, string[]>>({});
+  const [fallbackAccountIds, setFallbackAccountIds] = useState<string[]>([]);
 
   useEffect(() => {
     if (!targetId && targets.data?.items.length)
@@ -74,6 +75,7 @@ export function RatesPage() {
       setUnhealthyPriority(routingPolicy.data.unhealthy_priority);
       setMinimumPriority(routingPolicy.data.minimum_priority);
       setQualityBindings(routingPolicy.data.quality_bindings ?? {});
+      setFallbackAccountIds(routingPolicy.data.fallback_account_ids ?? []);
     }
   }, [routingPolicy.data]);
 
@@ -113,6 +115,7 @@ export function RatesPage() {
         unhealthy_priority: unhealthyPriority,
         minimum_priority: minimumPriority,
         quality_bindings: qualityBindings,
+        fallback_account_ids: fallbackAccountIds,
         confirm_side_effects: confirmSideEffects,
       }),
     onSuccess: (data) => {
@@ -286,6 +289,12 @@ export function RatesPage() {
               </button>
             </div>
             <RoutingSummary policy={routingPolicy.data} />
+            <FallbackAccounts
+              accounts={rows}
+              selected={fallbackAccountIds}
+              baselines={routingPolicy.data?.fallback_priorities ?? {}}
+              onChange={setFallbackAccountIds}
+            />
             {qualityMonitors.isError ? (
               <ErrorState error={qualityMonitors.error} />
             ) : (
@@ -538,6 +547,62 @@ function QualityBindings({
   );
 }
 
+function FallbackAccounts({
+  accounts,
+  selected,
+  baselines,
+  onChange,
+}: {
+  accounts: Account[];
+  selected: string[];
+  baselines: Record<string, number>;
+  onChange: (value: string[]) => void;
+}) {
+  if (!accounts.length) return null;
+  const selectedSet = new Set(selected);
+  return (
+    <div className="quality-bindings fallback-accounts">
+      <h3>兜底账号</h3>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>账号</th>
+              <th>基线优先级</th>
+              <th>不按倍率抑制</th>
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.map((account) => {
+              const accountId = account.external_account_id;
+              return (
+                <tr key={account.id}>
+                  <td><strong>{account.name}</strong></td>
+                  <td className="numeric-value">
+                    {formatPriority(baselines[accountId] ?? account.priority)}
+                  </td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      aria-label={`${account.name} 设为兜底账号`}
+                      checked={selectedSet.has(accountId)}
+                      onChange={(event) => onChange(
+                        event.target.checked
+                          ? [...selected, accountId]
+                          : selected.filter((item) => item !== accountId),
+                      )}
+                    />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function RateRow({
   account,
   selected,
@@ -710,6 +775,7 @@ function reasonLabel(reason: RoutingDecision["reason"]) {
   return {
     cost_increase: "倍率上升",
     cost_decrease: "倍率下降",
+    fallback_protected: "兜底保护",
     cost_discovered: "发现倍率",
     unavailable: "服务不可用",
     probe_failed: "倍率探测失败",

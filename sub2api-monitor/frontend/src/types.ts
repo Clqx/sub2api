@@ -78,6 +78,8 @@ export interface CostRoutingPolicy {
   unhealthy_priority:number
   minimum_priority:number
   quality_bindings:Record<string,string[]>
+  fallback_account_ids?:string[]
+  fallback_priorities?:Record<string,number>
   last_run_at?:string|null
   next_run_at?:string|null
   last_error?:string|null
@@ -96,7 +98,7 @@ export interface RoutingDecision {
   observed_multiplier?:number|null
   previous_priority?:number|null
   desired_priority:number
-  reason:'cost_increase'|'cost_decrease'|'cost_discovered'|'unavailable'|'probe_failed'|'quality_failed'|'recovery'|'priority_reconcile'|'in_sync'
+  reason:'cost_increase'|'cost_decrease'|'cost_discovered'|'unavailable'|'probe_failed'|'quality_failed'|'fallback_protected'|'recovery'|'priority_reconcile'|'in_sync'
   mode:'recommend'|'execute'
   status:'recommended'|'running'|'succeeded'|'failed'|'cancelled'
   result:Record<string,unknown>
@@ -116,6 +118,28 @@ export interface Incident {
   summary: string
   started_at: string
   updated_at: string
+}
+
+export interface AlertPolicy {
+  id:string
+  target_id?:string|null
+  name:string
+  enabled:boolean
+  unavailable_enabled:boolean
+  channel_failure_enabled:boolean
+  native_alerts_enabled:boolean
+  collection_failure_enabled:boolean
+  ttft_enabled:boolean
+  ttft_percentile:'p50'|'p90'|'p95'|'p99'|'avg'|'max'
+  ttft_min_samples:number
+  ttft_warning_ms:number
+  ttft_critical_ms:number
+  ttft_recovery_ms:number
+  quota_warning_remaining:number
+  quota_critical_remaining:number
+  quota_recovery_remaining:number
+  created_at:string
+  updated_at:string
 }
 
 export interface Dashboard {
@@ -270,11 +294,11 @@ export interface NotificationChannel {
   id: string
   target_id?: string | null
   name: string
-  kind: 'ntfy' | 'webhook'
+  kind: 'ntfy' | 'telegram' | 'webhook'
   server_url: string
   topic: string
   enabled: boolean
-  event_types: Array<'incident.firing' | 'incident.escalated' | 'incident.resolved' | 'routing.account_switched'>
+  event_types: Array<'incident.firing' | 'incident.escalated' | 'incident.resolved' | 'routing.account_switched' | 'routing.rate_recovered'>
   severities: Array<'info' | 'warning' | 'critical'>
   token_configured: boolean
   signing_secret_configured: boolean
@@ -285,7 +309,7 @@ export interface OutboxItem {
   id: string
   channel_id: string
   channel_name?: string | null
-  channel_kind?: 'ntfy' | 'webhook' | null
+  channel_kind?: 'ntfy' | 'telegram' | 'webhook' | null
   status: 'pending' | 'sent' | 'dead'
   attempts: number
   last_error?: string | null
@@ -332,6 +356,7 @@ export interface SystemStatus {
   ready: boolean
   worker_last_seen_at?: string | null
   worker_stale: boolean
+  worker_stalled_loops: string[]
   pending_outbox: number
   failed_runs_24h: number
 }
@@ -362,6 +387,7 @@ export interface OpsOverview {
   tps:OpsRateSummary
   duration:OpsPercentiles
   ttft:OpsPercentiles
+  ttft_sample_count?:number
   system_metrics?:Record<string,unknown>|null
   job_heartbeats?:Array<Record<string,unknown>>|null
 }

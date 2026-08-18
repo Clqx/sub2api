@@ -6,8 +6,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.router import system_status
 from app.config import Settings
-from app.models import CollectionRun, RunStatus, Target
+from app.models import CollectionRun, RunStatus, Target, User, WorkerHeartbeat
 from app.worker import Worker
 
 
@@ -77,3 +78,31 @@ async def test_worker_schedules_ready_api_only_and_full_targets(
         ("api-target", "scheduled"),
         ("full-target", "scheduled"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_reports_stalled_critical_loop(
+    db_session: AsyncSession,
+    settings_dict: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    monkeypatch.setattr("app.worker.SessionFactory", factory)
+    worker = Worker(Settings(**settings_dict, worker_stale_seconds=10))
+    worker._critical_loop_started_at["cost_routing"] = datetime.now(timezone.utc) - timedelta(
+        seconds=11
+    )
+
+    await worker._heartbeat()
+
+    heartbeat = await db_session.get(WorkerHeartbeat, worker.worker_id)
+    assert heartbeat is not None
+    assert heartbeat.details["critical_loop_stalled"] == ["cost_routing"]
+    status = await system_status(
+        User(username="admin", password_hash="unused"),
+        db_session,
+        worker.settings,
+    )
+    assert status.ready is False
+    assert status.worker_stale is True
+    assert status.worker_stalled_loops == ["cost_routing"]
