@@ -250,7 +250,8 @@ type SendEmailBindingCodeRequest struct {
 // StartIdentityBinding returns the backend authorize URL for starting a third-party identity bind flow.
 // POST /api/v1/user/auth-identities/bind/start
 func (h *UserHandler) StartIdentityBinding(c *gin.Context) {
-	if _, ok := middleware2.GetAuthSubjectFromContext(c); !ok {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
@@ -262,6 +263,7 @@ func (h *UserHandler) StartIdentityBinding(c *gin.Context) {
 	}
 
 	result, err := h.userService.PrepareIdentityBindingStart(c.Request.Context(), service.StartUserIdentityBindingRequest{
+		UserID:     subject.UserID,
 		Provider:   req.Provider,
 		RedirectTo: req.RedirectTo,
 	})

@@ -1,0 +1,568 @@
+openapi: 3.1.0
+info:
+  title: Sub2API Trusted Pools 资源执行接口
+  version: 0.1.0
+  description: |
+    与 Sub2API 当前 trusted-pools 路由一致的受限集成契约。Bearer 模式必须同时发送 Client ID；
+    HMAC 模式必须使用与 Bearer 凭据独立的密钥，对 method、RequestURI、timestamp、nonce 和
+    SHA-256 body hash 的规范串签名。
+    这些接口不接受通用 Admin API Key。
+x-implementation-status: implemented-in-sub2api
+servers:
+  - url: http://localhost:8080/api/v1/integrations/trusted-pools
+security:
+  - integrationClientID: []
+    integrationBearer: []
+  - integrationClientID: []
+    hmacTimestamp: []
+    hmacNonce: []
+    hmacSignature: []
+paths:
+  /seats/register:
+    post:
+      operationId: registerSeat
+      summary: 注册已经配置好的 Seat Principal 资源映射
+      description: 当前接口登记映射，不负责创建 User、Group、Subscription 或 API Key。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegisterSeatRequest'}
+      responses:
+        '201':
+          description: 注册成功或返回相同幂等结果
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SeatEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /seats/provision:
+    post:
+      operationId: provisionSeat
+      summary: 在既有独占订阅 Group 中原子开通 Seat 资源
+      x-required-scope: seat:provision
+      description: |
+        仅接受管理员预先准备的 existing_group_id，不创建或修改 Group，也不接受调用方指定
+        User、Subscription 或 API Key ID。Sub2API 在单一事务中校验 Group 为
+        active + subscription + exclusive 且未被普通用户资源占用，然后创建不可交互登录
+        Principal、Subscription、API Key、Seat mapping 和幂等历史。
+        在 Seat 尚未发生后续暂停、冻结或轮换前，相同认证客户端、operation_id 和规范化请求重放返回
+        原 Seat 与同一 credential；内容漂移或生命周期已推进时返回 409，避免泄露轮换后的当前 Key。
+        Idempotency-Key 与 body.operation_id 同时提供时必须完全相同。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProvisionSeatRequest'}
+      responses:
+        '201':
+          description: 首次开通成功或精确幂等重放成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProvisionSeatEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /seats/{seatId}/suspend:
+    post:
+      operationId: suspendSeat
+      summary: 立即阻止新请求并进入排空
+      parameters:
+        - $ref: '#/components/parameters/SeatId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OperationRequest'}
+      responses:
+        '202':
+          description: Seat 已进入 draining；需继续查询并显式 freeze
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SeatEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /seats/{seatId}/drain-status:
+    get:
+      operationId: getDrainStatus
+      summary: 查询 Seat 状态、实时 API Key 并发和持久结算屏障
+      parameters:
+        - $ref: '#/components/parameters/SeatId'
+      responses:
+        '200':
+          description: 当前排空状态；响应必须携带两项冻结屏障读数及四个原生额度窗口的 usage_snapshot
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DrainSeatEnvelope'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /seats/{seatId}/freeze:
+    post:
+      operationId: freezeSeat
+      summary: 严格并发与持久结算双屏障归零后确认冻结
+      parameters:
+        - $ref: '#/components/parameters/SeatId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OperationRequest'}
+      responses:
+        '200':
+          description: Seat 已 FROZEN；双屏障均为零，usage_snapshot 是换员前额度连续性的冻结证据
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DrainSeatEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /seats/{seatId}/rotate:
+    post:
+      operationId: rotateSeatCredential
+      summary: 冻结后原子轮换 Seat 访问 Key 并激活新 epoch
+      description: |
+        响应中的 credential 是敏感的 Sub2API Seat 访问凭据，不得记录日志或直接暴露给浏览器。
+        access_credential_rotated 只证明该访问凭据已轮换，不证明供应商登录、MFA、恢复或所有权
+        控制凭据已经轮换，不能作为永久换员的 control_rotation_evidence_ref。
+      parameters:
+        - $ref: '#/components/parameters/SeatId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RotateRequest'}
+      responses:
+        '200':
+          description: 轮换成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RotationEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /seats/{seatId}/usage-risk:
+    get:
+      operationId: getUsageRisk
+      summary: 查询用量、客户端特征/IP 数量和当前并发
+      description: |
+        只返回观察值，不自动修改 Seat 或 API Key 状态。device_fingerprint_count 当前按
+        IP 与 User-Agent 组合特征去重，是风险代理信号，不代表经过设备证明的真实设备数量。
+      parameters:
+        - $ref: '#/components/parameters/SeatId'
+        - name: hours
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 720, default: 24}
+      responses:
+        '200':
+          description: 聚合风险观察
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UsageRiskEnvelope'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /seats/{seatId}/settlements:
+    get:
+      operationId: listPendingSettlements
+      summary: 列出阻断 Seat 冻结的待对账结算
+      description: 需要 `seat:read` scope；仅返回仍未解除的 pending 记录。
+      parameters:
+        - $ref: '#/components/parameters/SeatId'
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 100}
+      responses:
+        '200':
+          description: 待对账结算列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PendingSettlementListEnvelope'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /seats/{seatId}/settlements/{settlementId}:
+    get:
+      operationId: getPendingSettlement
+      summary: 查询单条待对账结算证据
+      description: 需要 `seat:read` scope。
+      parameters:
+        - $ref: '#/components/parameters/SeatId'
+        - $ref: '#/components/parameters/SettlementId'
+      responses:
+        '200':
+          description: 待对账结算详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PendingSettlementEnvelope'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /seats/{seatId}/settlements/{settlementId}/resolve:
+    post:
+      operationId: resolvePendingSettlement
+      summary: 人工核账后以受审计事务解除单条结算屏障
+      description: |
+        需要独立 `settlement:resolve` scope。服务端在同一事务追加不可变 resolution 审计并删除
+        精确匹配的 pending；相同 operation_id 与相同内容重放返回原结果，内容漂移返回冲突。
+        该接口只记录人工核验结论，不会替代实际补账或上游结果核查。
+      parameters:
+        - $ref: '#/components/parameters/SeatId'
+        - $ref: '#/components/parameters/SettlementId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ResolveSettlementRequest'}
+      responses:
+        '200':
+          description: 已解除，或返回同一幂等操作的原审计结果
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SettlementResolutionEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    integrationClientID:
+      type: apiKey
+      in: header
+      name: X-Integration-Client-ID
+    integrationBearer:
+      type: http
+      scheme: bearer
+      description: 当前客户端使用 CLI 一次性输出的 bearer_secret（平台可映射为 SUB2API_INTEGRATION_SECRET）；不得使用 hmac_secret
+    hmacTimestamp:
+      type: apiKey
+      in: header
+      name: X-Integration-Timestamp
+    hmacNonce:
+      type: apiKey
+      in: header
+      name: X-Integration-Nonce
+    hmacSignature:
+      type: apiKey
+      in: header
+      name: X-Integration-Signature
+      description: 使用 CLI 一次性输出的独立 hmac_secret 签名；不得使用 bearer_secret 或数据库中的 secret_hash
+  parameters:
+    SeatId:
+      name: seatId
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Header 与 body.operation_id 至少提供一个；provision 同时存在时必须相同，其余写接口以 Header 为准
+      schema: {type: string, minLength: 1, maxLength: 128}
+    SettlementId:
+      name: settlementId
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+  schemas:
+    ProvisionSeatRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - external_pool_id
+        - external_seat_id
+        - existing_group_id
+        - principal_concurrency
+        - subscription_expires_at
+      properties:
+        external_pool_id: {type: string, minLength: 1, maxLength: 128}
+        external_seat_id: {type: string, minLength: 1, maxLength: 128}
+        existing_group_id: {type: integer, format: int64, minimum: 1}
+        assignment_epoch: {type: integer, format: int64, minimum: 1, default: 1}
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        principal_concurrency: {type: integer, minimum: 1}
+        principal_rpm_limit: {type: integer, minimum: 0, default: 0}
+        subscription_expires_at:
+          type: string
+          format: date-time
+          description: 必须晚于当前时间且不晚于 2099-12-31T23:59:59Z
+        api_key_quota: {type: number, minimum: 0, default: 0}
+        api_key_rate_limit_5h: {type: number, minimum: 0, default: 0}
+        api_key_rate_limit_1d: {type: number, minimum: 0, default: 0}
+        api_key_rate_limit_7d: {type: number, minimum: 0, default: 0}
+    ProvisionSeatResult:
+      type: object
+      additionalProperties: false
+      required: [seat, credential]
+      properties:
+        seat: {$ref: '#/components/schemas/Seat'}
+        credential:
+          type: string
+          x-sensitive: true
+          description: 新建或精确重放恢复的 Sub2API Seat API Key；禁止日志、trace 和数据库复制
+    RegisterSeatRequest:
+      type: object
+      required:
+        - external_pool_id
+        - external_seat_id
+        - principal_user_id
+        - group_id
+        - subscription_id
+        - api_key_id
+      properties:
+        external_pool_id: {type: string, minLength: 1}
+        external_seat_id: {type: string, minLength: 1}
+        principal_user_id: {type: integer, format: int64, minimum: 1}
+        group_id: {type: integer, format: int64, minimum: 1}
+        subscription_id: {type: integer, format: int64, minimum: 1}
+        api_key_id: {type: integer, format: int64, minimum: 1}
+        assignment_epoch:
+          type: integer
+          format: int64
+          description: 缺失或非正数时，当前实现按 1 处理
+        operation_id: {type: string, maxLength: 128}
+    OperationRequest:
+      type: object
+      properties:
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+    RotateRequest:
+      type: object
+      required: [target_epoch]
+      properties:
+        operation_id: {type: string, maxLength: 128}
+        target_epoch: {type: integer, format: int64, minimum: 1}
+    Seat:
+      type: object
+      required:
+        - id
+        - external_pool_id
+        - external_seat_id
+        - principal_user_id
+        - group_id
+        - subscription_id
+        - api_key_id
+        - state
+        - assignment_epoch
+        - last_operation_id
+        - current_concurrency
+        - pending_settlements
+        - created_at
+        - updated_at
+      properties:
+        id: {type: integer, format: int64}
+        external_pool_id: {type: string}
+        external_seat_id: {type: string}
+        principal_user_id: {type: integer, format: int64}
+        group_id: {type: integer, format: int64}
+        subscription_id: {type: integer, format: int64}
+        api_key_id: {type: integer, format: int64}
+        state: {type: string, enum: [active, draining, frozen, rotating]}
+        assignment_epoch: {type: integer, format: int64}
+        last_operation_id: {type: string}
+        suspended_at: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        current_concurrency: {type: integer, minimum: 0}
+        pending_settlements:
+          type: integer
+          minimum: 0
+          description: 尚未确认完成的可信 Seat 用量结算数；非零时 drain/freeze 必须失败关闭
+        usage_snapshot: {$ref: '#/components/schemas/UsageSnapshot'}
+    DrainSeat:
+      allOf:
+        - $ref: '#/components/schemas/Seat'
+        - type: object
+          required: [current_concurrency, pending_settlements, usage_snapshot]
+    QuotaUsage:
+      type: object
+      additionalProperties: false
+      required: [hourly, daily, weekly, monthly]
+      properties:
+        hourly: {type: number, minimum: 0}
+        daily: {type: number, minimum: 0}
+        weekly: {type: number, minimum: 0}
+        monthly: {type: number, minimum: 0}
+    QuotaWindowStarts:
+      type: object
+      additionalProperties: false
+      required: [hourly, daily, weekly, monthly]
+      properties:
+        hourly: {type: [string, 'null'], format: date-time}
+        daily: {type: [string, 'null'], format: date-time}
+        weekly: {type: [string, 'null'], format: date-time}
+        monthly: {type: [string, 'null'], format: date-time}
+    UsageSnapshot:
+      type: object
+      additionalProperties: false
+      required: [usage, window_starts, captured_at]
+      properties:
+        usage: {$ref: '#/components/schemas/QuotaUsage'}
+        window_starts:
+          allOf:
+            - $ref: '#/components/schemas/QuotaWindowStarts'
+          description: null 表示对应原生额度窗口尚未启动，不得用 captured_at 代填
+        captured_at: {type: string, format: date-time}
+    RotationResult:
+      type: object
+      required: [seat, credential, access_credential_rotated]
+      properties:
+        seat: {$ref: '#/components/schemas/Seat'}
+        credential:
+          type: string
+          x-sensitive: true
+          description: 新 Sub2API Seat 访问 Key；禁止日志记录
+        access_credential_rotated:
+          type: boolean
+          const: true
+          description: 仅确认 Sub2API Seat 访问凭据已轮换，不代表供应商账号控制凭据已轮换
+    UsageRisk:
+      type: object
+      required:
+        - external_seat_id
+        - window_hours
+        - request_count
+        - distinct_ip_count
+        - device_fingerprint_count
+        - actual_cost_usd
+        - current_concurrency
+      properties:
+        external_seat_id: {type: string}
+        window_hours: {type: integer}
+        request_count: {type: integer, format: int64}
+        distinct_ip_count: {type: integer, format: int64}
+        device_fingerprint_count:
+          type: integer
+          format: int64
+          description: IP 与 User-Agent 组合特征的去重数量，不是硬件设备指纹数量
+        actual_cost_usd: {type: number}
+        current_concurrency: {type: integer}
+    PendingSettlement:
+      type: object
+      additionalProperties: false
+      required: [seat_id, external_seat_id, settlement_id, request_id, assignment_epoch, status, attempt_count, created_at, updated_at]
+      properties:
+        seat_id: {type: integer, format: int64}
+        external_seat_id: {type: string}
+        settlement_id: {type: string}
+        request_id: {type: string, description: 网关请求关联 ID}
+        billing_id: {type: string, description: 已知时记录计费幂等 ID}
+        assignment_epoch: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [pending, failed]}
+        last_error: {type: string}
+        attempt_count: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ResolveSettlementRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, evidence]
+      properties:
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        reason: {type: string, minLength: 1, maxLength: 1000}
+        evidence: {type: string, minLength: 1, maxLength: 4000}
+    SettlementResolution:
+      type: object
+      additionalProperties: false
+      required: [seat_id, external_seat_id, settlement_id, operation_id, actor_client_id, reason, evidence, resolved_at]
+      properties:
+        seat_id: {type: integer, format: int64}
+        external_seat_id: {type: string}
+        settlement_id: {type: string}
+        operation_id: {type: string}
+        actor_client_id: {type: string, description: 来自已认证的 X-Integration-Client-ID，不接受 body 覆盖}
+        reason: {type: string}
+        evidence: {type: string}
+        resolved_at: {type: string, format: date-time}
+    BaseEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code: {}
+        message: {type: string}
+        data: {}
+    SeatEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Seat'}
+    ProvisionSeatEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/ProvisionSeatResult'}
+    DrainSeatEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/DrainSeat'}
+    RotationEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/RotationResult'}
+    UsageRiskEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/UsageRisk'}
+    PendingSettlementEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/PendingSettlement'}
+    PendingSettlementListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/PendingSettlement'}
+    SettlementResolutionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/SettlementResolution'}
+    ErrorEnvelope:
+      type: object
+      properties:
+        code: {}
+        message: {type: string}
+        reason: {type: string}
+        data: {}
+  responses:
+    Error:
+      description: 受限集成接口错误
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}

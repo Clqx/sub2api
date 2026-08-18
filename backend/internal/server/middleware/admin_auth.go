@@ -185,6 +185,10 @@ func validateJWTForAdmin(
 		AbortWithError(c, 401, "USER_INACTIVE", "User account is not active")
 		return false
 	}
+	if !user.CanInteractiveAuth() {
+		AbortWithError(c, 401, "INTERACTIVE_AUTH_FORBIDDEN", "Interactive authentication is not allowed for this principal")
+		return false
+	}
 
 	// 校验 TokenVersion，确保管理员改密后旧 token 失效
 	if claims.TokenVersion != user.TokenVersion {

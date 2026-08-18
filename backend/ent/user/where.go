@@ -80,6 +80,11 @@ func PasswordHash(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldPasswordHash, v))
 }
 
+// PrincipalType applies equality check predicate on the "principal_type" field. It's identical to PrincipalTypeEQ.
+func PrincipalType(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldPrincipalType, v))
+}
+
 // Role applies equality check predicate on the "role" field. It's identical to RoleEQ.
 func Role(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldRole, v))
@@ -433,6 +438,71 @@ func PasswordHashEqualFold(v string) predicate.User {
 // PasswordHashContainsFold applies the ContainsFold predicate on the "password_hash" field.
 func PasswordHashContainsFold(v string) predicate.User {
 	return predicate.User(sql.FieldContainsFold(FieldPasswordHash, v))
+}
+
+// PrincipalTypeEQ applies the EQ predicate on the "principal_type" field.
+func PrincipalTypeEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldPrincipalType, v))
+}
+
+// PrincipalTypeNEQ applies the NEQ predicate on the "principal_type" field.
+func PrincipalTypeNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldPrincipalType, v))
+}
+
+// PrincipalTypeIn applies the In predicate on the "principal_type" field.
+func PrincipalTypeIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldPrincipalType, vs...))
+}
+
+// PrincipalTypeNotIn applies the NotIn predicate on the "principal_type" field.
+func PrincipalTypeNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldPrincipalType, vs...))
+}
+
+// PrincipalTypeGT applies the GT predicate on the "principal_type" field.
+func PrincipalTypeGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldPrincipalType, v))
+}
+
+// PrincipalTypeGTE applies the GTE predicate on the "principal_type" field.
+func PrincipalTypeGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldPrincipalType, v))
+}
+
+// PrincipalTypeLT applies the LT predicate on the "principal_type" field.
+func PrincipalTypeLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldPrincipalType, v))
+}
+
+// PrincipalTypeLTE applies the LTE predicate on the "principal_type" field.
+func PrincipalTypeLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldPrincipalType, v))
+}
+
+// PrincipalTypeContains applies the Contains predicate on the "principal_type" field.
+func PrincipalTypeContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldPrincipalType, v))
+}
+
+// PrincipalTypeHasPrefix applies the HasPrefix predicate on the "principal_type" field.
+func PrincipalTypeHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldPrincipalType, v))
+}
+
+// PrincipalTypeHasSuffix applies the HasSuffix predicate on the "principal_type" field.
+func PrincipalTypeHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldPrincipalType, v))
+}
+
+// PrincipalTypeEqualFold applies the EqualFold predicate on the "principal_type" field.
+func PrincipalTypeEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldPrincipalType, v))
+}
+
+// PrincipalTypeContainsFold applies the ContainsFold predicate on the "principal_type" field.
+func PrincipalTypeContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldPrincipalType, v))
 }
 
 // RoleEQ applies the EQ predicate on the "role" field.

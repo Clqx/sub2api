@@ -198,6 +198,11 @@ func (s *SubscriptionService) invalidateSubscriptionCaches(userID, groupID int64
 	return nil
 }
 
+// InvalidateSubscriptionCachesSync 供需要强一致切换的窄集成层在提交后同步清理两级订阅缓存。
+func (s *SubscriptionService) InvalidateSubscriptionCachesSync(userID, groupID int64) error {
+	return s.invalidateSubscriptionCaches(userID, groupID)
+}
+
 // AssignSubscriptionInput 分配订阅输入
 type AssignSubscriptionInput struct {
 	UserID       int64

@@ -104,6 +104,29 @@ func TestJWTAuth_ValidToken(t *testing.T) {
 	require.Equal(t, "user", body["role"])
 }
 
+func TestJWTAuth_RejectsTokenAfterPrincipalBecomesTrustedPoolSeat(t *testing.T) {
+	user := &service.User{
+		ID:           1,
+		Email:        "seat@example.com",
+		Role:         service.RoleUser,
+		Status:       service.StatusActive,
+		Concurrency:  1,
+		TokenVersion: 1,
+	}
+	router, authSvc := newJWTTestEnv(map[int64]*service.User{user.ID: user})
+	token, err := authSvc.GenerateToken(context.Background(), user)
+	require.NoError(t, err)
+
+	// 模拟 token 签发后，provision 事务把同一用户转换为 Seat。
+	user.PrincipalType = service.PrincipalTypeTrustedPoolSeat
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
 func TestJWTAuth_ValidToken_LowercaseBearer(t *testing.T) {
 	user := &service.User{
 		ID:           1,

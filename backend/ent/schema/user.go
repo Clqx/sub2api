@@ -43,6 +43,18 @@ func (User) Fields() []ent.Field {
 		field.String("password_hash").
 			MaxLen(255).
 			NotEmpty(),
+		// principal_type 区分可交互登录的人类用户与仅允许 API Key 调用的可信池席位主体。
+		field.String("principal_type").
+			MaxLen(32).
+			Default("human").
+			Validate(func(value string) error {
+				switch value {
+				case "human", "trusted_pool_seat":
+					return nil
+				default:
+					return fmt.Errorf("must be one of human, trusted_pool_seat")
+				}
+			}),
 		field.String("role").
 			MaxLen(20).
 			Default(domain.RoleUser),

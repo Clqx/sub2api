@@ -180,6 +180,9 @@ func (s *PasskeyService) BeginRegistration(
 	if !user.IsActive() {
 		return nil, "", ErrUserNotActive
 	}
+	if !user.CanInteractiveAuth() {
+		return nil, "", ErrInteractiveAuthForbidden
+	}
 	if err = verifyPasskeyPassword(user, password); err != nil {
 		return nil, "", err
 	}
@@ -236,6 +239,9 @@ func (s *PasskeyService) FinishRegistration(
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
+	}
+	if !user.CanInteractiveAuth() {
+		return nil, ErrInteractiveAuthForbidden
 	}
 	handle, err := s.repo.GetUserHandle(ctx, userID)
 	if err != nil {
@@ -306,7 +312,7 @@ func (s *PasskeyService) FinishLogin(
 			return nil, ErrPasskeyVerify
 		}
 		account, lookupErr := s.userRepo.GetByID(ctx, record.UserID)
-		if lookupErr != nil || account == nil || !account.IsActive() {
+		if lookupErr != nil || account == nil || !account.IsActive() || !account.CanInteractiveAuth() {
 			return nil, ErrPasskeyVerify
 		}
 		return s.loadWebAuthnUser(ctx, account, record.UserHandle)
@@ -355,6 +361,9 @@ func (s *PasskeyService) Delete(ctx context.Context, userID, credentialID int64,
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return err
+	}
+	if !user.CanInteractiveAuth() {
+		return ErrInteractiveAuthForbidden
 	}
 	if err = verifyPasskeyPassword(user, password); err != nil {
 		return err

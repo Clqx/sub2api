@@ -18,6 +18,7 @@ type User struct {
 	AvatarSHA256   string
 	PasswordHash   string
 	Role           string
+	PrincipalType  string
 	Balance        float64
 	FrozenBalance  float64
 	Concurrency    int
@@ -64,12 +65,23 @@ type User struct {
 	Subscriptions []UserSubscription
 }
 
+const (
+	PrincipalTypeHuman           = "human"
+	PrincipalTypeTrustedPoolSeat = "trusted_pool_seat"
+)
+
 func (u *User) IsAdmin() bool {
 	return u.Role == RoleAdmin
 }
 
 func (u *User) IsActive() bool {
 	return u.Status == StatusActive
+}
+
+// CanInteractiveAuth 判断主体是否允许使用密码、OAuth、会话等交互式认证能力。
+// 空值仅兼容尚未持久化的普通用户；数据库中的 principal_type 始终非空。
+func (u *User) CanInteractiveAuth() bool {
+	return u != nil && (u.PrincipalType == "" || u.PrincipalType == PrincipalTypeHuman)
 }
 
 // CanBindGroup checks whether a user can bind to a given group.

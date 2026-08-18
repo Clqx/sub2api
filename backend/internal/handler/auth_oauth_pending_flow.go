@@ -23,6 +23,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/gin-gonic/gin"
 )
@@ -1189,6 +1190,18 @@ func applyPendingOAuthBindingTx(
 			return err
 		}
 		targetUserID = resolvedUserID
+	}
+	// 与 Seat 转换共用用户行锁，确保身份写入与 principal_type 切换严格串行。
+	targetUserQuery := tx.Client().User.Query().Where(dbuser.IDEQ(targetUserID))
+	if tx.Client().Driver().Dialect() == dialect.Postgres {
+		targetUserQuery = targetUserQuery.ForUpdate()
+	}
+	targetUser, err := targetUserQuery.Only(ctx)
+	if err != nil {
+		return err
+	}
+	if targetUser.PrincipalType != service.PrincipalTypeHuman {
+		return service.ErrInteractiveAuthForbidden
 	}
 
 	adoptedDisplayName := ""

@@ -34,6 +34,9 @@ type stubConcurrencyCacheForTest struct {
 	apiKeyReleaseErr     error
 	apiKeyConcurrency    map[int64]int
 	apiKeyConcurrencyErr error
+	apiKeyConcurrencyFn  func([]int64) (map[int64]int, error)
+	apiKeyTrackHook      func()
+	apiKeyReleaseHook    func()
 
 	// 记录调用
 	releasedAccountIDs       []int64
@@ -127,16 +130,25 @@ func (c *stubConcurrencyCacheForTest) GetUserConcurrency(_ context.Context, _ in
 	return c.concurrency, c.concurrencyErr
 }
 func (c *stubConcurrencyCacheForTest) TrackAPIKeySlot(_ context.Context, apiKeyID int64, requestID string) error {
+	if c.apiKeyTrackHook != nil {
+		c.apiKeyTrackHook()
+	}
 	c.trackedAPIKeyIDs = append(c.trackedAPIKeyIDs, apiKeyID)
 	c.trackedAPIKeyRequestIDs = append(c.trackedAPIKeyRequestIDs, requestID)
 	return c.apiKeyTrackErr
 }
 func (c *stubConcurrencyCacheForTest) ReleaseAPIKeySlot(_ context.Context, apiKeyID int64, requestID string) error {
+	if c.apiKeyReleaseHook != nil {
+		c.apiKeyReleaseHook()
+	}
 	c.releasedAPIKeyIDs = append(c.releasedAPIKeyIDs, apiKeyID)
 	c.releasedAPIKeyRequestIDs = append(c.releasedAPIKeyRequestIDs, requestID)
 	return c.apiKeyReleaseErr
 }
 func (c *stubConcurrencyCacheForTest) GetAPIKeyConcurrencyBatch(_ context.Context, apiKeyIDs []int64) (map[int64]int, error) {
+	if c.apiKeyConcurrencyFn != nil {
+		return c.apiKeyConcurrencyFn(apiKeyIDs)
+	}
 	if c.apiKeyConcurrencyErr != nil {
 		return nil, c.apiKeyConcurrencyErr
 	}
@@ -323,6 +335,47 @@ func TestGetAPIKeyConcurrencyBatch_Fallbacks(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, map[int64]int{1: 3, 2: 0}, counts)
 	})
+}
+
+func TestTrackAPIKeySlotStrictRefreshesUntilRelease(t *testing.T) {
+	previousHeartbeat := trustedPoolLeaseHeartbeatInterval
+	trustedPoolLeaseHeartbeatInterval = 10 * time.Millisecond
+	defer func() { trustedPoolLeaseHeartbeatInterval = previousHeartbeat }()
+
+	refreshed := make(chan struct{}, 1)
+	var trackCalls atomic.Int64
+	cache := &stubConcurrencyCacheForTest{apiKeyTrackHook: func() {
+		if trackCalls.Add(1) >= 2 {
+			select {
+			case refreshed <- struct{}{}:
+			default:
+			}
+		}
+	}}
+	svc := NewConcurrencyService(cache)
+	release, err := svc.TrackAPIKeySlotStrict(context.Background(), 88)
+	require.NoError(t, err)
+
+	select {
+	case <-refreshed:
+	case <-time.After(time.Second):
+		t.Fatal("strict lease heartbeat did not refresh")
+	}
+	release()
+	require.Len(t, cache.releasedAPIKeyIDs, 1)
+	callsAfterRelease := trackCalls.Load()
+	time.Sleep(3 * trustedPoolLeaseHeartbeatInterval)
+	require.Equal(t, callsAfterRelease, trackCalls.Load(), "release 后心跳必须停止")
+}
+
+func TestTrackAPIKeySlotStrictFailsClosedWhenRedisUnavailable(t *testing.T) {
+	cache := &stubConcurrencyCacheForTest{apiKeyTrackErr: errors.New("redis down")}
+	svc := NewConcurrencyService(cache)
+
+	release, err := svc.TrackAPIKeySlotStrict(context.Background(), 88)
+	require.Error(t, err)
+	require.Nil(t, release, "严格租约登记失败时不得返回可放行的 release")
+	require.Empty(t, cache.releasedAPIKeyIDs)
 }
 
 func TestAcquireOpenAIWSIngressLease(t *testing.T) {

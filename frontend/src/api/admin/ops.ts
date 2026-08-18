@@ -65,6 +65,7 @@ export interface OpsDashboardOverview {
 
   duration: OpsPercentiles
   ttft: OpsPercentiles
+  ttft_sample_count: number
 }
 
 export interface OpsPercentiles {

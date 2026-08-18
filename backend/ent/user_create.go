@@ -88,6 +88,20 @@ func (_c *UserCreate) SetPasswordHash(v string) *UserCreate {
 	return _c
 }
 
+// SetPrincipalType sets the "principal_type" field.
+func (_c *UserCreate) SetPrincipalType(v string) *UserCreate {
+	_c.mutation.SetPrincipalType(v)
+	return _c
+}
+
+// SetNillablePrincipalType sets the "principal_type" field if the given value is not nil.
+func (_c *UserCreate) SetNillablePrincipalType(v *string) *UserCreate {
+	if v != nil {
+		_c.SetPrincipalType(*v)
+	}
+	return _c
+}
+
 // SetRole sets the "role" field.
 func (_c *UserCreate) SetRole(v string) *UserCreate {
 	_c.mutation.SetRole(v)
@@ -600,6 +614,10 @@ func (_c *UserCreate) defaults() error {
 		v := user.DefaultUpdatedAt()
 		_c.mutation.SetUpdatedAt(v)
 	}
+	if _, ok := _c.mutation.PrincipalType(); !ok {
+		v := user.DefaultPrincipalType
+		_c.mutation.SetPrincipalType(v)
+	}
 	if _, ok := _c.mutation.Role(); !ok {
 		v := user.DefaultRole
 		_c.mutation.SetRole(v)
@@ -681,6 +699,14 @@ func (_c *UserCreate) check() error {
 	if v, ok := _c.mutation.PasswordHash(); ok {
 		if err := user.PasswordHashValidator(v); err != nil {
 			return &ValidationError{Name: "password_hash", err: fmt.Errorf(`ent: validator failed for field "User.password_hash": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.PrincipalType(); !ok {
+		return &ValidationError{Name: "principal_type", err: errors.New(`ent: missing required field "User.principal_type"`)}
+	}
+	if v, ok := _c.mutation.PrincipalType(); ok {
+		if err := user.PrincipalTypeValidator(v); err != nil {
+			return &ValidationError{Name: "principal_type", err: fmt.Errorf(`ent: validator failed for field "User.principal_type": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.Role(); !ok {
@@ -791,6 +817,10 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.PasswordHash(); ok {
 		_spec.SetField(user.FieldPasswordHash, field.TypeString, value)
 		_node.PasswordHash = value
+	}
+	if value, ok := _c.mutation.PrincipalType(); ok {
+		_spec.SetField(user.FieldPrincipalType, field.TypeString, value)
+		_node.PrincipalType = value
 	}
 	if value, ok := _c.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)
@@ -1183,6 +1213,18 @@ func (u *UserUpsert) SetPasswordHash(v string) *UserUpsert {
 // UpdatePasswordHash sets the "password_hash" field to the value that was provided on create.
 func (u *UserUpsert) UpdatePasswordHash() *UserUpsert {
 	u.SetExcluded(user.FieldPasswordHash)
+	return u
+}
+
+// SetPrincipalType sets the "principal_type" field.
+func (u *UserUpsert) SetPrincipalType(v string) *UserUpsert {
+	u.Set(user.FieldPrincipalType, v)
+	return u
+}
+
+// UpdatePrincipalType sets the "principal_type" field to the value that was provided on create.
+func (u *UserUpsert) UpdatePrincipalType() *UserUpsert {
+	u.SetExcluded(user.FieldPrincipalType)
 	return u
 }
 
@@ -1585,6 +1627,20 @@ func (u *UserUpsertOne) SetPasswordHash(v string) *UserUpsertOne {
 func (u *UserUpsertOne) UpdatePasswordHash() *UserUpsertOne {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdatePasswordHash()
+	})
+}
+
+// SetPrincipalType sets the "principal_type" field.
+func (u *UserUpsertOne) SetPrincipalType(v string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetPrincipalType(v)
+	})
+}
+
+// UpdatePrincipalType sets the "principal_type" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdatePrincipalType() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdatePrincipalType()
 	})
 }
 
@@ -2202,6 +2258,20 @@ func (u *UserUpsertBulk) SetPasswordHash(v string) *UserUpsertBulk {
 func (u *UserUpsertBulk) UpdatePasswordHash() *UserUpsertBulk {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdatePasswordHash()
+	})
+}
+
+// SetPrincipalType sets the "principal_type" field.
+func (u *UserUpsertBulk) SetPrincipalType(v string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetPrincipalType(v)
+	})
+}
+
+// UpdatePrincipalType sets the "principal_type" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdatePrincipalType() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdatePrincipalType()
 	})
 }
 

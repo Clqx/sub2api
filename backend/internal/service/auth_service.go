@@ -42,12 +42,13 @@ var (
 		"EMAIL_DOMAIN_REGISTRATION_LIMIT",
 		"this email domain cannot register another account; use a mainstream email or contact support to add the enterprise domain",
 	)
-	ErrRegDisabled             = infraerrors.Forbidden("REGISTRATION_DISABLED", "registration is currently disabled")
-	ErrServiceUnavailable      = infraerrors.ServiceUnavailable("SERVICE_UNAVAILABLE", "service temporarily unavailable")
-	ErrInvitationCodeRequired  = infraerrors.BadRequest("INVITATION_CODE_REQUIRED", "invitation code is required")
-	ErrInvitationCodeInvalid   = infraerrors.BadRequest("INVITATION_CODE_INVALID", "invalid or used invitation code")
-	ErrOAuthInvitationRequired = infraerrors.Forbidden("OAUTH_INVITATION_REQUIRED", "invitation code required to complete oauth registration")
-	ErrCaptchaProviderConflict = infraerrors.ServiceUnavailable("CAPTCHA_PROVIDER_CONFLICT", "multiple captcha providers are enabled")
+	ErrRegDisabled              = infraerrors.Forbidden("REGISTRATION_DISABLED", "registration is currently disabled")
+	ErrServiceUnavailable       = infraerrors.ServiceUnavailable("SERVICE_UNAVAILABLE", "service temporarily unavailable")
+	ErrInvitationCodeRequired   = infraerrors.BadRequest("INVITATION_CODE_REQUIRED", "invitation code is required")
+	ErrInvitationCodeInvalid    = infraerrors.BadRequest("INVITATION_CODE_INVALID", "invalid or used invitation code")
+	ErrOAuthInvitationRequired  = infraerrors.Forbidden("OAUTH_INVITATION_REQUIRED", "invitation code required to complete oauth registration")
+	ErrInteractiveAuthForbidden = infraerrors.Forbidden("INTERACTIVE_AUTH_FORBIDDEN", "interactive authentication is not allowed for this principal")
+	ErrCaptchaProviderConflict  = infraerrors.ServiceUnavailable("CAPTCHA_PROVIDER_CONFLICT", "multiple captcha providers are enabled")
 )
 
 // maxTokenLength 限制 token 大小，避免超长 header 触发解析时的异常内存分配。
@@ -579,6 +580,10 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (string
 		logger.LegacyPrintf("service.auth", "[Auth] Database error during login: %v", err)
 		return "", nil, ErrServiceUnavailable
 	}
+	if !user.CanInteractiveAuth() {
+		// 密码入口沿用统一凭据错误，避免暴露可信池主体身份。
+		return "", nil, ErrInvalidCredentials
+	}
 
 	// 验证密码
 	if !s.CheckPassword(password, user.PasswordHash) {
@@ -683,6 +688,9 @@ func (s *AuthService) LoginOrRegisterOAuth(ctx context.Context, email, username 
 
 	if !user.IsActive() {
 		return "", nil, ErrUserNotActive
+	}
+	if !user.CanInteractiveAuth() {
+		return "", nil, ErrInteractiveAuthForbidden
 	}
 
 	// 尽力补全：当用户名为空时，使用第三方返回的用户名回填。
@@ -876,6 +884,9 @@ func (s *AuthService) loginOrRegisterOAuthWithTokenPair(ctx context.Context, ema
 
 	if !user.IsActive() {
 		return nil, nil, ErrUserNotActive
+	}
+	if !user.CanInteractiveAuth() {
+		return nil, nil, ErrInteractiveAuthForbidden
 	}
 
 	if user.Username == "" && username != "" {
@@ -1387,6 +1398,9 @@ func isReservedEmail(email string) bool {
 // 使用新的access_token_expire_minutes配置项（如果配置了），否则回退到expire_hour。
 // 会话指纹（IP/UA）从 ctx 中提取（由 HTTP 入口中间件注入），缺失时生成不带绑定的 token。
 func (s *AuthService) GenerateToken(ctx context.Context, user *User) (string, error) {
+	if !user.CanInteractiveAuth() {
+		return "", ErrInteractiveAuthForbidden
+	}
 	sessionID, err := randomHexString(8)
 	if err != nil {
 		return "", fmt.Errorf("generate session id: %w", err)
@@ -1474,6 +1488,10 @@ func (s *AuthService) RefreshToken(ctx context.Context, oldTokenString string) (
 	if !user.IsActive() {
 		return "", ErrUserNotActive
 	}
+	if !user.CanInteractiveAuth() {
+		_ = s.RevokeSessionFamily(ctx, claims.SessionID)
+		return "", ErrInteractiveAuthForbidden
+	}
 
 	// Security: Check TokenVersion to prevent refreshing revoked tokens
 	// This ensures tokens issued before a password change cannot be refreshed
@@ -1522,8 +1540,8 @@ func (s *AuthService) preparePasswordReset(ctx context.Context, email, frontendB
 		return "", "", false
 	}
 
-	// Check if user is active
-	if !user.IsActive() {
+	// 非交互主体与不存在的邮箱保持相同外部响应，防止账号枚举。
+	if !user.IsActive() || !user.CanInteractiveAuth() {
 		logger.LegacyPrintf("service.auth", "[Auth] Password reset requested for inactive user: %s", email)
 		return "", "", false
 	}
@@ -1600,11 +1618,6 @@ func (s *AuthService) ResetPassword(ctx context.Context, email, token, newPasswo
 		return ErrServiceUnavailable
 	}
 
-	// Verify and consume the reset token (one-time use)
-	if err := s.emailService.ConsumePasswordResetToken(ctx, email, token); err != nil {
-		return err
-	}
-
 	// Get user
 	user, err := s.userRepo.GetByEmail(ctx, email)
 	if err != nil {
@@ -1618,6 +1631,14 @@ func (s *AuthService) ResetPassword(ctx context.Context, email, token, newPasswo
 	// Check if user is active
 	if !user.IsActive() {
 		return ErrUserNotActive
+	}
+	if !user.CanInteractiveAuth() {
+		return ErrInvalidResetToken
+	}
+
+	// 确认主体允许交互认证后再消费一次性令牌，避免 Seat 进入改密流程。
+	if err := s.emailService.ConsumePasswordResetToken(ctx, email, token); err != nil {
+		return err
 	}
 
 	// Hash new password
@@ -1665,6 +1686,9 @@ type TokenPairWithUser struct {
 // GenerateTokenPair 生成Access Token和Refresh Token对
 // familyID: 可选的Token家族ID，用于Token轮转时保持家族关系
 func (s *AuthService) GenerateTokenPair(ctx context.Context, user *User, familyID string) (*TokenPair, error) {
+	if !user.CanInteractiveAuth() {
+		return nil, ErrInteractiveAuthForbidden
+	}
 	// 检查 refreshTokenCache 是否可用
 	if s.refreshTokenCache == nil {
 		return nil, errors.New("refresh token cache not configured")
@@ -1803,6 +1827,11 @@ func (s *AuthService) RefreshTokenPair(ctx context.Context, refreshToken string)
 		// 用户被禁用，撤销整个Token家族
 		_ = s.refreshTokenCache.DeleteTokenFamily(ctx, data.FamilyID)
 		return nil, ErrUserNotActive
+	}
+	if !user.CanInteractiveAuth() {
+		// Seat 不允许恢复任何面板会话，同时撤销整个 refresh 家族。
+		_ = s.refreshTokenCache.DeleteTokenFamily(ctx, data.FamilyID)
+		return nil, ErrInteractiveAuthForbidden
 	}
 
 	// 检查TokenVersion（密码更改后所有Token失效）

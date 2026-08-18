@@ -1,0 +1,784 @@
+openapi: 3.1.0
+info:
+  title: 可信有限成员订阅共享平台 Phase 2-A API
+  version: 0.2.0
+  description: |
+    与当前 Go HTTP 实现一致的 Phase 2-A 持久运行时接口。Provision、Seat/Owner Assignment、Operation
+    和 Provision credential claim 使用 PostgreSQL；数据库或 KMS 不可用时失败关闭。暂停、换员、结算、
+    credential batch 和 control rotation evidence 尚未接入持久工作流，当前统一返回 503。
+    风险窗口仍是可丢失的内存观察信号，不自动暂停。普通接口使用服务 Bearer API Key。
+x-implementation-status: phase2a-persistent-provision-only
+servers:
+  - url: http://localhost:8092
+security:
+  - serviceBearer: []
+paths:
+  /health:
+    get:
+      operationId: health
+      security: []
+      responses:
+        '200':
+          description: API 进程存活；不代表 PostgreSQL 或 KMS 已就绪
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthEnvelope'
+  /ready:
+    get:
+      operationId: readiness
+      security: []
+      responses:
+        '200':
+          description: PostgreSQL 与包络密钥服务均就绪
+        '503':
+          description: PostgreSQL 或包络密钥服务不可用
+  /api/v1/seats:
+    post:
+      operationId: provisionSeat
+      summary: 在既有 Sub2API Group 中开通 Seat
+      description: |
+        平台先以 operation_id 幂等调用 Sub2API 创建不可交互 Principal、Subscription 和 API Key，
+        仅在上游明确返回 ACTIVE 后创建本地 Seat。结果未知时返回 503，调用方必须以完全相同的请求体和
+        operation_id 重放；成功响应不直接包含 credential。claim token 仅在首次明确成功响应中返回，
+        平台只保存其 SHA-256 摘要，因此后续 provision 重放不会再次返回 token。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProvisionSeatRequest'}
+      responses:
+        '201':
+          description: Sub2API 已明确完成开通，平台本地 Seat 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvisionSeatEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503':
+          description: 上游不可用或结果未知；不得推断 Seat 已创建，须使用同一 operation_id 重放
+  /api/v1/seats/{id}:
+    get:
+      operationId: getSeat
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: Seat 详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeatEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/seats/{id}/settlements:
+    get:
+      operationId: listPendingSettlements
+      summary: 列出阻断 Seat 冻结的待对账结算
+      description: Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 100}
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/seats/{id}/settlements/{settlement_id}:
+    get:
+      operationId: getPendingSettlement
+      summary: 查询单条待对账结算
+      description: Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/SettlementId'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/seats/{id}/settlements/{settlement_id}/resolve:
+    post:
+      operationId: resolvePendingSettlement
+      summary: 人工核验后解除单条结算屏障
+      description: |
+        Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。
+
+        必须使用独立 TRUSTED_POOL_SETTLEMENT_API_KEY。平台把 operation_id 同时作为 Sub2API
+        Idempotency-Key 提交；Sub2API 继续使用独立 settlement:resolve scope 校验集成客户端并写审计。
+      security:
+        - settlementBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/SettlementId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ResolvePendingSettlementRequest'}
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/seats/{id}/actions/suspend:
+    post:
+      operationId: suspendSeat
+      summary: 暂停并等待 Sub2API 排空
+      description: Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503；后续实现仍须先排空至 FROZEN。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/seats/{id}/actions/assign-temporary:
+    post:
+      operationId: assignTemporary
+      summary: 冻结后分配临时成员
+      description: Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/TargetUser'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/seats/{id}/actions/restore:
+    post:
+      operationId: restoreOwner
+      summary: 冻结后恢复正式成员
+      description: Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/seats/{id}/actions/replace:
+    post:
+      operationId: replacePermanently
+      summary: 冻结后永久换员
+      description: |
+        Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。以下是后续阶段必须保留的安全门禁。
+
+        必须提交本平台 control-rotation-evidence 接口签发的证据。Coordinator 会按 Seat Pool、当前
+        Membership Epoch 和相邻新 Epoch 重新验证该证据所绑定的供应商变更证明引用及八个批次状态。
+        Phase 1 不校验供应商签名或证明的密码学真实性；provider_attestation_ref 必须由运营或外部系统
+        在签发证据前完成真实性核验。Sub2API 的 access_credential_rotated 仅代表 Seat 访问 Key 已轮换，
+        不能冒充该证据。永久换员成功后，Pool 最小 Membership Epoch 提升到新 Epoch，旧 Epoch
+        不能再 Seal 或 Activate 凭据批次。
+
+        Phase 1 的该操作只验证暂停/冻结、Seat 访问 Key 轮换、外部 attestation 引用和控制凭据批次
+        状态机；它不生成或签署 Recovery Root、Recovery Share 或 Manifest。因此 Phase 1 成功响应不构成
+        完整永久交接，生产环境必须等待 Phase 2 recovery governance 门禁全部完成后才能确认永久换员。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/PermanentReplacement'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/operations/{id}:
+    get:
+      operationId: getOperation
+      description: 只返回操作状态，不返回 credential_claim_token 或访问凭据。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200': {$ref: '#/components/responses/OperationResponse'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/operations/{id}/reconcile:
+    post:
+      operationId: reconcileOperation
+      description: Phase 2-A PostgreSQL Runtime 尚未开放显式 reconcile，当前返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/operations/{id}/credential-ack:
+    post:
+      operationId: acknowledgeOperationCredential
+      description: |
+        目标成员使用原始开通或换员成功响应中一次性返回的随机 claim_token 领取 Seat 访问凭据。token 与目标成员
+        和操作绑定且有短期 TTL。Provision 凭据返回前，平台必须先使用独立 `credential:ack` scope 向
+        Sub2API 提交 credential SHA-256 fingerprint 并取得明确确认；确认结果未知时返回 503 且不披露凭据。
+        成功后立即清除 token 摘要与凭据，重放不能再次领取。
+        Sub2API ack 的 typed snapshot 会先持久化；Claim 尚未消费且 token 未过期时可在平台重启后继续领取。
+        本接口最终采用 at-most-once 交付：平台将 Claim CAS 为 CLAIMED 并清密后，若对客户端的 HTTP 响应
+        丢失，credential 永久不可恢复且不会二次披露，必须由管理员重新开通或轮换凭据。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CredentialClaimRequest'}
+      responses:
+        '200':
+          description: 一次性交付访问凭据并完成 ack
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CredentialDeliveryEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '410':
+          description: claim token 已过期，待交付 credential 已销毁
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503':
+          description: Sub2API ack 结果未知；失败关闭，不返回 credential，使用同一 token 重放本接口
+  /api/v1/risk-windows:
+    post:
+      operationId: recordRiskObservation
+      description: 原始指纹仅在请求处理内存中存在，聚合器只保留带密钥 HMAC；风险结果不触发暂停。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RiskObservation'
+      responses:
+        '202':
+          description: 已聚合
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskSummaryEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/seats/{id}/risk-summary:
+    get:
+      operationId: listRiskSummaries
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: assignment_epoch
+          in: query
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
+      responses:
+        '200':
+          description: 风险窗口列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskSummaryListEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/credential-batches:
+    post:
+      operationId: sealCredentialBatch
+      description: |
+        Phase 2-A PostgreSQL Runtime 禁止使用旧内存批次 Manager，当前返回 503。后续接线仍须确保请求体
+        不记录日志，且 membership_epoch 低于 Pool 已提交的最小 Epoch 时拒绝。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SealBatchRequest'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/credential-batches/{id}:
+    get:
+      operationId: getCredentialBatch
+      description: Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/credential-batches/{id}/activate:
+    post:
+      operationId: activateCredentialBatch
+      description: Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/credential-batches/{id}/retire:
+    post:
+      operationId: retireCredentialBatch
+      description: Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/control-rotation-evidence:
+    post:
+      operationId: issueControlRotationEvidence
+      summary: 签发供应商账号控制凭据轮换证据
+      description: |
+        Phase 2-A PostgreSQL Runtime 尚未接线，当前返回 503。以下描述是后续持久化实现的签发门禁。
+
+        仅当指定 Pool/账号在旧 Membership Epoch 的 LOGIN、MFA、RECOVERY、OWNERSHIP 四类批次
+        均已 RETIRED，且相邻新 Epoch 的对应四类批次均为 ACTIVE 时签发。请求还必须携带已由运营
+        或外部系统预先核验真实性的 provider_attestation_ref；Phase 1 只保存该不透明引用，不获取供应商
+        证明，也不做供应商签名或其他密码学校验。证据绑定该引用和新旧八个批次 ID，不包含凭据明文。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ControlRotationEvidenceRequest'}
+      responses:
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+components:
+  securitySchemes:
+    serviceBearer:
+      type: http
+      scheme: bearer
+      description: TRUSTED_POOL_API_KEY；仅供受控服务调用，不是最终用户会话或 RBAC
+    settlementBearer:
+      type: http
+      scheme: bearer
+      description: TRUSTED_POOL_SETTLEMENT_API_KEY；仅用于人工解除 pending settlement
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 同一意图重试必须保持不变；当前实现允许任意非空字符串
+      schema: {type: string, minLength: 1, maxLength: 128}
+    SettlementId:
+      name: settlement_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+  requestBodies:
+    TargetUser:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [target_user_id]
+            properties:
+              target_user_id: {type: string, minLength: 1, maxLength: 128}
+    PermanentReplacement:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [target_user_id, control_rotation_evidence_ref]
+            properties:
+              target_user_id: {type: string, minLength: 1, maxLength: 128}
+              control_rotation_evidence_ref:
+                type: string
+                minLength: 1
+                description: 本平台 control-rotation-evidence 接口签发、可按 Pool 和相邻 Epoch 复核的证据 ID
+  schemas:
+    HealthEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status, storage]
+          properties:
+            status: {type: string, const: ok}
+            storage: {type: string, const: memory}
+    SeatEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/Seat'}
+    ProvisionSeatRequest:
+      type: object
+      additionalProperties: false
+      required: [id, pool_id, owner_user_id, operation_id, existing_group_id, subscription_expires_at]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 128}
+        pool_id: {type: string, minLength: 1, maxLength: 128}
+        owner_user_id: {type: string, minLength: 1, maxLength: 128}
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        existing_group_id:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 管理员预先准备、尚未绑定或已绑定同一 pool_id 的 Sub2API 独占 Group ID
+        subscription_expires_at: {type: string, format: date-time}
+        principal_concurrency:
+          type: integer
+          minimum: 1
+          default: 1
+        principal_rpm_limit:
+          type: integer
+          minimum: 0
+          default: 0
+        api_key_quota: {type: number, minimum: 0, default: 0}
+        api_key_rate_limit_5h: {type: number, minimum: 0, default: 0}
+        api_key_rate_limit_1d: {type: number, minimum: 0, default: 0}
+        api_key_rate_limit_7d: {type: number, minimum: 0, default: 0}
+    ProvisionSeatEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [seat, operation]
+          properties:
+            seat: {$ref: '#/components/schemas/Seat'}
+            operation: {$ref: '#/components/schemas/Operation'}
+    Seat:
+      type: object
+      required: [id, pool_id, state, owner_user_id, current_assignment, assignment_epoch, membership_epoch, updated_at]
+      properties:
+        id: {type: string}
+        pool_id: {type: string}
+        state:
+          type: string
+          enum: [ACTIVE, SUSPEND_PENDING, DRAINING, FROZEN, ASSIGNMENT_PENDING, REPLACEMENT_PENDING]
+        owner_user_id: {type: string}
+        current_assignment: {$ref: '#/components/schemas/Assignment'}
+        assignment_epoch: {type: integer, format: int64, minimum: 1}
+        membership_epoch: {type: integer, format: int64, minimum: 1}
+        freeze_snapshot: {$ref: '#/components/schemas/FreezeSnapshot'}
+        pending_change:
+          type: object
+          additionalProperties: true
+        updated_at: {type: string, format: date-time}
+    Assignment:
+      type: object
+      required: [user_id, kind, assignment_epoch, assigned_at]
+      properties:
+        user_id: {type: string}
+        kind: {type: string, enum: [OWNER, TEMPORARY]}
+        assignment_epoch: {type: integer, format: int64}
+        assigned_at: {type: string, format: date-time}
+    FreezeSnapshot:
+      type: object
+      required: [operation_id, assignment_epoch, usage, window_starts, in_flight, pending_settlements, captured_at]
+      properties:
+        operation_id: {type: string}
+        assignment_epoch: {type: integer, format: int64}
+        usage:
+          type: object
+          additionalProperties: {type: number}
+        window_starts:
+          type: object
+          description: 上游原生窗口尚未启动时，对应值保持 null
+          additionalProperties:
+            type: [string, 'null']
+            format: date-time
+        in_flight: {type: integer, const: 0}
+        pending_settlements:
+          type: integer
+          const: 0
+          description: 冻结快照持久化的结算屏障零值证据
+        captured_at: {type: string, format: date-time}
+    OperationEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/Operation'}
+    Operation:
+      type: object
+      required: [id, kind, seat_id, status, created_at, updated_at]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [PROVISION, SUSPEND, ASSIGN_TEMPORARY, RESTORE, REPLACE_PERMANENTLY]}
+        seat_id: {type: string}
+        target_user_id: {type: string}
+        control_rotation_evidence_ref:
+          type: string
+          description: 仅永久换员存在；本平台签发并按 Seat Pool 与相邻 Membership Epoch 复核的证据 ID
+        status: {type: string, enum: [RUNNING, SUCCEEDED, RETRYABLE, RECONCILE_REQUIRED, FAILED]}
+        reason: {type: string}
+        credential_claim_token:
+          type: string
+          x-sensitive: true
+          description: 仅随首次开通或换员明确成功响应返回的随机一次性领取令牌；平台不保存明文，操作查询和幂等重放不会返回
+        credential_claim_status:
+          type: string
+          enum: [READY, ACK_PENDING, ACK_RECONCILE_REQUIRED, CLAIMED, EXPIRED, REJECTED]
+        credential_claim_expires_at:
+          type: string
+          format: date-time
+          description: 到期后平台主动清除待交付 credential 与 token 摘要
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CredentialClaimRequest:
+      type: object
+      additionalProperties: false
+      required: [target_user_id, claim_token]
+      properties:
+        target_user_id: {type: string, minLength: 1, maxLength: 128}
+        claim_token: {type: string, minLength: 1, x-sensitive: true}
+    CredentialDelivery:
+      type: object
+      required: [operation_id, target_user_id, credential]
+      properties:
+        operation_id: {type: string}
+        target_user_id: {type: string}
+        credential:
+          type: string
+          x-sensitive: true
+          description: 一次性交付的 Sub2API Seat 访问凭据
+    CredentialDeliveryEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/CredentialDelivery'}
+    ControlRotationEvidenceRequest:
+      type: object
+      additionalProperties: false
+      required: [pool_id, account_ref, from_membership_epoch, to_membership_epoch, provider_attestation_ref]
+      properties:
+        pool_id: {type: string, minLength: 1, maxLength: 128}
+        account_ref: {type: string, minLength: 1, maxLength: 128}
+        from_membership_epoch: {type: integer, format: int64, minimum: 1}
+        to_membership_epoch:
+          type: integer
+          format: int64
+          minimum: 2
+          description: 必须等于 from_membership_epoch + 1
+        provider_attestation_ref:
+          type: string
+          minLength: 1
+          description: 已由运营或外部系统预先核验真实性的供应商变更证明不透明引用；Phase 1 不做密码学校验
+    ControlBatchIDs:
+      type: object
+      additionalProperties: false
+      required: [LOGIN, MFA, RECOVERY, OWNERSHIP]
+      properties:
+        LOGIN: {type: string}
+        MFA: {type: string}
+        RECOVERY: {type: string}
+        OWNERSHIP: {type: string}
+    ControlRotationEvidence:
+      type: object
+      required: [id, pool_id, account_ref, from_membership_epoch, to_membership_epoch, provider_attestation_ref, retired_batch_ids, active_batch_ids, created_at]
+      properties:
+        id: {type: string}
+        pool_id: {type: string}
+        account_ref: {type: string}
+        from_membership_epoch: {type: integer, format: int64}
+        to_membership_epoch: {type: integer, format: int64}
+        provider_attestation_ref:
+          type: string
+          description: 外部预先核验的供应商变更证明引用；平台证据只绑定并回传该引用
+        retired_batch_ids: {$ref: '#/components/schemas/ControlBatchIDs'}
+        active_batch_ids: {$ref: '#/components/schemas/ControlBatchIDs'}
+        created_at: {type: string, format: date-time}
+    ControlRotationEvidenceEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/ControlRotationEvidence'}
+    PendingSettlement:
+      type: object
+      additionalProperties: false
+      required: [seat_id, external_seat_id, settlement_id, request_id, assignment_epoch, status, attempt_count, created_at, updated_at]
+      properties:
+        seat_id: {type: integer, format: int64}
+        external_seat_id: {type: string}
+        settlement_id: {type: string}
+        request_id: {type: string}
+        billing_id: {type: string}
+        assignment_epoch: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [pending, failed]}
+        last_error: {type: string}
+        attempt_count: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        resolved_at: {type: string, format: date-time}
+    PendingSettlementEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/PendingSettlement'}
+    PendingSettlementListEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/PendingSettlement'}
+    ResolvePendingSettlementRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, reason, evidence]
+      properties:
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        reason: {type: string, minLength: 1, maxLength: 1000}
+        evidence: {type: string, minLength: 1, maxLength: 4000}
+    SettlementResolution:
+      type: object
+      additionalProperties: false
+      required: [seat_id, external_seat_id, settlement_id, operation_id, actor_client_id, reason, evidence, resolved_at]
+      properties:
+        seat_id: {type: integer, format: int64}
+        external_seat_id: {type: string}
+        settlement_id: {type: string}
+        operation_id: {type: string}
+        actor_client_id: {type: string}
+        reason: {type: string}
+        evidence: {type: string}
+        resolved_at: {type: string, format: date-time}
+    SettlementResolutionEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/SettlementResolution'}
+    RiskObservation:
+      type: object
+      additionalProperties: false
+      required: [id, seat_id, assignment_epoch, fingerprint, concurrency, requests, observed_at]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 128}
+        seat_id: {type: string, minLength: 1, maxLength: 128}
+        assignment_epoch: {type: integer, format: int64, minimum: 1}
+        fingerprint: {type: string, minLength: 1}
+        concurrency: {type: integer, minimum: 0}
+        requests: {type: integer, minimum: 0}
+        observed_at: {type: string, format: date-time}
+    RiskSummary:
+      type: object
+      required: [seat_id, assignment_epoch, window_start, window_end, request_count, peak_concurrency, fingerprint_count, level]
+      properties:
+        seat_id: {type: string}
+        assignment_epoch: {type: integer, format: int64}
+        window_start: {type: string, format: date-time}
+        window_end: {type: string, format: date-time}
+        request_count: {type: integer}
+        peak_concurrency: {type: integer}
+        fingerprint_count: {type: integer}
+        level: {type: string, enum: [NORMAL, WATCH, LIMITED, SUSPEND]}
+    RiskSummaryEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/RiskSummary'}
+    RiskSummaryListEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/RiskSummary'}
+    SealBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [pool_id, account_ref, batch_type, version, membership_epoch, key_ref, payload]
+      properties:
+        pool_id: {type: string, minLength: 1, maxLength: 128}
+        account_ref: {type: string, minLength: 1, maxLength: 128}
+        batch_type: {type: string, enum: [OPERATIONAL, LOGIN, MFA, RECOVERY, OWNERSHIP]}
+        version: {type: integer, format: int64, minimum: 1}
+        membership_epoch: {type: integer, format: int64, minimum: 1}
+        key_ref: {type: string, minLength: 1}
+        payload: {}
+    BatchEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/BatchMetadata'}
+    BatchMetadata:
+      type: object
+      required: [id, pool_id, account_ref, batch_type, version, membership_epoch, state, algorithm, key_ref, aad_hash, created_at]
+      properties:
+        id: {type: string}
+        pool_id: {type: string}
+        account_ref: {type: string}
+        batch_type: {type: string, enum: [OPERATIONAL, LOGIN, MFA, RECOVERY, OWNERSHIP]}
+        version: {type: integer, format: int64}
+        membership_epoch: {type: integer, format: int64}
+        state: {type: string, enum: [SEALED, ACTIVE, RETIRED]}
+        algorithm: {type: string, const: AES-256-GCM}
+        key_ref: {type: string}
+        aad_hash: {type: string}
+        created_at: {type: string, format: date-time}
+        activated_at: {type: [string, 'null'], format: date-time}
+        retired_at: {type: [string, 'null'], format: date-time}
+    ErrorEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [reason, message]
+          properties:
+            reason: {type: string}
+            message: {type: string}
+  responses:
+    OperationResponse:
+      description: 当前操作状态；`RECONCILE_REQUIRED` 不代表失败或成功
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/OperationEnvelope'}
+    BadRequest:
+      description: 请求无效
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Unauthorized:
+      description: Bearer 服务凭据缺失或无效
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Conflict:
+      description: Seat 状态、冻结快照或幂等 Key 冲突
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    BadGateway:
+      description: Sub2API 返回服务端错误或成功响应未通过一致性校验
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    ServiceUnavailable:
+      description: 持久工作流尚未接线，或 PostgreSQL/KMS/上游暂时不可用
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}

@@ -232,6 +232,7 @@ type UserIdentitySummarySet struct {
 }
 
 type StartUserIdentityBindingRequest struct {
+	UserID     int64
 	Provider   string
 	RedirectTo string
 }
@@ -403,7 +404,14 @@ func disableIdentityBindAction(summary *UserIdentitySummary) {
 	summary.BindStartPath = ""
 }
 
-func (s *UserService) PrepareIdentityBindingStart(_ context.Context, req StartUserIdentityBindingRequest) (*StartUserIdentityBindingResult, error) {
+func (s *UserService) PrepareIdentityBindingStart(ctx context.Context, req StartUserIdentityBindingRequest) (*StartUserIdentityBindingResult, error) {
+	user, err := s.userRepo.GetByID(ctx, req.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("get user: %w", err)
+	}
+	if !user.CanInteractiveAuth() {
+		return nil, ErrInteractiveAuthForbidden
+	}
 	provider := normalizeUserIdentityProvider(req.Provider)
 	if provider == "" {
 		return nil, ErrIdentityProviderInvalid
@@ -436,6 +444,9 @@ func (s *UserService) UnbindUserAuthProviderWithResult(ctx context.Context, user
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, false, fmt.Errorf("get user: %w", err)
+	}
+	if !user.CanInteractiveAuth() {
+		return nil, false, ErrInteractiveAuthForbidden
 	}
 
 	records, err := s.listUserAuthIdentities(ctx, userID)
@@ -1021,6 +1032,9 @@ func (s *UserService) ChangePassword(ctx context.Context, userID int64, req Chan
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
+	}
+	if !user.CanInteractiveAuth() {
+		return ErrInteractiveAuthForbidden
 	}
 
 	// 验证当前密码

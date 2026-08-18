@@ -481,6 +481,9 @@ func (s *AuthService) ValidatePasswordCredentials(ctx context.Context, email, pa
 	if !user.IsActive() {
 		return nil, ErrUserNotActive
 	}
+	if !user.CanInteractiveAuth() {
+		return nil, ErrInvalidCredentials
+	}
 	if !s.CheckPassword(password, user.PasswordHash) {
 		return nil, ErrInvalidCredentials
 	}

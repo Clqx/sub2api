@@ -150,7 +150,7 @@ func usageRecordContext(parent context.Context, base context.Context) context.Co
 	if requestID, _ := parent.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
 		base = context.WithValue(base, ctxkey.RequestID, strings.TrimSpace(requestID))
 	}
-	return base
+	return service.PropagateTrustedPoolSettlementTracker(parent, base)
 }
 
 func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecordTask) service.UsageRecordTask {
@@ -158,7 +158,18 @@ func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecord
 		return nil
 	}
 	return func(ctx context.Context) {
-		task(usageRecordContext(parent, ctx))
+		usageCtx := usageRecordContext(parent, ctx)
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				service.MarkTrustedPoolSettlementFailed(usageCtx)
+				panic(recovered)
+			}
+			if usageCtx.Err() != nil {
+				// 同步任务超时即使内部误返回 nil，也不能跨过持久结算屏障。
+				service.MarkTrustedPoolSettlementFailed(usageCtx)
+			}
+		}()
+		task(usageCtx)
 	}
 }
 
@@ -2391,6 +2402,11 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, tas
 		return
 	}
 	task = wrapUsageRecordTaskContext(parent, task)
+	if middleware2.IsTrustedPoolRequestContext(parent) {
+		// 可信 Seat 的额度与日志必须先落库，随后才能由 Guard 释放严格租约。
+		runUsageRecordTaskSync(task, "handler.openai_gateway.responses")
+		return
+	}
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDroppedStopped {
 			return
@@ -2402,14 +2418,21 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, tas
 		).Warn("openai.usage_record_task_stopped_sync_fallback")
 	}
 	// 回退路径：worker 池未注入或已停止时同步执行，避免退回到无界 goroutine 模式。
+	runUsageRecordTaskSync(task, "handler.openai_gateway.responses")
+}
+
+func runUsageRecordTaskSync(task service.UsageRecordTask, component string) {
+	if task == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			logger.L().With(
-				zap.String("component", "handler.openai_gateway.responses"),
+				zap.String("component", component),
 				zap.Any("panic", recovered),
-			).Error("openai.usage_record_task_panic_recovered")
+			).Error("gateway.usage_record_task_panic_recovered")
 		}
 	}()
 	task(ctx)
@@ -2430,6 +2453,10 @@ func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(parent context.Con
 		return
 	}
 	task = wrapUsageRecordTaskContext(parent, task)
+	if middleware2.IsTrustedPoolRequestContext(parent) {
+		runUsageRecordTaskSync(task, "handler.openai_gateway.usage")
+		return
+	}
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); !mode.Dropped() {
 			return

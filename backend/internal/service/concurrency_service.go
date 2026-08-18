@@ -227,6 +227,9 @@ const (
 	apiKeySlotTrackTimeout          = 2 * time.Second
 )
 
+// trustedPoolLeaseHeartbeatInterval 必须远小于默认槽位 TTL；冻结还会等待两个心跳周期确认稳定为零。
+var trustedPoolLeaseHeartbeatInterval = time.Second
+
 // ConcurrencyService 管理账号和用户的并发限制。
 type ConcurrencyService struct {
 	cache ConcurrencyCache
@@ -448,6 +451,59 @@ func (s *ConcurrencyService) TrackAPIKeySlot(ctx context.Context, apiKeyID int64
 	}
 }
 
+// TrackAPIKeySlotStrict 为可信池准入登记严格租约。
+// 与普通网关的 fail-open 统计不同，Redis 不可用时必须拒绝请求，否则冻结流程可能漏掉在途请求。
+func (s *ConcurrencyService) TrackAPIKeySlotStrict(ctx context.Context, apiKeyID int64) (func(), error) {
+	if s == nil || s.cache == nil || apiKeyID <= 0 {
+		return nil, errors.New("api key concurrency cache is unavailable")
+	}
+	cache, ok := s.cache.(APIKeyConcurrencyCache)
+	if !ok {
+		return nil, errors.New("api key concurrency cache is unsupported")
+	}
+	requestID := generateRequestID()
+	trackCtx, cancel := context.WithTimeout(ctx, apiKeySlotTrackTimeout)
+	err := cache.TrackAPIKeySlot(trackCtx, apiKeyID, requestID)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(trustedPoolLeaseHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				refreshCtx, refreshCancel := context.WithTimeout(context.Background(), apiKeySlotTrackTimeout)
+				err := cache.TrackAPIKeySlot(refreshCtx, apiKeyID, requestID)
+				refreshCancel()
+				if err != nil {
+					// 心跳失败期间严格并发读取同样会 fail-close；恢复后下一次心跳会重新登记该请求。
+					logger.LegacyPrintf("service.concurrency", "Warning: failed to refresh strict api key slot for %d (req=%s): %v", apiKeyID, requestID, err)
+				}
+			}
+		}
+	}()
+	var releaseOnce sync.Once
+	return func() {
+		releaseOnce.Do(func() {
+			close(stop)
+			// 先等待可能正在执行的心跳退出，再删除成员，避免 ZADD 晚于 ZREM 留下幽灵租约。
+			<-done
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), apiKeySlotTrackTimeout)
+			defer releaseCancel()
+			if err := cache.ReleaseAPIKeySlot(releaseCtx, apiKeyID, requestID); err != nil {
+				logger.LegacyPrintf("service.concurrency", "Warning: failed to release strict api key slot for %d (req=%s): %v", apiKeyID, requestID, err)
+			}
+		})
+	}, nil
+}
+
 // GetAPIKeyConcurrencyBatch gets real-time active request counts for API keys.
 // Stats are best-effort: missing Redis support or Redis errors return zeroes.
 func (s *ConcurrencyService) GetAPIKeyConcurrencyBatch(ctx context.Context, apiKeyIDs []int64) (map[int64]int, error) {
@@ -475,6 +531,29 @@ func (s *ConcurrencyService) GetAPIKeyConcurrencyBatch(ctx context.Context, apiK
 		result[apiKeyID] = counts[apiKeyID]
 	}
 	return result, nil
+}
+
+// GetAPIKeyConcurrencyStrict 用于可信池冻结前的严格排空判断。
+// 与面板统计接口不同，缓存缺失或 Redis 失败时必须返回错误，禁止把未知状态误判为 0。
+func (s *ConcurrencyService) GetAPIKeyConcurrencyStrict(ctx context.Context, apiKeyID int64) (int, error) {
+	if s == nil || s.cache == nil || apiKeyID <= 0 {
+		return 0, errors.New("api key concurrency cache is unavailable")
+	}
+	cache, ok := s.cache.(APIKeyConcurrencyCache)
+	if !ok {
+		return 0, errors.New("api key concurrency cache is unsupported")
+	}
+	redisCtx, cancel := context.WithTimeout(ctx, apiKeyConcurrencyFetchTimeout)
+	defer cancel()
+	counts, err := cache.GetAPIKeyConcurrencyBatch(redisCtx, []int64{apiKeyID})
+	if err != nil {
+		return 0, err
+	}
+	count, ok := counts[apiKeyID]
+	if !ok || count < 0 {
+		return 0, errors.New("api key concurrency result is incomplete")
+	}
+	return count, nil
 }
 
 func zeroAPIKeyConcurrencyMap(apiKeyIDs []int64) map[int64]int {

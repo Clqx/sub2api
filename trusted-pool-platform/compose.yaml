@@ -1,0 +1,62 @@
+name: trusted-pool-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${TRUSTED_POOL_DB_NAME:-trusted_pool}
+      POSTGRES_USER: ${TRUSTED_POOL_DB_USER:-trusted_pool}
+      POSTGRES_PASSWORD: ${TRUSTED_POOL_DB_PASSWORD:?set TRUSTED_POOL_DB_PASSWORD in .env}
+    ports:
+      - "${TRUSTED_POOL_DB_PORT:-55432}:5432"
+    volumes:
+      - trusted-pool-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TRUSTED_POOL_DB_USER:-trusted_pool} -d ${TRUSTED_POOL_DB_NAME:-trusted_pool}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      TRUSTED_POOL_HTTP_ADDR: ":8092"
+      TRUSTED_POOL_API_KEY: ${TRUSTED_POOL_API_KEY:?set TRUSTED_POOL_API_KEY in .env}
+      TRUSTED_POOL_SETTLEMENT_API_KEY: ${TRUSTED_POOL_SETTLEMENT_API_KEY:?set TRUSTED_POOL_SETTLEMENT_API_KEY in .env}
+      TRUSTED_POOL_FINGERPRINT_HMAC_KEY: ${TRUSTED_POOL_FINGERPRINT_HMAC_KEY:?set TRUSTED_POOL_FINGERPRINT_HMAC_KEY in .env}
+      TRUSTED_POOL_CLAIM_TTL: ${TRUSTED_POOL_CLAIM_TTL:-10m}
+      TRUSTED_POOL_WORKER_ID: ${TRUSTED_POOL_WORKER_ID:?set a unique TRUSTED_POOL_WORKER_ID in .env}
+      TRUSTED_POOL_WORKFLOW_LEASE_DURATION: ${TRUSTED_POOL_WORKFLOW_LEASE_DURATION:-30s}
+      TRUSTED_POOL_RECOVERY_BACKOFF: ${TRUSTED_POOL_RECOVERY_BACKOFF:-1m}
+      TRUSTED_POOL_RECOVERY_IDLE_BACKOFF: ${TRUSTED_POOL_RECOVERY_IDLE_BACKOFF:-1s}
+      TRUSTED_POOL_RUNTIME_MODE: ${TRUSTED_POOL_RUNTIME_MODE:-production}
+      TRUSTED_POOL_DATABASE_URL: ${TRUSTED_POOL_DATABASE_URL:?set TRUSTED_POOL_DATABASE_URL in .env}
+      TRUSTED_POOL_MIGRATIONS_DIR: "/migrations"
+      TRUSTED_POOL_MIGRATION_TIMEOUT: ${TRUSTED_POOL_MIGRATION_TIMEOUT:-2m}
+      TRUSTED_POOL_DB_MAX_OPEN: ${TRUSTED_POOL_DB_MAX_OPEN:-20}
+      TRUSTED_POOL_DB_MAX_IDLE: ${TRUSTED_POOL_DB_MAX_IDLE:-5}
+      TRUSTED_POOL_ENVELOPE_MODE: ${TRUSTED_POOL_ENVELOPE_MODE:-kms}
+      TRUSTED_POOL_KMS_PROVIDER: ${TRUSTED_POOL_KMS_PROVIDER:-}
+      TRUSTED_POOL_KMS_KEY_REF: ${TRUSTED_POOL_KMS_KEY_REF:?set TRUSTED_POOL_KMS_KEY_REF in .env}
+      TRUSTED_POOL_ALLOW_INSECURE_LOCAL_KEK: ${TRUSTED_POOL_ALLOW_INSECURE_LOCAL_KEK:-false}
+      TRUSTED_POOL_KEK_HEX: ${TRUSTED_POOL_KEK_HEX:-}
+      SUB2API_BASE_URL: ${SUB2API_BASE_URL:-http://host.docker.internal:8080}
+      SUB2API_INTEGRATION_CLIENT_ID: ${SUB2API_INTEGRATION_CLIENT_ID:-trusted-pool-platform}
+      SUB2API_INTEGRATION_SECRET: ${SUB2API_INTEGRATION_SECRET:?set SUB2API_INTEGRATION_SECRET in .env}
+    ports:
+      - "${TRUSTED_POOL_API_PORT:-8092}:8092"
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Phase2-A 恢复使用数据库 lease/fence；其余尚未持久化的管理端点完成前仍保持单副本。
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+
+volumes:
+  trusted-pool-postgres:

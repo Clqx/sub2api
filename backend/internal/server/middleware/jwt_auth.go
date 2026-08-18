@@ -80,6 +80,10 @@ func jwtAuth(
 			AbortWithError(c, 401, "USER_INACTIVE", "User account is not active")
 			return
 		}
+		if !user.CanInteractiveAuth() {
+			AbortWithError(c, 401, "INTERACTIVE_AUTH_FORBIDDEN", "Interactive authentication is not allowed for this principal")
+			return
+		}
 
 		// Security: Validate TokenVersion to ensure token hasn't been invalidated
 		// This check ensures tokens issued before a password change are rejected

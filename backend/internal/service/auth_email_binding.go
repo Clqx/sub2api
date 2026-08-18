@@ -26,6 +26,13 @@ func (s *AuthService) BindEmailIdentity(
 	if s == nil {
 		return nil, ErrServiceUnavailable
 	}
+	currentUser, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !currentUser.CanInteractiveAuth() {
+		return nil, ErrInteractiveAuthForbidden
+	}
 
 	normalizedEmail, err := normalizeEmailForIdentityBinding(email)
 	if err != nil {
@@ -44,10 +51,6 @@ func (s *AuthService) BindEmailIdentity(
 		return nil, err
 	}
 
-	currentUser, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
 	firstRealEmailBind := !hasBindableEmailIdentitySubject(currentUser.Email)
 	if firstRealEmailBind && len(password) < 6 {
 		return nil, infraerrors.BadRequest("PASSWORD_TOO_SHORT", "password must be at least 6 characters")
@@ -101,6 +104,16 @@ func (s *AuthService) SendEmailIdentityBindCode(ctx context.Context, userID int6
 	if s == nil {
 		return ErrServiceUnavailable
 	}
+	currentUser, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return ErrUserNotFound
+		}
+		return ErrServiceUnavailable
+	}
+	if !currentUser.CanInteractiveAuth() {
+		return ErrInteractiveAuthForbidden
+	}
 
 	normalizedEmail, err := normalizeEmailForIdentityBinding(email)
 	if err != nil {
@@ -115,13 +128,6 @@ func (s *AuthService) SendEmailIdentityBindCode(ctx context.Context, userID int6
 	if s.emailService == nil {
 		return ErrServiceUnavailable
 	}
-	if _, err := s.userRepo.GetByID(ctx, userID); err != nil {
-		if errors.Is(err, ErrUserNotFound) {
-			return ErrUserNotFound
-		}
-		return ErrServiceUnavailable
-	}
-
 	existingUser, err := s.userRepo.GetByEmail(ctx, normalizedEmail)
 	switch {
 	case err == nil && existingUser != nil && existingUser.ID != userID:

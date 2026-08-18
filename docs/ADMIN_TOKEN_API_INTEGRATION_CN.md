@@ -4,6 +4,10 @@
 Sub2API 的外部系统，重点覆盖兑换码、余额充值/退款、订阅开通/续期/扣减和
 对账。
 
+如需接入通用用户身份、使用 `/api/v1/auth/me` 换发外部项目短会话，或了解
+JWT、Refresh Token 与 Admin API Key 的边界，请先阅读
+[`JWT_CROSS_PROJECT_AUTH_INTEGRATION_CN.md`](./JWT_CROSS_PROJECT_AUTH_INTEGRATION_CN.md)。
+
 当前管理端共暴露 397 个 HTTP 路由：
 
 - `backend/internal/server/routes/admin.go`：380 个

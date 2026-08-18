@@ -338,6 +338,17 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 		"user_id", session.UserID,
 		"email", session.Email)
 
+	// 临时 2FA 会话可能在主体转换为 Seat 前签发，必须在消费验证码或绑定身份前重查。
+	user, err := h.userService.GetByID(c.Request.Context(), session.UserID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if !user.CanInteractiveAuth() {
+		response.ErrorFrom(c, service.ErrInteractiveAuthForbidden)
+		return
+	}
+
 	// Verify the TOTP code
 	if err := h.totpService.VerifyCode(c.Request.Context(), session.UserID, req.TotpCode); err != nil {
 		slog.Debug("login_2fa_verify_failed",
@@ -347,12 +358,6 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 		return
 	}
 
-	// Get the user (before session deletion so we can check backend mode)
-	user, err := h.userService.GetByID(c.Request.Context(), session.UserID)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
 	if err := ensureLoginUserActive(user); err != nil {
 		response.ErrorFrom(c, err)
 		return

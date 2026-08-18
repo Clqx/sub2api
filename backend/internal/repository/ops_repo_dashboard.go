@@ -58,13 +58,16 @@ func (r *opsRepository) getDashboardOverviewRaw(ctx context.Context, filter *ser
 	}
 
 	latencyCtx, cancelLatency := context.WithTimeout(ctx, opsRawLatencyQueryTimeout)
-	duration, ttft, _, err := r.queryUsageLatency(latencyCtx, filter, start, end)
+	duration, ttft, ttftSampleCount, err := r.queryUsageLatency(
+		latencyCtx, filter, start, end,
+	)
 	cancelLatency()
 	if err != nil {
 		if isQueryTimeoutErr(err) {
 			degraded = true
 			duration = service.OpsPercentiles{}
 			ttft = service.OpsPercentiles{}
+			ttftSampleCount = 0
 		} else {
 			return nil, err
 		}
@@ -156,8 +159,9 @@ func (r *opsRepository) getDashboardOverviewRaw(ctx context.Context, filter *ser
 			Avg:     tpsAvg,
 		},
 
-		Duration: duration,
-		TTFT:     ttft,
+		Duration:        duration,
+		TTFT:            ttft,
+		TTFTSampleCount: ttftSampleCount,
 	}, nil
 }
 
@@ -255,6 +259,7 @@ func (r *opsRepository) getDashboardOverviewPreaggregated(ctx context.Context, f
 		{weight: head.ttftSampleCount, p: head.ttft},
 		{weight: tail.ttftSampleCount, p: tail.ttft},
 	})
+	ttftSampleCount := preagg.ttftSampleCount + head.ttftSampleCount + tail.ttftSampleCount
 
 	windowSeconds := end.Sub(start).Seconds()
 	if windowSeconds <= 0 {
@@ -339,8 +344,9 @@ func (r *opsRepository) getDashboardOverviewPreaggregated(ctx context.Context, f
 			Avg:     tpsAvg,
 		},
 
-		Duration: duration,
-		TTFT:     ttft,
+		Duration:        duration,
+		TTFT:            ttft,
+		TTFTSampleCount: ttftSampleCount,
 	}, nil
 }
 

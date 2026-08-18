@@ -2403,6 +2403,11 @@ func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task serv
 		return
 	}
 	task = wrapUsageRecordTaskContext(parent, task)
+	if middleware2.IsTrustedPoolRequestContext(parent) {
+		// 可信 Seat 必须在 Gateway Guard 释放租约前完成计费和 usage log，冻结快照才能稳定。
+		runUsageRecordTaskSync(task, "handler.gateway.messages")
+		return
+	}
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDroppedStopped {
 			return
@@ -2414,17 +2419,7 @@ func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task serv
 		).Warn("gateway.usage_record_task_stopped_sync_fallback")
 	}
 	// 回退路径：worker 池未注入或已停止时同步执行，避免退回到无界 goroutine 模式。
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			logger.L().With(
-				zap.String("component", "handler.gateway.messages"),
-				zap.Any("panic", recovered),
-			).Error("gateway.usage_record_task_panic_recovered")
-		}
-	}()
-	task(ctx)
+	runUsageRecordTaskSync(task, "handler.gateway.messages")
 }
 
 // submitMandatoryUsageRecordTask never silently drops billing work on pool overflow.
@@ -2433,6 +2428,10 @@ func (h *GatewayHandler) submitMandatoryUsageRecordTask(parent context.Context, 
 		return
 	}
 	task = wrapUsageRecordTaskContext(parent, task)
+	if middleware2.IsTrustedPoolRequestContext(parent) {
+		runUsageRecordTaskSync(task, "handler.gateway.usage")
+		return
+	}
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); !mode.Dropped() {
 			return

@@ -2,6 +2,9 @@
 
 这是一个与 Sub2API 主数据库隔离的兑换码服务，支持商品展示、外部购买链接、余额充值码、订阅续期码、履约重试、操作审计、CSV 导出和运营分析。
 
+了解兑换平台如何接收、验证和交换 Sub2API JWT，请参考
+[`AUTH_INTEGRATION_EXAMPLE_CN.md`](./AUTH_INTEGRATION_EXAMPLE_CN.md)。
+
 平台使用独立 PostgreSQL 数据库，通过 Sub2API 管理接口发放权益。兑换码明文只在生成时返回一次，数据库仅保存 HMAC 哈希和掩码；上游履约始终复用稳定业务码和 `Idempotency-Key`。
 
 ## 安全边界

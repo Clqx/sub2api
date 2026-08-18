@@ -118,6 +118,9 @@ func (s *AuthService) loginOrRegisterVerifiedEmailOAuth(
 	if !user.IsActive() {
 		return nil, nil, ErrUserNotActive
 	}
+	if !user.CanInteractiveAuth() {
+		return nil, nil, ErrInteractiveAuthForbidden
+	}
 	if err := s.ensureEmailOAuthIdentity(ctx, user.ID, EmailOAuthIdentityInput{
 		ProviderType:     providerType,
 		ProviderKey:      providerKey,

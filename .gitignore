@@ -136,6 +136,7 @@ docs/*
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
 !docs/ADMIN_TOKEN_API_INTEGRATION_CN.md
+!docs/JWT_CROSS_PROJECT_AUTH_INTEGRATION_CN.md
 !docs/ASYNC_IMAGE_TASKS.md
 !docs/legal/
 !docs/legal/*.md

@@ -6,9 +6,49 @@ import (
 	"testing"
 	"time"
 
+	servermiddleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTrustedPoolUsageRecordRunsSynchronouslyWithWorkerPool(t *testing.T) {
+	pool := newUsageRecordTestPool(t)
+	h := &GatewayHandler{usageRecordWorkerPool: pool}
+	called := false
+	parent := servermiddleware.WithTrustedPoolRequestContext(context.Background())
+
+	h.submitUsageRecordTask(parent, func(context.Context) { called = true })
+	require.True(t, called, "可信 Seat 返回前必须完成 usage 结算")
+}
+
+func TestTrustedPoolOpenAIUsageRecordRunsSynchronouslyWithWorkerPool(t *testing.T) {
+	pool := newUsageRecordTestPool(t)
+	h := &OpenAIGatewayHandler{usageRecordWorkerPool: pool}
+	called := false
+	parent := servermiddleware.WithTrustedPoolRequestContext(context.Background())
+
+	h.submitOpenAIUsageRecordTask(parent, &service.OpenAIForwardResult{}, func(context.Context) { called = true })
+	require.True(t, called, "可信 Seat 返回前必须完成 OpenAI usage 结算")
+}
+
+func TestTrustedPoolUsageRecordPanicMarksSettlementFailed(t *testing.T) {
+	h := &GatewayHandler{}
+	parent, tracker := service.WithTrustedPoolSettlementTracker(context.Background())
+	parent = servermiddleware.WithTrustedPoolRequestContext(parent)
+
+	h.submitUsageRecordTask(parent, func(context.Context) { panic("billing panic") })
+	require.True(t, tracker.Failed(), "计费 panic 必须保留 pending settlement")
+}
+
+func TestUsageRecordTimeoutMarksSettlementFailed(t *testing.T) {
+	parent, tracker := service.WithTrustedPoolSettlementTracker(context.Background())
+	base, cancel := context.WithCancel(context.Background())
+	cancel()
+	wrapped := wrapUsageRecordTaskContext(parent, func(context.Context) {})
+
+	wrapped(base)
+	require.True(t, tracker.Failed(), "计费 context 超时或取消必须保留 pending settlement")
+}
 
 func newUsageRecordTestPool(t *testing.T) *service.UsageRecordWorkerPool {
 	t.Helper()
