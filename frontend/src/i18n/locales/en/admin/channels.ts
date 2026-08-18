@@ -80,6 +80,13 @@ export default {
           perRequestPrice: 'per-request price'
         }
       },
+      timePricingValidation: {
+        timezone: 'Select a valid IANA time zone',
+        format: 'Start and end times must use HH:mm:ss format',
+        range: 'Start time must be earlier than end time; split ranges across midnight',
+        overlap: 'Time periods must not overlap',
+        multiplier: 'Multiplier must be greater than 0 with at most two decimal places'
+      },
       deleteConfirm: 'Are you sure you want to delete channel "{name}"? This cannot be undone.',
       columns: {
         name: 'Name',
@@ -93,7 +100,8 @@ export default {
       billingMode: {
         token: 'Token',
         perRequest: 'Per Request',
-        image: 'Image (Per Request)'
+        image: 'Image (Per Request)',
+        video: 'Video (Per Second)'
       },
       form: {
         name: 'Name',
@@ -121,12 +129,20 @@ export default {
         imageOutputPrice: 'Image Output Price',
         pricePlaceholder: 'Default',
         intervals: 'Context Intervals (optional)',
+        timePricing: 'Time-based pricing (optional)',
+        timezone: 'Time zone',
+        addTimePeriod: 'Add period',
+        startTime: 'Start time',
+        endTime: 'End time',
+        multiplier: 'Multiplier',
+        removeTimePeriod: 'Remove period',
         minTokens: 'Min',
         maxTokens: 'Max',
         inclusive: '(inclusive)',
         addInterval: 'Add Interval',
         requestTiers: 'Request Tiers',
         imageTiers: 'Image Tiers (Per Request)',
+        videoTiers: 'Video Resolution Tiers (Per Second)',
         addTier: 'Add Tier',
         noTiersYet: 'No tiers yet. Click add to configure per-request pricing.',
         noPricingRules: 'No pricing rules yet. Click "Add" to create one.',
@@ -143,6 +159,7 @@ export default {
         billingModelSourceChannelMapped: 'Bill by channel-mapped model',
         billingModelSourceRequested: 'Bill by requested model',
         billingModelSourceUpstream: 'Bill by final upstream model',
+        billingModelSourceResponse: 'Bill by upstream response model',
         billingModelSourceHint: 'Controls which model name is used for pricing lookup',
         selectedCount: '{count} selected',
         searchGroups: 'Search groups...',
@@ -151,6 +168,7 @@ export default {
         restrictModelsHint: 'When enabled, only models in the pricing list are allowed. Others will be rejected.',
         defaultPerRequestPrice: 'Default per-request price (fallback when no tier matches)',
         defaultImagePrice: 'Default image price (fallback when no tier matches)',
+        defaultVideoPrice: 'Default video price per second (fallback when no tier matches)',
         platformConfig: 'Platform Configuration',
         webSearchEmulation: 'Web Search Emulation',
         webSearchEmulationHint: '⚠️ When enabled, all accounts in this channel\'s Anthropic groups will intercept web_search requests. Use with caution.',
