@@ -1229,41 +1229,120 @@ func (s *adminServiceImpl) RefreshAccountCredentials(ctx context.Context, id int
 	return account, nil
 }
 
-func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Account, error) {
-	if err := s.accountRepo.ClearError(ctx, id); err != nil {
+func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64, preconditions ...AccountStatePrecondition) (*Account, error) {
+	precondition := firstAccountStatePrecondition(preconditions)
+	if precondition.Empty() {
+		if err := s.accountRepo.ClearError(ctx, id); err != nil {
+			return nil, err
+		}
+		if err := s.accountRepo.ClearRateLimit(ctx, id); err != nil {
+			return nil, err
+		}
+		if err := s.accountRepo.ClearAntigravityQuotaScopes(ctx, id); err != nil {
+			return nil, err
+		}
+		if err := s.accountRepo.ClearModelRateLimits(ctx, id); err != nil {
+			return nil, err
+		}
+		if err := s.accountRepo.ClearTempUnschedulable(ctx, id); err != nil {
+			return nil, err
+		}
+		if s.runtimeBlocker != nil {
+			s.runtimeBlocker.ClearAccountSchedulingBlock(id)
+		}
+		return s.accountRepo.GetByID(ctx, id)
+	}
+	conditionalRepo, ok := s.accountRepo.(ConditionalAccountStateRepository)
+	if !ok {
+		return nil, ErrAccountConditionalUpdateUnavailable
+	}
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.accountRepo.ClearRateLimit(ctx, id); err != nil {
+	if err := accountMatchesStatePrecondition(account, precondition); err != nil {
 		return nil, err
 	}
-	if err := s.accountRepo.ClearAntigravityQuotaScopes(ctx, id); err != nil {
+	if account.Status != StatusError {
+		return nil, ErrAccountStateChanged
+	}
+	runtimeGeneration := captureRuntimeBlockGeneration(s.runtimeBlocker, account, true, false, false)
+	updated, err := conditionalRepo.ClearErrorIf(ctx, id, precondition)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.accountRepo.ClearModelRateLimits(ctx, id); err != nil {
-		return nil, err
+	if !updated {
+		return nil, ErrAccountStateChanged
 	}
-	if err := s.accountRepo.ClearTempUnschedulable(ctx, id); err != nil {
-		return nil, err
-	}
-	if s.runtimeBlocker != nil {
-		s.runtimeBlocker.ClearAccountSchedulingBlock(id)
-	}
-	return s.accountRepo.GetByID(ctx, id)
+	runtimeGeneration.clearIfUnchanged()
+	account.Status = StatusActive
+	account.ErrorMessage = ""
+	return account, nil
 }
 
 func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorMsg string) error {
 	return s.accountRepo.SetError(ctx, id, errorMsg)
 }
 
-func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error) {
-	if err := s.accountRepo.SetSchedulable(ctx, id, schedulable); err != nil {
-		return nil, err
+func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool, preconditions ...AccountStatePrecondition) (*Account, error) {
+	precondition := firstAccountStatePrecondition(preconditions)
+	if precondition.Empty() {
+		if err := s.accountRepo.SetSchedulable(ctx, id, schedulable); err != nil {
+			return nil, err
+		}
+		return s.accountRepo.GetByID(ctx, id)
 	}
-	updated, err := s.accountRepo.GetByID(ctx, id)
+	conditionalRepo, ok := s.accountRepo.(ConditionalAccountStateRepository)
+	if !ok {
+		return nil, ErrAccountConditionalUpdateUnavailable
+	}
+	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return updated, nil
+	if err := accountMatchesStatePrecondition(account, precondition); err != nil {
+		return nil, err
+	}
+	effectivePrecondition := precondition
+	if effectivePrecondition.ExpectedUpdatedAt == nil {
+		expectedUpdatedAt := account.UpdatedAt
+		effectivePrecondition.ExpectedUpdatedAt = &expectedUpdatedAt
+	}
+	applied, err := conditionalRepo.SetSchedulableIf(ctx, id, schedulable, effectivePrecondition)
+	if err != nil {
+		return nil, err
+	}
+	if !applied {
+		return nil, ErrAccountStateChanged
+	}
+	account.Schedulable = schedulable
+	return account, nil
+}
+
+func firstAccountStatePrecondition(preconditions []AccountStatePrecondition) AccountStatePrecondition {
+	if len(preconditions) == 0 {
+		return AccountStatePrecondition{}
+	}
+	return preconditions[0]
+}
+
+func accountMatchesStatePrecondition(account *Account, precondition AccountStatePrecondition) error {
+	if account == nil {
+		return ErrAccountNotFound
+	}
+	if precondition.ExpectedUpdatedAt != nil && !account.UpdatedAt.Equal(*precondition.ExpectedUpdatedAt) {
+		return ErrAccountStateChanged
+	}
+	if precondition.ExpectedStatus != nil && account.Status != *precondition.ExpectedStatus {
+		return ErrAccountStateChanged
+	}
+	if precondition.ExpectedSchedulable != nil && account.Schedulable != *precondition.ExpectedSchedulable {
+		return ErrAccountStateChanged
+	}
+	if precondition.ExpectedTempUnschedulableUntil != nil && (account.TempUnschedulableUntil == nil || !account.TempUnschedulableUntil.Equal(*precondition.ExpectedTempUnschedulableUntil)) {
+		return ErrAccountStateChanged
+	}
+	return nil
 }
 
 func (s *adminServiceImpl) RevertAccountProxyFallback(ctx context.Context, id int64) error {

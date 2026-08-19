@@ -7,6 +7,7 @@ import (
 
 // TempUnschedState 临时不可调度状态
 type TempUnschedState struct {
+	Generation           string `json:"generation,omitempty"`             // 缓存代际，防止旧清理删除新状态
 	UntilUnix            int64  `json:"until_unix"`                       // 解除时间（Unix 时间戳）
 	TriggeredAtUnix      int64  `json:"triggered_at_unix"`                // 触发时间（Unix 时间戳）
 	StatusCode           int    `json:"status_code"`                      // 触发的错误码
@@ -23,6 +24,12 @@ type TempUnschedCache interface {
 	SetTempUnsched(ctx context.Context, accountID int64, state *TempUnschedState) error
 	GetTempUnsched(ctx context.Context, accountID int64) (*TempUnschedState, error)
 	DeleteTempUnsched(ctx context.Context, accountID int64) error
+}
+
+// ConditionalTempUnschedCache deletes only the exact cache generation observed
+// by a caller. An empty generation means the caller observed no cache key.
+type ConditionalTempUnschedCache interface {
+	DeleteTempUnschedIfObserved(ctx context.Context, accountID int64, observedGeneration string) (bool, error)
 }
 
 // TimeoutCounterCache 超时计数器缓存接口

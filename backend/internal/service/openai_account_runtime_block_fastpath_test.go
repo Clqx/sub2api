@@ -398,6 +398,24 @@ func TestOpenAIRuntimeBlock_ClearAccountSchedulingBlock(t *testing.T) {
 	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
+func TestOpenAIRuntimeBlock_ClearIfGenerationDoesNotRemoveRearmedBlock(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 48, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+	svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "429-old")
+	oldGeneration, ok := svc.AccountSchedulingBlockGeneration(account.ID)
+	require.True(t, ok)
+
+	svc.BlockAccountScheduling(account, time.Now().Add(2*time.Minute), "429-new")
+	require.False(t, svc.ClearAccountSchedulingBlockIfGeneration(account.ID, oldGeneration))
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+
+	currentGeneration, ok := svc.AccountSchedulingBlockGeneration(account.ID)
+	require.True(t, ok)
+	require.True(t, svc.ClearAccountSchedulingBlockIfGeneration(account.ID, currentGeneration))
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+}
+
 func TestShouldStopOpenAIOAuth429Failover_OnlyDuringStorm(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	account := &Account{ID: 42, Platform: PlatformOpenAI, Type: AccountTypeOAuth}

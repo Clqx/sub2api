@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -64,6 +65,45 @@ type AccountHandler struct {
 	grokImportProber        grokImportProber
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
 	ollamaCloudUsage        *service.OllamaCloudUsageService
+}
+
+// AccountStatePreconditionRequest is optional on administrative recovery
+// endpoints. Existing requests with an empty body keep their legacy behavior;
+// callers that provide an observed snapshot get compare-and-set semantics.
+type AccountStatePreconditionRequest struct {
+	ExpectedUpdatedAt              *time.Time `json:"expected_updated_at"`
+	ExpectedStatus                 *string    `json:"expected_status"`
+	ExpectedSchedulable            *bool      `json:"expected_schedulable"`
+	ExpectedTempUnschedulableUntil *time.Time `json:"expected_temp_unschedulable_until"`
+}
+
+func (r AccountStatePreconditionRequest) servicePrecondition() service.AccountStatePrecondition {
+	return service.AccountStatePrecondition{
+		ExpectedUpdatedAt:              r.ExpectedUpdatedAt,
+		ExpectedStatus:                 r.ExpectedStatus,
+		ExpectedSchedulable:            r.ExpectedSchedulable,
+		ExpectedTempUnschedulableUntil: r.ExpectedTempUnschedulableUntil,
+	}
+}
+
+func preconditionRequest(p service.AccountStatePrecondition) AccountStatePreconditionRequest {
+	return AccountStatePreconditionRequest{
+		ExpectedUpdatedAt:              p.ExpectedUpdatedAt,
+		ExpectedStatus:                 p.ExpectedStatus,
+		ExpectedSchedulable:            p.ExpectedSchedulable,
+		ExpectedTempUnschedulableUntil: p.ExpectedTempUnschedulableUntil,
+	}
+}
+
+func bindOptionalAccountStatePrecondition(c *gin.Context) (service.AccountStatePrecondition, error) {
+	var req AccountStatePreconditionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		if errors.Is(err, io.EOF) {
+			return service.AccountStatePrecondition{}, nil
+		}
+		return service.AccountStatePrecondition{}, err
+	}
+	return req.servicePrecondition(), nil
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -1130,21 +1170,34 @@ func (h *AccountHandler) RecoverState(c *gin.Context) {
 		response.Error(c, http.StatusServiceUnavailable, "Rate limit service unavailable")
 		return
 	}
-
-	if _, err := h.rateLimitService.RecoverAccountState(c.Request.Context(), accountID, service.AccountRecoveryOptions{
-		InvalidateToken: true,
-	}); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	account, err := h.adminService.GetAccount(c.Request.Context(), accountID)
+	precondition, err := bindOptionalAccountStatePrecondition(c)
 	if err != nil {
-		response.ErrorFrom(c, err)
+		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
 
-	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
+	payload := struct {
+		AccountID    int64                           `json:"account_id"`
+		Precondition AccountStatePreconditionRequest `json:"precondition"`
+	}{AccountID: accountID, Precondition: preconditionRequest(precondition)}
+	executeAdminOptionalIdempotentJSON(c, "admin.accounts.recover_state", payload, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		result, err := h.rateLimitService.RecoverAccountStateConditionally(ctx, accountID, precondition, true)
+		if err != nil {
+			return nil, err
+		}
+		if !precondition.Empty() {
+			return gin.H{
+				"account_id":         accountID,
+				"cleared_error":      result.ClearedError,
+				"cleared_rate_limit": result.ClearedRateLimit,
+			}, nil
+		}
+		account, err := h.adminService.GetAccount(ctx, accountID)
+		if err != nil {
+			return nil, err
+		}
+		return h.buildAccountResponseWithRuntime(ctx, account), nil
+	})
 }
 
 // SyncFromCRS handles syncing accounts from claude-relay-service (CRS)
@@ -1530,21 +1583,33 @@ func (h *AccountHandler) ClearError(c *gin.Context) {
 		return
 	}
 
-	account, err := h.adminService.ClearAccountError(c.Request.Context(), accountID)
+	precondition, err := bindOptionalAccountStatePrecondition(c)
 	if err != nil {
-		response.ErrorFrom(c, err)
+		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
 
-	// 清除错误后，同时清除 token 缓存，确保下次请求会获取最新的 token（触发刷新或从 DB 读取）
-	// 这解决了管理员重置账号状态后，旧的失效 token 仍在缓存中导致立即再次 401 的问题
-	if h.tokenCacheInvalidator != nil && account.IsOAuth() {
-		if invalidateErr := h.tokenCacheInvalidator.InvalidateToken(c.Request.Context(), account); invalidateErr != nil {
-			log.Printf("[WARN] Failed to invalidate token cache for account %d: %v", accountID, invalidateErr)
+	payload := struct {
+		AccountID    int64                           `json:"account_id"`
+		Precondition AccountStatePreconditionRequest `json:"precondition"`
+	}{AccountID: accountID, Precondition: preconditionRequest(precondition)}
+	executeAdminOptionalIdempotentJSON(c, "admin.accounts.clear_error", payload, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		account, err := h.adminService.ClearAccountError(ctx, accountID, precondition)
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
+		if !precondition.Empty() {
+			return gin.H{"account_id": accountID, "cleared_error": true}, nil
+		}
+		// Preserve legacy manual recovery semantics, but a conditional recovery
+		// must not invalidate a concurrently refreshed OAuth token.
+		if precondition.Empty() && h.tokenCacheInvalidator != nil && account.IsOAuth() {
+			if invalidateErr := h.tokenCacheInvalidator.InvalidateToken(ctx, account); invalidateErr != nil {
+				log.Printf("[WARN] Failed to invalidate token cache for account %d: %v", accountID, invalidateErr)
+			}
+		}
+		return h.buildAccountResponseWithRuntime(ctx, account), nil
+	})
 }
 
 // RevertProxyFallback handles reverting account proxy to original before fallback.
@@ -2345,19 +2410,29 @@ func (h *AccountHandler) ClearRateLimit(c *gin.Context) {
 		return
 	}
 
-	err = h.rateLimitService.ClearRateLimit(c.Request.Context(), accountID)
+	precondition, err := bindOptionalAccountStatePrecondition(c)
 	if err != nil {
-		response.ErrorFrom(c, err)
+		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
 
-	account, err := h.adminService.GetAccount(c.Request.Context(), accountID)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
+	payload := struct {
+		AccountID    int64                           `json:"account_id"`
+		Precondition AccountStatePreconditionRequest `json:"precondition"`
+	}{AccountID: accountID, Precondition: preconditionRequest(precondition)}
+	executeAdminOptionalIdempotentJSON(c, "admin.accounts.clear_rate_limit", payload, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		if err := h.rateLimitService.ClearAccountRateLimitConditionally(ctx, accountID, precondition); err != nil {
+			return nil, err
+		}
+		if !precondition.Empty() {
+			return gin.H{"account_id": accountID, "cleared_rate_limit": true}, nil
+		}
+		account, err := h.adminService.GetAccount(ctx, accountID)
+		if err != nil {
+			return nil, err
+		}
+		return h.buildAccountResponseWithRuntime(ctx, account), nil
+	})
 }
 
 // ResetQuota handles resetting account quota usage
@@ -2418,12 +2493,22 @@ func (h *AccountHandler) ClearTempUnschedulable(c *gin.Context) {
 		return
 	}
 
-	if err := h.rateLimitService.ClearTempUnschedulable(c.Request.Context(), accountID); err != nil {
-		response.ErrorFrom(c, err)
+	precondition, err := bindOptionalAccountStatePrecondition(c)
+	if err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
 
-	response.Success(c, gin.H{"message": "Temp unschedulable cleared successfully"})
+	payload := struct {
+		AccountID    int64                           `json:"account_id"`
+		Precondition AccountStatePreconditionRequest `json:"precondition"`
+	}{AccountID: accountID, Precondition: preconditionRequest(precondition)}
+	executeAdminOptionalIdempotentJSON(c, "admin.accounts.clear_temp_unschedulable", payload, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		if err := h.rateLimitService.ClearTempUnschedulableConditionally(ctx, accountID, precondition); err != nil {
+			return nil, err
+		}
+		return gin.H{"message": "Temp unschedulable cleared successfully"}, nil
+	})
 }
 
 // GetTodayStats handles getting account today statistics
@@ -2533,6 +2618,7 @@ func (h *AccountHandler) GetBatchUsage(c *gin.Context) {
 // SetSchedulableRequest represents the request body for setting schedulable status
 type SetSchedulableRequest struct {
 	Schedulable bool `json:"schedulable"`
+	AccountStatePreconditionRequest
 }
 
 // SetSchedulable handles toggling account schedulable status
@@ -2550,13 +2636,21 @@ func (h *AccountHandler) SetSchedulable(c *gin.Context) {
 		return
 	}
 
-	account, err := h.adminService.SetAccountSchedulable(c.Request.Context(), accountID, req.Schedulable)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
+	precondition := req.servicePrecondition()
+	payload := struct {
+		AccountID int64                 `json:"account_id"`
+		Body      SetSchedulableRequest `json:"body"`
+	}{AccountID: accountID, Body: req}
+	executeAdminOptionalIdempotentJSON(c, "admin.accounts.set_schedulable", payload, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		account, err := h.adminService.SetAccountSchedulable(ctx, accountID, req.Schedulable, precondition)
+		if err != nil {
+			return nil, err
+		}
+		if !precondition.Empty() {
+			return gin.H{"account_id": accountID, "schedulable": req.Schedulable}, nil
+		}
+		return h.buildAccountResponseWithRuntime(ctx, account), nil
+	})
 }
 
 // GetAvailableModels handles getting available models for an account

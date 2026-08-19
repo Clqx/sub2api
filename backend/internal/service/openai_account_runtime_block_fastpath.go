@@ -226,6 +226,44 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
 }
 
+func (s *OpenAIGatewayService) AccountSchedulingBlockGeneration(accountID int64) (uint64, bool) {
+	if s == nil || accountID <= 0 {
+		return 0, false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, exists := s.openaiAccountRuntimeBlockUntil.Load(accountID); !exists {
+		return 0, false
+	}
+	value, exists := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	if !exists {
+		return 0, false
+	}
+	generation, ok := value.(uint64)
+	return generation, ok
+}
+
+func (s *OpenAIGatewayService) ClearAccountSchedulingBlockIfGeneration(accountID int64, generation uint64) bool {
+	if s == nil || accountID <= 0 || generation == 0 {
+		return false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+	value, exists := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	currentGeneration, ok := value.(uint64)
+	if !exists || !ok || currentGeneration != generation {
+		return false
+	}
+	if _, exists := s.openaiAccountRuntimeBlockUntil.Load(accountID); !exists {
+		return false
+	}
+	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+	return true
+}
+
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {
 	if s == nil || !isOpenAIAccount(account) {
 		return false

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -24,12 +25,38 @@ var tempUnschedSetScript = redis.NewScript(`
 		if ok and existing_data and existing_data.until_unix then
 			local existing_until = tonumber(existing_data.until_unix)
 			if existing_until and new_until <= existing_until then
+				-- Preserve the longer isolation and its TTL, but every accepted fault
+				-- observation gets a fresh token so an in-flight recovery cannot delete it.
+				local new_ok, new_data = pcall(cjson.decode, new_value)
+				if new_ok and new_data and new_data.generation then
+					existing_data.generation = new_data.generation
+					redis.call('SET', key, cjson.encode(existing_data), 'KEEPTTL')
+				end
 				return 0
 			end
 		end
 	end
 
 	redis.call('SET', key, new_value, 'EX', new_ttl)
+	return 1
+`)
+
+var tempUnschedDeleteIfObservedScript = redis.NewScript(`
+	local existing = redis.call('GET', KEYS[1])
+	if not existing then
+		return 1
+	end
+	if ARGV[1] == '' then
+		return 0
+	end
+	local ok, existing_data = pcall(cjson.decode, existing)
+	if not ok or not existing_data or not existing_data.generation then
+		return 0
+	end
+	if existing_data.generation ~= ARGV[1] then
+		return 0
+	end
+	redis.call('DEL', KEYS[1])
 	return 1
 `)
 
@@ -45,7 +72,9 @@ func NewTempUnschedCache(rdb *redis.Client) service.TempUnschedCache {
 func (c *tempUnschedCache) SetTempUnsched(ctx context.Context, accountID int64, state *service.TempUnschedState) error {
 	key := fmt.Sprintf("%s%d", tempUnschedPrefix, accountID)
 
-	stateJSON, err := json.Marshal(state)
+	storedState := *state
+	storedState.Generation = uuid.NewString()
+	stateJSON, err := json.Marshal(&storedState)
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
@@ -88,4 +117,18 @@ func (c *tempUnschedCache) GetTempUnsched(ctx context.Context, accountID int64) 
 func (c *tempUnschedCache) DeleteTempUnsched(ctx context.Context, accountID int64) error {
 	key := fmt.Sprintf("%s%d", tempUnschedPrefix, accountID)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func (c *tempUnschedCache) DeleteTempUnschedIfObserved(ctx context.Context, accountID int64, observedGeneration string) (bool, error) {
+	key := fmt.Sprintf("%s%d", tempUnschedPrefix, accountID)
+	deleted, err := tempUnschedDeleteIfObservedScript.Run(
+		ctx,
+		c.rdb,
+		[]string{key},
+		observedGeneration,
+	).Int()
+	if err != nil {
+		return false, err
+	}
+	return deleted == 1, nil
 }

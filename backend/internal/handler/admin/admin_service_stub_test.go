@@ -36,9 +36,15 @@ type stubAdminService struct {
 	bulkUpdateAccountErr                error
 	lastBulkUpdateAccountInput          *service.BulkUpdateAccountsInput
 	getAccountResult                    *service.Account
+	getAccountErr                       error
+	getAccountCalls                     int
 	updateAccountCalls                  int
 	updateAccountExtraCalls             int
 	checkMixedErr                       error
+	clearAccountErrorErr                error
+	clearAccountErrorCalls              int
+	clearAccountErrorResult             *service.Account
+	clearAccountErrorPreconditions      []service.AccountStatePrecondition
 	lastMixedCheck                      struct {
 		accountID int64
 		platform  string
@@ -464,6 +470,10 @@ func (s *stubAdminService) ListOpenAISchedulableAccountsForSchedulerScore(_ cont
 }
 
 func (s *stubAdminService) GetAccount(ctx context.Context, id int64) (*service.Account, error) {
+	s.getAccountCalls++
+	if s.getAccountErr != nil {
+		return nil, s.getAccountErr
+	}
 	if s.getAccountResult != nil {
 		return s.getAccountResult, nil
 	}
@@ -524,7 +534,15 @@ func (s *stubAdminService) RefreshAccountCredentials(ctx context.Context, id int
 	return &account, nil
 }
 
-func (s *stubAdminService) ClearAccountError(ctx context.Context, id int64) (*service.Account, error) {
+func (s *stubAdminService) ClearAccountError(ctx context.Context, id int64, preconditions ...service.AccountStatePrecondition) (*service.Account, error) {
+	s.clearAccountErrorCalls++
+	s.clearAccountErrorPreconditions = append([]service.AccountStatePrecondition(nil), preconditions...)
+	if s.clearAccountErrorErr != nil {
+		return nil, s.clearAccountErrorErr
+	}
+	if s.clearAccountErrorResult != nil {
+		return s.clearAccountErrorResult, nil
+	}
 	account := service.Account{ID: id, Name: "account", Status: service.StatusActive}
 	return &account, nil
 }
@@ -533,7 +551,7 @@ func (s *stubAdminService) SetAccountError(ctx context.Context, id int64, errorM
 	return nil
 }
 
-func (s *stubAdminService) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*service.Account, error) {
+func (s *stubAdminService) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool, preconditions ...service.AccountStatePrecondition) (*service.Account, error) {
 	account := service.Account{ID: id, Name: "account", Status: service.StatusActive, Schedulable: schedulable}
 	return &account, nil
 }

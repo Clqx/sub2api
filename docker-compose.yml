@@ -1,6 +1,33 @@
 name: sub2api-loc
 
 services:
+  postgres-tls-init:
+    image: alpine:3.21
+    container_name: sub2api-loc-postgres-tls-init
+    restart: "no"
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        install -m 0644 /source/server.crt /tls/server.crt;
+        install -m 0600 /source/server.key /tls/server.key;
+        chown 70:70 /tls/server.crt /tls/server.key
+    volumes:
+      - ./.secrets/postgres-public/server.crt:/source/server.crt:ro
+      - ./.secrets/postgres-public/server.key:/source/server.key:ro
+      - postgres-loc-tls:/tls
+    networks:
+      - sub2api-loc-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+
   postgres-loc:
     image: postgres:18-alpine
     container_name: sub2api-loc-postgres
@@ -22,9 +49,24 @@ services:
       - shared_buffers=512MB
       - -c
       - effective_cache_size=4GB
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql/tls/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql/tls/server.key
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.public.conf
     volumes:
       - postgres-loc-data:/var/lib/postgresql/data
+      - postgres-loc-tls:/etc/postgresql/tls:ro
+      - ./deploy/localized/postgres-public-pg-hba.conf:/etc/postgresql/pg_hba.public.conf:ro
       - ./deploy/localized/init-databases.sh:/docker-entrypoint-initdb.d/10-create-redeem-database.sh:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_INTERNAL_TLS_PORT:-15433}:5432"
+    depends_on:
+      postgres-tls-init:
+        condition: service_completed_successfully
     networks:
       - sub2api-loc-network
     healthcheck:
@@ -33,6 +75,25 @@ services:
       timeout: 5s
       retries: 20
       start_period: 10s
+
+  postgres-public-gateway:
+    image: haproxy:3.2-alpine
+    container_name: sub2api-loc-postgres-public
+    restart: unless-stopped
+    read_only: true
+    network_mode: host
+    volumes:
+      - ./deploy/localized/postgres-public-haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    tmpfs:
+      - /run:size=4m,mode=0755
+      - /var/lib/haproxy:size=4m,mode=0755
+    depends_on:
+      postgres-loc:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   redis-loc:
     image: redis:8-alpine
@@ -218,3 +279,5 @@ volumes:
     name: sub2api-loc-app-data
   redeem-loc-secrets:
     name: sub2api-loc-redeem-secrets
+  postgres-loc-tls:
+    name: sub2api-loc-postgres-tls

@@ -30,6 +30,7 @@ type RateLimitService struct {
 	settingService        *SettingService
 	tokenCacheInvalidator TokenCacheInvalidator
 	runtimeBlocker        AccountRuntimeBlocker
+	tempRecoveryRuntime   sync.Map
 	usageCacheMu          sync.RWMutex
 	usageCache            map[int64]*geminiUsageCacheEntry
 
@@ -41,6 +42,23 @@ type RateLimitService struct {
 type AccountRuntimeBlocker interface {
 	BlockAccountScheduling(account *Account, until time.Time, reason string)
 	ClearAccountSchedulingBlock(accountID int64)
+}
+
+type AccountRuntimeBlockGenerationGuard interface {
+	AccountSchedulingBlockGeneration(accountID int64) (uint64, bool)
+	ClearAccountSchedulingBlockIfGeneration(accountID int64, generation uint64) bool
+}
+
+type capturedRuntimeBlockGeneration struct {
+	guard      AccountRuntimeBlockGenerationGuard
+	accountID  int64
+	generation uint64
+	captured   bool
+}
+
+type pendingTempRecoveryRuntime struct {
+	cacheGeneration string
+	runtime         capturedRuntimeBlockGeneration
 }
 
 // SuccessfulTestRecoveryResult 表示测试成功后恢复了哪些运行时状态。
@@ -1892,6 +1910,93 @@ func (s *RateLimitService) ClearRateLimit(ctx context.Context, accountID int64) 
 	return nil
 }
 
+// ClearAccountRateLimitConditionally is the precise administrative operation:
+// it clears only account-level rate-limit and overload columns. Model limits,
+// quota scopes, temporary isolation, and manual scheduling state are untouched.
+func (s *RateLimitService) ClearAccountRateLimitConditionally(ctx context.Context, accountID int64, precondition AccountStatePrecondition) error {
+	if precondition.Empty() {
+		return s.ClearRateLimit(ctx, accountID)
+	}
+	conditionalRepo, ok := s.accountRepo.(ConditionalAccountStateRepository)
+	if !ok {
+		return ErrAccountConditionalUpdateUnavailable
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if err := accountMatchesStatePrecondition(account, precondition); err != nil {
+		return err
+	}
+	runtimeGeneration := captureRuntimeBlockGeneration(s.runtimeBlocker, account, false, true, false)
+	updated, err := conditionalRepo.ClearAccountRateLimitIf(ctx, accountID, precondition)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return ErrAccountStateChanged
+	}
+	runtimeGeneration.clearIfUnchanged()
+	return nil
+}
+
+// RecoverAccountStateConditionally is the precise administrative unified
+// recovery operation. It intentionally excludes temporary isolation, model
+// limits, quota scopes, and the manual schedulable switch.
+func (s *RateLimitService) RecoverAccountStateConditionally(ctx context.Context, accountID int64, precondition AccountStatePrecondition, invalidateToken bool) (*SuccessfulTestRecoveryResult, error) {
+	if precondition.Empty() {
+		return s.RecoverAccountState(ctx, accountID, AccountRecoveryOptions{InvalidateToken: invalidateToken})
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if err := accountMatchesStatePrecondition(account, precondition); err != nil {
+		return nil, err
+	}
+
+	clearError := account.Status == StatusError
+	clearRateLimit := hasAccountLevelRecoverableState(account)
+	result := &SuccessfulTestRecoveryResult{
+		ClearedError:     clearError,
+		ClearedRateLimit: clearRateLimit,
+	}
+	if !clearError && !clearRateLimit {
+		return result, nil
+	}
+
+	// If a conditional caller supplied semantic fields but omitted updated_at,
+	// still protect the read/update gap against a concurrent re-arm.
+	effectivePrecondition := precondition
+	if effectivePrecondition.ExpectedUpdatedAt == nil {
+		expectedUpdatedAt := account.UpdatedAt
+		effectivePrecondition.ExpectedUpdatedAt = &expectedUpdatedAt
+	}
+	conditionalRepo, ok := s.accountRepo.(ConditionalAccountStateRepository)
+	if !ok {
+		return nil, ErrAccountConditionalUpdateUnavailable
+	}
+	runtimeGeneration := captureRuntimeBlockGeneration(
+		s.runtimeBlocker,
+		account,
+		clearError,
+		clearRateLimit,
+		false,
+	)
+	updated, updateErr := conditionalRepo.RecoverAccountStateIf(ctx, accountID, clearError, clearRateLimit, effectivePrecondition)
+	if updateErr != nil {
+		return nil, updateErr
+	}
+	if !updated {
+		return nil, ErrAccountStateChanged
+	}
+
+	if clearError || clearRateLimit {
+		runtimeGeneration.clearIfUnchanged()
+	}
+	return result, nil
+}
+
 func (s *RateLimitService) ResetOpenAI403Counter(ctx context.Context, accountID int64) {
 	if s == nil || s.openAI403CounterCache == nil || accountID <= 0 {
 		return
@@ -1960,6 +2065,200 @@ func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID
 	return nil
 }
 
+// ClearTempUnschedulableConditionally clears only the observed temporary
+// isolation generation. It does not clear model-level rate limits.
+func (s *RateLimitService) ClearTempUnschedulableConditionally(ctx context.Context, accountID int64, precondition AccountStatePrecondition) error {
+	if precondition.Empty() {
+		return s.ClearTempUnschedulable(ctx, accountID)
+	}
+	conditionalRepo, ok := s.accountRepo.(ConditionalAccountStateRepository)
+	if !ok {
+		return ErrAccountConditionalUpdateUnavailable
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	// A previous attempt may have committed the DB CAS but failed to remove the
+	// cache. Retrying the same idempotent request may finish that cleanup only
+	// while the DB remains clear; the cache token protects a concurrent re-arm.
+	if account.TempUnschedulableUntil == nil && precondition.ExpectedTempUnschedulableUntil != nil {
+		return s.clearTempUnschedCacheAfterCommittedDBClear(ctx, accountID)
+	}
+	if err := accountMatchesStatePrecondition(account, precondition); err != nil {
+		return err
+	}
+	if account.TempUnschedulableUntil == nil {
+		return ErrAccountStateChanged
+	}
+	var conditionalCache ConditionalTempUnschedCache
+	observedCacheGeneration := ""
+	if s.tempUnschedCache != nil {
+		var supported bool
+		conditionalCache, supported = s.tempUnschedCache.(ConditionalTempUnschedCache)
+		if !supported {
+			return ErrAccountConditionalUpdateUnavailable
+		}
+		cachedState, cacheErr := s.tempUnschedCache.GetTempUnsched(ctx, accountID)
+		if cacheErr != nil {
+			return cacheErr
+		}
+		if cachedState != nil {
+			if cachedState.Generation == "" {
+				return ErrAccountConditionalUpdateUnavailable
+			}
+			observedCacheGeneration = cachedState.Generation
+		}
+	}
+	runtimeGeneration := captureRuntimeBlockGeneration(s.runtimeBlocker, account, false, false, true)
+	updated, err := conditionalRepo.ClearTempUnschedulableIf(ctx, accountID, precondition)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return ErrAccountStateChanged
+	}
+	if conditionalCache != nil {
+		deleted, deleteErr := conditionalCache.DeleteTempUnschedIfObserved(
+			ctx,
+			accountID,
+			observedCacheGeneration,
+		)
+		if deleteErr != nil {
+			s.rememberPendingTempRecoveryRuntime(accountID, observedCacheGeneration, runtimeGeneration)
+			return deleteErr
+		}
+		if !deleted {
+			return ErrAccountStateChanged
+		}
+	}
+	s.tempRecoveryRuntime.Delete(accountID)
+	runtimeGeneration.clearIfUnchanged()
+	return nil
+}
+
+func (s *RateLimitService) clearTempUnschedCacheAfterCommittedDBClear(ctx context.Context, accountID int64) error {
+	if s.tempUnschedCache == nil {
+		return nil
+	}
+	conditionalCache, ok := s.tempUnschedCache.(ConditionalTempUnschedCache)
+	if !ok {
+		return ErrAccountConditionalUpdateUnavailable
+	}
+	cachedState, err := s.tempUnschedCache.GetTempUnsched(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if cachedState == nil {
+		s.takePendingTempRecoveryRuntime(accountID, "").clearIfUnchanged()
+		return nil
+	}
+	if cachedState.Generation == "" {
+		return ErrAccountConditionalUpdateUnavailable
+	}
+
+	// Fault writers persist DB state before publishing the cache generation.
+	// Re-check after observing the token so a concurrent DB re-arm fails closed.
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if account.TempUnschedulableUntil != nil {
+		return ErrAccountStateChanged
+	}
+	deleted, err := conditionalCache.DeleteTempUnschedIfObserved(ctx, accountID, cachedState.Generation)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return ErrAccountStateChanged
+	}
+	s.takePendingTempRecoveryRuntime(accountID, cachedState.Generation).clearIfUnchanged()
+	return nil
+}
+
+func (s *RateLimitService) rememberPendingTempRecoveryRuntime(
+	accountID int64,
+	cacheGeneration string,
+	runtime capturedRuntimeBlockGeneration,
+) {
+	if s == nil || accountID <= 0 || cacheGeneration == "" || !runtime.captured {
+		return
+	}
+	s.tempRecoveryRuntime.Store(accountID, pendingTempRecoveryRuntime{
+		cacheGeneration: cacheGeneration,
+		runtime:         runtime,
+	})
+}
+
+func (s *RateLimitService) takePendingTempRecoveryRuntime(
+	accountID int64,
+	cacheGeneration string,
+) capturedRuntimeBlockGeneration {
+	if s == nil || accountID <= 0 {
+		return capturedRuntimeBlockGeneration{}
+	}
+	value, ok := s.tempRecoveryRuntime.LoadAndDelete(accountID)
+	if !ok {
+		return capturedRuntimeBlockGeneration{}
+	}
+	pending, ok := value.(pendingTempRecoveryRuntime)
+	if !ok || (cacheGeneration != "" && pending.cacheGeneration != cacheGeneration) {
+		return capturedRuntimeBlockGeneration{}
+	}
+	return pending.runtime
+}
+
+func captureRuntimeBlockGeneration(
+	blocker AccountRuntimeBlocker,
+	account *Account,
+	clearError bool,
+	clearRateLimit bool,
+	clearTempUnschedulable bool,
+) capturedRuntimeBlockGeneration {
+	guard, ok := blocker.(AccountRuntimeBlockGenerationGuard)
+	if !ok || account == nil || hasUnclearedRuntimeRecoveryState(
+		account,
+		clearError,
+		clearRateLimit,
+		clearTempUnschedulable,
+	) {
+		return capturedRuntimeBlockGeneration{}
+	}
+	generation, captured := guard.AccountSchedulingBlockGeneration(account.ID)
+	return capturedRuntimeBlockGeneration{
+		guard:      guard,
+		accountID:  account.ID,
+		generation: generation,
+		captured:   captured,
+	}
+}
+
+func (c capturedRuntimeBlockGeneration) clearIfUnchanged() {
+	if c.captured && c.guard != nil {
+		c.guard.ClearAccountSchedulingBlockIfGeneration(c.accountID, c.generation)
+	}
+}
+
+func hasUnclearedRuntimeRecoveryState(
+	account *Account,
+	clearError bool,
+	clearRateLimit bool,
+	clearTempUnschedulable bool,
+) bool {
+	if account.Status == StatusError && !clearError {
+		return true
+	}
+	if hasAccountLevelRecoverableState(account) && !clearRateLimit {
+		return true
+	}
+	if account.TempUnschedulableUntil != nil && !clearTempUnschedulable {
+		return true
+	}
+	return hasNonEmptyMapValue(account.Extra, "model_rate_limits") ||
+		hasNonEmptyMapValue(account.Extra, "antigravity_quota_scopes")
+}
+
 func hasRecoverableRuntimeState(account *Account) bool {
 	if account == nil {
 		return false
@@ -1972,6 +2271,10 @@ func hasRecoverableRuntimeState(account *Account) bool {
 	}
 	return hasNonEmptyMapValue(account.Extra, "model_rate_limits") ||
 		hasNonEmptyMapValue(account.Extra, "antigravity_quota_scopes")
+}
+
+func hasAccountLevelRecoverableState(account *Account) bool {
+	return account != nil && (account.RateLimitedAt != nil || account.RateLimitResetAt != nil || account.OverloadUntil != nil)
 }
 
 func hasNonEmptyMapValue(extra map[string]any, key string) bool {
@@ -1993,16 +2296,6 @@ func hasNonEmptyMapValue(extra map[string]any, key string) bool {
 
 func (s *RateLimitService) GetTempUnschedStatus(ctx context.Context, accountID int64) (*TempUnschedState, error) {
 	now := time.Now().Unix()
-	if s.tempUnschedCache != nil {
-		state, err := s.tempUnschedCache.GetTempUnsched(ctx, accountID)
-		if err != nil {
-			return nil, err
-		}
-		if state != nil && state.UntilUnix > now {
-			return state, nil
-		}
-	}
-
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -2027,12 +2320,6 @@ func (s *RateLimitService) GetTempUnschedStatus(ctx context.Context, accountID i
 			state = &parsed
 		} else {
 			state.ErrorMessage = account.TempUnschedulableReason
-		}
-	}
-
-	if s.tempUnschedCache != nil {
-		if err := s.tempUnschedCache.SetTempUnsched(ctx, accountID, state); err != nil {
-			slog.Warn("temp_unsched_cache_set_failed", "account_id", accountID, "error", err)
 		}
 	}
 

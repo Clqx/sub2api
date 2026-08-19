@@ -10,10 +10,40 @@ import (
 )
 
 var (
-	ErrAccountNotFound      = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
-	ErrAccountNilInput      = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
-	ErrAccountNotInFallback = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
+	ErrAccountNotFound                     = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
+	ErrAccountNilInput                     = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
+	ErrAccountNotInFallback                = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
+	ErrAccountStateChanged                 = infraerrors.Conflict("ACCOUNT_STATE_CHANGED", "account state changed since it was observed")
+	ErrAccountConditionalUpdateUnavailable = infraerrors.ServiceUnavailable(
+		"ACCOUNT_CONDITIONAL_UPDATE_UNAVAILABLE",
+		"conditional account state updates are unavailable",
+	)
 )
+
+// AccountStatePrecondition protects an administrative state mutation from
+// applying to a newer account snapshot. Zero values mean that no condition was
+// supplied, preserving compatibility with existing callers.
+type AccountStatePrecondition struct {
+	ExpectedUpdatedAt              *time.Time
+	ExpectedStatus                 *string
+	ExpectedSchedulable            *bool
+	ExpectedTempUnschedulableUntil *time.Time
+}
+
+func (p AccountStatePrecondition) Empty() bool {
+	return p.ExpectedUpdatedAt == nil && p.ExpectedStatus == nil && p.ExpectedSchedulable == nil && p.ExpectedTempUnschedulableUntil == nil
+}
+
+// ConditionalAccountStateRepository is kept separate from AccountRepository so
+// existing gateway/test implementations do not need to implement admin-only
+// compare-and-set operations.
+type ConditionalAccountStateRepository interface {
+	ClearErrorIf(ctx context.Context, id int64, precondition AccountStatePrecondition) (bool, error)
+	ClearAccountRateLimitIf(ctx context.Context, id int64, precondition AccountStatePrecondition) (bool, error)
+	RecoverAccountStateIf(ctx context.Context, id int64, clearError, clearRateLimit bool, precondition AccountStatePrecondition) (bool, error)
+	SetSchedulableIf(ctx context.Context, id int64, schedulable bool, precondition AccountStatePrecondition) (bool, error)
+	ClearTempUnschedulableIf(ctx context.Context, id int64, precondition AccountStatePrecondition) (bool, error)
+}
 
 const AccountListGroupUngrouped int64 = -1
 const AccountPrivacyModeUnsetFilter = "__unset__"

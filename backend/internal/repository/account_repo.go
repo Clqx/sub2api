@@ -1758,6 +1758,103 @@ func (r *accountRepository) ClearError(ctx context.Context, id int64) error {
 	return nil
 }
 
+func accountStatePredicates(id int64, precondition service.AccountStatePrecondition) []dbpredicate.Account {
+	predicates := []dbpredicate.Account{dbaccount.IDEQ(id)}
+	if precondition.ExpectedUpdatedAt != nil {
+		predicates = append(predicates, dbaccount.UpdatedAtEQ(*precondition.ExpectedUpdatedAt))
+	}
+	if precondition.ExpectedStatus != nil {
+		predicates = append(predicates, dbaccount.StatusEQ(*precondition.ExpectedStatus))
+	}
+	if precondition.ExpectedSchedulable != nil {
+		predicates = append(predicates, dbaccount.SchedulableEQ(*precondition.ExpectedSchedulable))
+	}
+	if precondition.ExpectedTempUnschedulableUntil != nil {
+		predicates = append(predicates, dbaccount.TempUnschedulableUntilEQ(*precondition.ExpectedTempUnschedulableUntil))
+	}
+	return predicates
+}
+
+func (r *accountRepository) finishConditionalAccountStateUpdate(ctx context.Context, id int64, updated int, action string) (bool, error) {
+	if updated == 0 {
+		r.syncSchedulerAccountSnapshot(ctx, id)
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue %s failed: account=%d err=%v", action, id, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
+}
+
+func (r *accountRepository) ClearErrorIf(ctx context.Context, id int64, precondition service.AccountStatePrecondition) (bool, error) {
+	predicates := accountStatePredicates(id, precondition)
+	predicates = append(predicates, dbaccount.StatusEQ(service.StatusError))
+	updated, err := r.client.Account.Update().
+		Where(predicates...).
+		SetStatus(service.StatusActive).
+		SetErrorMessage("").
+		Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	return r.finishConditionalAccountStateUpdate(ctx, id, updated, "conditional clear error")
+}
+
+func (r *accountRepository) ClearAccountRateLimitIf(ctx context.Context, id int64, precondition service.AccountStatePrecondition) (bool, error) {
+	updated, err := r.client.Account.Update().
+		Where(accountStatePredicates(id, precondition)...).
+		ClearRateLimitedAt().
+		ClearRateLimitResetAt().
+		ClearOverloadUntil().
+		Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	return r.finishConditionalAccountStateUpdate(ctx, id, updated, "conditional clear rate limit")
+}
+
+func (r *accountRepository) RecoverAccountStateIf(ctx context.Context, id int64, clearError, clearRateLimit bool, precondition service.AccountStatePrecondition) (bool, error) {
+	if !clearError && !clearRateLimit {
+		return true, nil
+	}
+	update := r.client.Account.Update().Where(accountStatePredicates(id, precondition)...)
+	if clearError {
+		update.SetStatus(service.StatusActive).SetErrorMessage("")
+	}
+	if clearRateLimit {
+		update.ClearRateLimitedAt().ClearRateLimitResetAt().ClearOverloadUntil()
+	}
+	updated, err := update.Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	return r.finishConditionalAccountStateUpdate(ctx, id, updated, "conditional recover state")
+}
+
+func (r *accountRepository) SetSchedulableIf(ctx context.Context, id int64, schedulable bool, precondition service.AccountStatePrecondition) (bool, error) {
+	updated, err := r.client.Account.Update().
+		Where(accountStatePredicates(id, precondition)...).
+		SetSchedulable(schedulable).
+		Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	return r.finishConditionalAccountStateUpdate(ctx, id, updated, "conditional schedulable change")
+}
+
+func (r *accountRepository) ClearTempUnschedulableIf(ctx context.Context, id int64, precondition service.AccountStatePrecondition) (bool, error) {
+	updated, err := r.client.Account.Update().
+		Where(accountStatePredicates(id, precondition)...).
+		ClearTempUnschedulableUntil().
+		ClearTempUnschedulableReason().
+		Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	return r.finishConditionalAccountStateUpdate(ctx, id, updated, "conditional clear temp unschedulable")
+}
+
 func (r *accountRepository) AddToGroup(ctx context.Context, accountID, groupID int64, priority int) error {
 	_, err := r.client.AccountGroup.Create().
 		SetAccountID(accountID).
