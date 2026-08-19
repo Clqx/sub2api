@@ -224,13 +224,19 @@ paths:
       operationId: resolvePendingSettlement
       summary: 人工核账后以受审计事务解除单条结算屏障
       description: |
-        需要独立 `settlement:resolve` scope。服务端在同一事务追加不可变 resolution 审计并删除
-        精确匹配的 pending；相同 operation_id 与相同内容重放返回原结果，内容漂移返回冲突。
+        需要只包含 `settlement:resolve` 的独立客户端身份；`*` 或混合 scope 均被拒绝。服务端在同一事务
+        追加不可变 resolution 审计并删除同时匹配 assignment epoch 与 request ID 的 pending；相同
+        operation_id 与相同内容重放返回原结果，内容漂移返回冲突。Idempotency-Key 必填且必须等于
+        body.operation_id。
         该接口只记录人工核验结论，不会替代实际补账或上游结果核查。
       parameters:
         - $ref: '#/components/parameters/SeatId'
         - $ref: '#/components/parameters/SettlementId'
-        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: 必须与 body.operation_id 完全相同
+          schema: {type: string, minLength: 1, maxLength: 128}
       requestBody:
         required: true
         content:
@@ -280,7 +286,7 @@ components:
       name: Idempotency-Key
       in: header
       required: false
-      description: Header 与 body.operation_id 至少提供一个；provision 同时存在时必须相同，其余写接口以 Header 为准
+      description: 通用写接口至少提供 Header 或 body.operation_id；provision 与 settlement resolve 同时要求二者存在且完全相同
       schema: {type: string, minLength: 1, maxLength: 128}
     SettlementId:
       name: settlementId
@@ -478,21 +484,25 @@ components:
     ResolveSettlementRequest:
       type: object
       additionalProperties: false
-      required: [reason, evidence]
+      required: [operation_id, expected_assignment_epoch, expected_request_id, reason, evidence]
       properties:
         operation_id: {type: string, minLength: 1, maxLength: 128}
+        expected_assignment_epoch: {type: integer, format: int64, minimum: 1}
+        expected_request_id: {type: string, minLength: 1, maxLength: 128}
         reason: {type: string, minLength: 1, maxLength: 1000}
         evidence: {type: string, minLength: 1, maxLength: 4000}
     SettlementResolution:
       type: object
       additionalProperties: false
-      required: [seat_id, external_seat_id, settlement_id, operation_id, actor_client_id, reason, evidence, resolved_at]
+      required: [seat_id, external_seat_id, settlement_id, operation_id, actor_client_id, assignment_epoch, request_id, reason, evidence, resolved_at]
       properties:
         seat_id: {type: integer, format: int64}
         external_seat_id: {type: string}
         settlement_id: {type: string}
         operation_id: {type: string}
         actor_client_id: {type: string, description: 来自已认证的 X-Integration-Client-ID，不接受 body 覆盖}
+        assignment_epoch: {type: integer, format: int64, minimum: 1}
+        request_id: {type: string, minLength: 1, maxLength: 128}
         reason: {type: string}
         evidence: {type: string}
         resolved_at: {type: string, format: date-time}

@@ -87,6 +87,7 @@ func (r *trustedPoolHTTPRepoStub) ResolvePendingSettlement(_ context.Context, se
 	r.resolveCalls++
 	return &service.TrustedPoolSettlementResolution{
 		ExternalSeatID: seatID, SettlementID: settlementID, OperationID: input.OperationID,
+		AssignmentEpoch: input.ExpectedAssignmentEpoch, RequestID: input.ExpectedRequestID,
 		ActorClientID: input.ActorClientID, Reason: input.Reason, Evidence: input.Evidence, ResolvedAt: time.Now(),
 	}, nil
 }
@@ -183,18 +184,43 @@ func TestTrustedPoolSettlementListClampsLimitTo200(t *testing.T) {
 
 func TestTrustedPoolSettlementResolveRequiresDedicatedScope(t *testing.T) {
 	const path = "/v1/integrations/trusted-pools/seats/seat-1/settlements/pending-1/resolve"
-	const body = `{"operation_id":"resolve-1","reason":"ledger checked","evidence":"ticket-1"}`
+	const body = `{"operation_id":"resolve-1","expected_assignment_epoch":3,"expected_request_id":"request-1","reason":"ledger checked","evidence":"ticket-1"}`
 	repo := &trustedPoolHTTPRepoStub{seat: &service.TrustedPoolSeat{ID: 1, ExternalSeatID: "seat-1"}}
 	router, secret := newTrustedPoolHTTPRouter(repo, []string{"seat:write"})
 	denied := httptest.NewRecorder()
-	router.ServeHTTP(denied, trustedPoolHTTPRequest(http.MethodPost, path, body, secret))
+	request := trustedPoolHTTPRequest(http.MethodPost, path, body, secret)
+	request.Header.Set("Idempotency-Key", "resolve-1")
+	router.ServeHTTP(denied, request)
 	require.Equal(t, http.StatusForbidden, denied.Code)
+	require.Zero(t, repo.resolveCalls)
+
+	// 高权限人工核账必须显式授权；历史通配 scope 不得绕过独立凭据边界。
+	router, secret = newTrustedPoolHTTPRouter(repo, []string{"*"})
+	wildcardDenied := httptest.NewRecorder()
+	request = trustedPoolHTTPRequest(http.MethodPost, path, body, secret)
+	request.Header.Set("Idempotency-Key", "resolve-1")
+	router.ServeHTTP(wildcardDenied, request)
+	require.Equal(t, http.StatusForbidden, wildcardDenied.Code)
 	require.Zero(t, repo.resolveCalls)
 
 	router, secret = newTrustedPoolHTTPRouter(repo, []string{"settlement:resolve"})
 	allowed := httptest.NewRecorder()
-	router.ServeHTTP(allowed, trustedPoolHTTPRequest(http.MethodPost, path, body, secret))
+	request = trustedPoolHTTPRequest(http.MethodPost, path, body, secret)
+	request.Header.Set("Idempotency-Key", "resolve-1")
+	router.ServeHTTP(allowed, request)
 	require.Equal(t, http.StatusOK, allowed.Code)
+	require.Equal(t, 1, repo.resolveCalls)
+
+	missingHeader := httptest.NewRecorder()
+	router.ServeHTTP(missingHeader, trustedPoolHTTPRequest(http.MethodPost, path, body, secret))
+	require.Equal(t, http.StatusBadRequest, missingHeader.Code)
+	require.Equal(t, 1, repo.resolveCalls)
+
+	mismatched := trustedPoolHTTPRequest(http.MethodPost, path, body, secret)
+	mismatched.Header.Set("Idempotency-Key", "different-operation")
+	mismatchedResponse := httptest.NewRecorder()
+	router.ServeHTTP(mismatchedResponse, mismatched)
+	require.Equal(t, http.StatusBadRequest, mismatchedResponse.Code)
 	require.Equal(t, 1, repo.resolveCalls)
 }
 

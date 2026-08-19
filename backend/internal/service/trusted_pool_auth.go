@@ -153,8 +153,16 @@ func trustedPoolClientHasScope(client *TrustedPoolIntegrationClient, scope strin
 	if client == nil {
 		return false
 	}
+	if scope == "settlement:resolve" {
+		// 人工核账使用独立身份；与普通 Seat 权限混用会失去密钥隔离意义。
+		return len(client.Scopes) == 1 && strings.TrimSpace(client.Scopes[0]) == scope
+	}
 	for _, candidate := range client.Scopes {
-		if candidate == scope || candidate == "*" {
+		if candidate == scope {
+			return true
+		}
+		// 高权限动作必须显式授权，通配 scope 不能代替独立审批与密钥隔离。
+		if candidate == "*" && scope != "credential:ack" && scope != "seat:provision" {
 			return true
 		}
 	}

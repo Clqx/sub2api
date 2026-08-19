@@ -19,6 +19,7 @@ import (
 
 const testAPIKey = "test-platform-api-key-0123456789abcdef"
 const testSettlementAPIKey = "test-settlement-api-key-0123456789abcdef"
+const testBatchAPIKey = "test-batch-api-key-0123456789abcdef"
 
 func testTime(value time.Time) *time.Time { return &value }
 
@@ -96,6 +97,7 @@ func TestWriteDomainErrorMapsPersistedOperationFailuresStably(t *testing.T) {
 		{code: "UPSTREAM_GATEWAY_ERROR", status: http.StatusBadGateway, reason: "UPSTREAM_GATEWAY_ERROR"},
 		{code: "PROVISION_GATEWAY_UNAVAILABLE", status: http.StatusServiceUnavailable, reason: "PROVISION_GATEWAY_UNAVAILABLE"},
 		{code: "UPSTREAM_RESPONSE_INVALID", status: http.StatusBadGateway, reason: "UPSTREAM_RESPONSE_INVALID"},
+		{code: "OPERATOR_REVIEW_REQUIRED", status: http.StatusConflict, reason: "OPERATOR_REVIEW_REQUIRED"},
 	}
 	for _, test := range tests {
 		t.Run(test.code, func(t *testing.T) {
@@ -113,6 +115,61 @@ type apiGateway struct{}
 type postgresModeCoordinator struct{ *application.Coordinator }
 
 func (postgresModeCoordinator) StorageStatus() string { return "postgres" }
+
+type batchServiceStub struct {
+	batch *credentials.StoredCredentialBatch
+	err   error
+}
+
+func (s *batchServiceStub) Seal(_ context.Context, request credentials.PersistentSealRequest) (*credentials.StoredCredentialBatch, error) {
+	clear(request.Payload)
+	if s.err != nil {
+		return nil, s.err
+	}
+	now := time.Now().UTC()
+	s.batch = &credentials.StoredCredentialBatch{
+		ExternalID: request.BatchExternalID, PoolExternalID: request.PoolID, AccountRef: request.AccountRef,
+		Type: request.Type, BatchVersion: request.Version, MembershipEpoch: request.MembershipEpoch,
+		State: credentials.BatchSealed, MigrationState: credentials.BatchMigrationCurrent,
+		EncryptionAlgorithm: credentials.BatchEnvelopeAlgorithm, Version: 2, SealedAt: &now,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	return s.batch, nil
+}
+
+func (s *batchServiceStub) Get(context.Context, string) (*credentials.StoredCredentialBatch, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.batch == nil {
+		return nil, credentials.ErrBatchNotFound
+	}
+	return s.batch, nil
+}
+
+func (s *batchServiceStub) Activate(_ context.Context, request credentials.PersistentBatchTransitionRequest) (*credentials.StoredCredentialBatch, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.batch == nil || request.ExpectedVersion != s.batch.Version {
+		return nil, credentials.ErrBatchInvalidState
+	}
+	now := time.Now().UTC()
+	s.batch.State, s.batch.Version, s.batch.ActivatedAt = credentials.BatchActive, s.batch.Version+1, &now
+	return s.batch, nil
+}
+
+func (s *batchServiceStub) Retire(_ context.Context, request credentials.PersistentBatchTransitionRequest) (*credentials.StoredCredentialBatch, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.batch == nil || request.ExpectedVersion != s.batch.Version {
+		return nil, credentials.ErrBatchInvalidState
+	}
+	now := time.Now().UTC()
+	s.batch.State, s.batch.Version, s.batch.RetiredAt = credentials.BatchRetired, s.batch.Version+1, &now
+	return s.batch, nil
+}
 
 type failingReadCoordinator struct {
 	*application.Coordinator
@@ -175,7 +232,8 @@ func (apiGateway) GetPendingSettlement(_ context.Context, seatID, settlementID s
 func (apiGateway) ResolvePendingSettlement(_ context.Context, seatID, settlementID string, command application.ResolvePendingSettlementCommand) (*application.SettlementResolution, error) {
 	return &application.SettlementResolution{
 		SeatID: 7, ExternalSeatID: seatID, SettlementID: settlementID, OperationID: command.OperationID,
-		ActorClientID: "trusted-pool-platform", Reason: command.Reason, Evidence: command.Evidence, ResolvedAt: time.Now().UTC(),
+		ActorClientID: "trusted-pool-platform", AssignmentEpoch: command.ExpectedAssignmentEpoch,
+		RequestID: command.ExpectedRequestID, Reason: command.Reason, Evidence: command.Evidence, ResolvedAt: time.Now().UTC(),
 	}, nil
 }
 
@@ -193,7 +251,8 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(application.NewCoordinator(apiGateway{}, time.Now, manager), aggregator, manager, testAPIKey, testSettlementAPIKey)
+	server, err := NewServer(application.NewCoordinator(apiGateway{}, time.Now, manager), aggregator, &batchServiceStub{},
+		testAPIKey, testSettlementAPIKey, testBatchAPIKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,12 +292,12 @@ func TestServerPendingSettlementManagementUsesIndependentResolveKey(t *testing.T
 	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "request-1") {
 		t.Fatalf("pending detail failed: %d %s", detail.Code, detail.Body.String())
 	}
-	body := map[string]any{"operation_id": "resolve-1", "reason": "usage verified", "evidence": "ticket-123"}
+	body := map[string]any{"operation_id": "resolve-1", "expected_assignment_epoch": 2, "expected_request_id": "request-1", "reason": "usage verified", "evidence": "ticket-123"}
 	ordinary := requestJSON(t, server.Handler(), http.MethodPost, "/api/v1/seats/seat-1/settlements/settlement-1/resolve", body, "")
 	if ordinary.Code != http.StatusUnauthorized {
 		t.Fatalf("ordinary API key resolved settlement: %d %s", ordinary.Code, ordinary.Body.String())
 	}
-	resolved := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/seats/seat-1/settlements/settlement-1/resolve", body, "", testSettlementAPIKey)
+	resolved := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/seats/seat-1/settlements/settlement-1/resolve", body, "resolve-1", testSettlementAPIKey)
 	if resolved.Code != http.StatusOK || !strings.Contains(resolved.Body.String(), "resolve-1") || strings.Contains(resolved.Body.String(), "credential") {
 		t.Fatalf("unsafe settlement resolution response: %d %s", resolved.Code, resolved.Body.String())
 	}
@@ -247,30 +306,37 @@ func TestServerPendingSettlementManagementUsesIndependentResolveKey(t *testing.T
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("incomplete settlement resolution accepted: %d %s", invalid.Code, invalid.Body.String())
 	}
+	mismatch := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/seats/seat-1/settlements/settlement-1/resolve", body, "another-operation", testSettlementAPIKey)
+	if mismatch.Code != http.StatusBadRequest || !strings.Contains(mismatch.Body.String(), "IDEMPOTENCY_KEY_MISMATCH") {
+		t.Fatalf("mismatched idempotency key accepted: %d %s", mismatch.Code, mismatch.Body.String())
+	}
+	encoded := requestJSON(t, server.Handler(), http.MethodPost, "/api/v1/seats/seat%2F1/settlements/settlement-1/%72esolve", body, "resolve-1")
+	if encoded.Code != http.StatusUnauthorized {
+		t.Fatalf("encoded settlement route accepted ordinary key: %d %s", encoded.Code, encoded.Body.String())
+	}
 }
 
-func TestPostgresModeRejectsMemoryOnlyCredentialWorkflows(t *testing.T) {
+func TestCredentialBatchRoutesRequireIndependentKeyAndEvidenceRemainsDisabled(t *testing.T) {
 	server := newTestServer(t)
-	memoryCoordinator, ok := server.coordinator.(*application.Coordinator)
-	if !ok {
-		t.Fatalf("unexpected test coordinator %T", server.coordinator)
+	body := map[string]any{
+		"operation_id": "seal-1", "batch_id": "batch-1", "pool_id": "pool-1", "account_ref": "account-1",
+		"batch_type": "LOGIN", "version": 1, "membership_epoch": 1, "payload": map[string]any{"password": "secret"},
 	}
-	server.coordinator = postgresModeCoordinator{Coordinator: memoryCoordinator}
-	tests := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodPost, "/api/v1/credential-batches"},
-		{http.MethodGet, "/api/v1/credential-batches/batch-1"},
-		{http.MethodPost, "/api/v1/credential-batches/batch-1/activate"},
-		{http.MethodPost, "/api/v1/credential-batches/batch-1/retire"},
-		{http.MethodPost, "/api/v1/control-rotation-evidence"},
+	ordinary := requestJSON(t, server.Handler(), http.MethodPost, "/api/v1/credential-batches", body, "seal-1")
+	if ordinary.Code != http.StatusUnauthorized {
+		t.Fatalf("ordinary API key reached credential batch route: %d %s", ordinary.Code, ordinary.Body.String())
 	}
-	for _, test := range tests {
-		response := requestJSON(t, server.Handler(), test.method, test.path, nil, "")
-		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "PERSISTENT_WORKFLOW_UNSUPPORTED") {
-			t.Errorf("%s %s: status=%d body=%s", test.method, test.path, response.Code, response.Body.String())
-		}
+	encoded := requestJSON(t, server.Handler(), http.MethodPost, "/api/v1/%63redential-batches", body, "seal-1")
+	if encoded.Code != http.StatusUnauthorized {
+		t.Fatalf("encoded credential batch route accepted ordinary key: %d %s", encoded.Code, encoded.Body.String())
+	}
+	encodedID := requestJSON(t, server.Handler(), http.MethodGet, "/api/v1/credential-batches/a%2Fb", nil, "")
+	if encodedID.Code != http.StatusUnauthorized {
+		t.Fatalf("encoded batch id fell back to ordinary key: %d %s", encodedID.Code, encodedID.Body.String())
+	}
+	evidence := requestJSON(t, server.Handler(), http.MethodPost, "/api/v1/control-rotation-evidence", map[string]any{}, "")
+	if evidence.Code != http.StatusServiceUnavailable || !strings.Contains(evidence.Body.String(), "PERSISTENT_WORKFLOW_UNSUPPORTED") {
+		t.Fatalf("control evidence was enabled before recovery governance: %d %s", evidence.Code, evidence.Body.String())
 	}
 }
 
@@ -352,14 +418,56 @@ func TestServerRiskAndCredentialResponsesDoNotExposeSensitiveInput(t *testing.T)
 		t.Fatalf("unsafe risk response: %d %s", riskResponse.Code, riskResponse.Body.String())
 	}
 
-	batchResponse := requestJSON(t, server.Handler(), http.MethodPost, "/api/v1/credential-batches", map[string]any{
+	batchResponse := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/credential-batches", map[string]any{
+		"operation_id": "seal-sensitive-1", "batch_id": "batch-sensitive-1",
 		"pool_id": "pool-1", "account_ref": "account-1", "batch_type": "LOGIN",
-		"version": 1, "membership_epoch": 1, "key_ref": "local-kek-v1",
+		"version": 1, "membership_epoch": 1,
 		"payload": map[string]any{"password": "credential-secret"},
-	}, "")
+	}, "seal-sensitive-1", testBatchAPIKey)
 	body := batchResponse.Body.String()
 	if batchResponse.Code != http.StatusCreated || strings.Contains(body, "credential-secret") || strings.Contains(body, "ciphertext") || strings.Contains(body, "wrapped_dek") {
 		t.Fatalf("unsafe credential response: %d %s", batchResponse.Code, body)
+	}
+}
+
+func TestServerCredentialBatchPersistentLifecycle(t *testing.T) {
+	server := newTestServer(t)
+	sealBody := map[string]any{
+		"operation_id": "seal-lifecycle", "batch_id": "batch-lifecycle", "pool_id": "pool-1",
+		"account_ref": "account-1", "batch_type": "LOGIN", "version": 1, "membership_epoch": 1,
+		"payload": map[string]any{"password": "credential-secret"},
+	}
+	missingKey := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/credential-batches",
+		sealBody, "", testBatchAPIKey)
+	if missingKey.Code != http.StatusBadRequest || !strings.Contains(missingKey.Body.String(), "IDEMPOTENCY_KEY_REQUIRED") {
+		t.Fatalf("missing batch idempotency key accepted: %d %s", missingKey.Code, missingKey.Body.String())
+	}
+	sealed := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/credential-batches",
+		sealBody, "seal-lifecycle", testBatchAPIKey)
+	if sealed.Code != http.StatusCreated || !strings.Contains(sealed.Body.String(), `"state":"SEALED"`) {
+		t.Fatalf("seal failed: %d %s", sealed.Code, sealed.Body.String())
+	}
+	for _, forbidden := range []string{"credential-secret", "content_fingerprint", "aad_hash", "key_ref", "wrapped_dek", "ciphertext"} {
+		if strings.Contains(sealed.Body.String(), forbidden) {
+			t.Fatalf("sealed response leaked %q: %s", forbidden, sealed.Body.String())
+		}
+	}
+	activated := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/credential-batches/batch-lifecycle/activate",
+		map[string]any{"operation_id": "activate-lifecycle", "expected_version": 2}, "activate-lifecycle", testBatchAPIKey)
+	if activated.Code != http.StatusOK || !strings.Contains(activated.Body.String(), `"state":"ACTIVE"`) {
+		t.Fatalf("activate failed: %d %s", activated.Code, activated.Body.String())
+	}
+	retired := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/credential-batches/batch-lifecycle/retire",
+		map[string]any{"operation_id": "retire-lifecycle", "expected_version": 3}, "retire-lifecycle", testBatchAPIKey)
+	if retired.Code != http.StatusOK || !strings.Contains(retired.Body.String(), `"state":"RETIRED"`) {
+		t.Fatalf("retire failed: %d %s", retired.Code, retired.Body.String())
+	}
+}
+
+func TestBatchMetadataDoesNotClaimPendingBatchIsProtected(t *testing.T) {
+	metadata := batchMetadata(&credentials.StoredCredentialBatch{State: credentials.BatchState("PREPARED")})
+	if metadata["protection_profile"] != "PENDING_DUAL_WRAP" {
+		t.Fatalf("pending batch was presented as fully protected: %#v", metadata)
 	}
 }
 
@@ -413,36 +521,14 @@ func TestServerCredentialClaimIsTargetBoundAndOneTime(t *testing.T) {
 	}
 }
 
-func TestServerIssuesVerifiableControlRotationEvidence(t *testing.T) {
+func TestServerKeepsControlRotationEvidenceFailClosed(t *testing.T) {
 	server := newTestServer(t)
-	batchTypes := []credentials.BatchType{
-		credentials.BatchLogin, credentials.BatchMFA, credentials.BatchRecovery, credentials.BatchOwnership,
-	}
-	for _, batchType := range batchTypes {
-		oldBatch, err := server.credentials.Seal(context.Background(), credentials.SealRequest{
-			PoolID: "pool-1", AccountRef: "account-1", Type: batchType,
-			Version: 1, MembershipEpoch: 1, KeyRef: "local-kek-v1", Plaintext: []byte("old"),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = server.credentials.Activate(oldBatch.ID)
-		_, _ = server.credentials.Retire(oldBatch.ID)
-		newBatch, err := server.credentials.Seal(context.Background(), credentials.SealRequest{
-			PoolID: "pool-1", AccountRef: "account-1", Type: batchType,
-			Version: 2, MembershipEpoch: 2, KeyRef: "local-kek-v1", Plaintext: []byte("new"),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = server.credentials.Activate(newBatch.ID)
-	}
 	response := requestJSON(t, server.Handler(), http.MethodPost, "/api/v1/control-rotation-evidence", map[string]any{
 		"pool_id": "pool-1", "account_ref": "account-1",
 		"from_membership_epoch": 1, "to_membership_epoch": 2,
 		"provider_attestation_ref": "provider-ticket-1",
 	}, "")
-	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), "retired_batch_ids") || !strings.Contains(response.Body.String(), "active_batch_ids") {
-		t.Fatalf("control rotation evidence was not issued: %d %s", response.Code, response.Body.String())
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "PERSISTENT_WORKFLOW_UNSUPPORTED") {
+		t.Fatalf("control rotation evidence was unexpectedly issued: %d %s", response.Code, response.Body.String())
 	}
 }

@@ -58,13 +58,21 @@ func TestApplicationEnvelopeCipherMapsWithoutBypass(t *testing.T) {
 }
 
 type recoveryScannerStub struct {
-	mu             sync.Mutex
-	operationCalls int
-	claimCalls     int
-	operationWork  bool
-	operationErr   error
-	claimErr       error
-	firstRound     chan struct{}
+	mu              sync.Mutex
+	operationCalls  int
+	settlementCalls int
+	claimCalls      int
+	operationWork   bool
+	operationErr    error
+	claimErr        error
+	firstRound      chan struct{}
+}
+
+func (s *recoveryScannerStub) RecoverNextSettlementResolution(context.Context) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settlementCalls++
+	return false, nil
 }
 
 func (s *recoveryScannerStub) RecoverNextOperation(context.Context) (bool, error) {
@@ -105,8 +113,8 @@ func TestPersistentRecoveryLoopScansBothAndStopsDuringIdle(t *testing.T) {
 	}
 	stub.mu.Lock()
 	defer stub.mu.Unlock()
-	if stub.operationCalls != 1 || stub.claimCalls != 1 {
-		t.Fatalf("scan calls = operation %d, claim %d", stub.operationCalls, stub.claimCalls)
+	if stub.operationCalls != 1 || stub.settlementCalls != 1 || stub.claimCalls != 1 {
+		t.Fatalf("scan calls = operation %d, settlement %d, claim %d", stub.operationCalls, stub.settlementCalls, stub.claimCalls)
 	}
 }
 

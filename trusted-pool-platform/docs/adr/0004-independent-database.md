@@ -13,8 +13,11 @@ Phase 2 新平台使用独立 PostgreSQL，仅保存业务期望状态、Trust P
 Group、Account、Subscription、API Key 与实际用量只通过受限集成 API 操作。
 
 `migrations/001_init.sql` 建立领域基线，`002_phase2a_persistence.sql` 和
-`003_phase2a_runtime_invariants.sql` 增加工作流持久化及运行时约束。Phase 2-A Runtime 已强制连接
-独立数据库；连接、迁移或 KMS 失败时拒绝启动，不回退进程内存。
+`003_phase2a_runtime_invariants.sql` 增加开通运行时约束，`004_phase2b_suspend_persistence.sql` 增加暂停工单、
+双屏障冻结证据和 Operation/Seat/Case 延迟聚合约束，`005_phase2c_assignment_persistence.sql` 增加临时换员/
+恢复工单、稳定 Sub2API 资源绑定和 Assignment 聚合约束，`006_phase2d_settlement_persistence.sql` 增加
+结算解除 intent、typed 结果、不可变 trust event 和跨工作流门禁。Phase 2-D Runtime 已强制连接独立数据库；连接、
+迁移或 KMS 失败时拒绝启动，不回退进程内存。
 
 Phase 1 已公开的 Member、Pool、Seat 字符串 ID 不改写为 UUID。Phase 2 在三张表分别保存最长 128
 字符的唯一 `external_id`，Repository 用它解析内部 UUID；数据库主键与外键继续使用 UUID。迁移和

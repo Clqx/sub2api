@@ -22,20 +22,30 @@ const (
 )
 
 type Config struct {
-	Mode                string
-	Database            postgres.DBConfig
-	MigrationsDir       string
-	MigrationLimit      time.Duration
-	WorkerID            string
-	WorkflowLease       time.Duration
-	ClaimTTL            time.Duration
-	RecoveryBackoff     time.Duration
-	RecoveryIdleBackoff time.Duration
-	EnvelopeMode        string
-	KMSProvider         string
-	KMSKeyRef           string
-	AllowLocalKEK       bool
-	LocalKEK            []byte
+	Mode                       string
+	Database                   postgres.DBConfig
+	MigrationsDir              string
+	MigrationLimit             time.Duration
+	WorkerID                   string
+	WorkflowLease              time.Duration
+	ClaimTTL                   time.Duration
+	RecoveryBackoff            time.Duration
+	RecoveryIdleBackoff        time.Duration
+	EnvelopeMode               string
+	KMSProvider                string
+	KMSKeyRef                  string
+	AllowLocalKEK              bool
+	LocalKEK                   []byte
+	BatchClientID              string
+	BatchOnlineWrapAlgorithm   string
+	BatchOnlineDomain          string
+	BatchOnlineKeyRef          string
+	BatchRecoveryWrapAlgorithm string
+	BatchRecoveryDomain        string
+	BatchRecoveryKeyRef        string
+	BatchFingerprintKeyRef     string
+	BatchFingerprintKey        []byte
+	LocalRecoveryKEK           []byte
 }
 
 func LoadConfig() (Config, error) {
@@ -78,16 +88,24 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 		Database: postgres.DBConfig{
 			URL: value(lookup, "TRUSTED_POOL_DATABASE_URL"), MaxOpenConns: maxOpen, MaxIdleConns: maxIdle,
 		},
-		MigrationsDir:       valueOrDefault(lookup, "TRUSTED_POOL_MIGRATIONS_DIR", "../migrations"),
-		MigrationLimit:      migrationLimit,
-		WorkerID:            value(lookup, "TRUSTED_POOL_WORKER_ID"),
-		WorkflowLease:       workflowLease,
-		ClaimTTL:            claimTTL,
-		RecoveryBackoff:     recoveryBackoff,
-		RecoveryIdleBackoff: recoveryIdleBackoff,
-		EnvelopeMode:        envelopeMode,
-		KMSProvider:         value(lookup, "TRUSTED_POOL_KMS_PROVIDER"),
-		KMSKeyRef:           value(lookup, "TRUSTED_POOL_KMS_KEY_REF"),
+		MigrationsDir:              valueOrDefault(lookup, "TRUSTED_POOL_MIGRATIONS_DIR", "../migrations"),
+		MigrationLimit:             migrationLimit,
+		WorkerID:                   value(lookup, "TRUSTED_POOL_WORKER_ID"),
+		WorkflowLease:              workflowLease,
+		ClaimTTL:                   claimTTL,
+		RecoveryBackoff:            recoveryBackoff,
+		RecoveryIdleBackoff:        recoveryIdleBackoff,
+		EnvelopeMode:               envelopeMode,
+		KMSProvider:                value(lookup, "TRUSTED_POOL_KMS_PROVIDER"),
+		KMSKeyRef:                  value(lookup, "TRUSTED_POOL_KMS_KEY_REF"),
+		BatchClientID:              value(lookup, "TRUSTED_POOL_BATCH_CLIENT_ID"),
+		BatchOnlineWrapAlgorithm:   value(lookup, "TRUSTED_POOL_BATCH_KMS_WRAP_ALGORITHM"),
+		BatchOnlineDomain:          value(lookup, "TRUSTED_POOL_BATCH_KMS_DOMAIN"),
+		BatchOnlineKeyRef:          value(lookup, "TRUSTED_POOL_BATCH_KMS_KEY_REF"),
+		BatchRecoveryWrapAlgorithm: value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_WRAP_ALGORITHM"),
+		BatchRecoveryDomain:        value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_DOMAIN"),
+		BatchRecoveryKeyRef:        value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_KEY_REF"),
+		BatchFingerprintKeyRef:     value(lookup, "TRUSTED_POOL_BATCH_FINGERPRINT_KEY_REF"),
 	}
 	allow, err := boolValue(lookup, "TRUSTED_POOL_ALLOW_INSECURE_LOCAL_KEK", false)
 	if err != nil {
@@ -100,6 +118,20 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 			return Config{}, errors.New("TRUSTED_POOL_KEK_HEX must encode exactly 32 bytes")
 		}
 		config.LocalKEK = decoded
+	}
+	if raw := value(lookup, "TRUSTED_POOL_BATCH_FINGERPRINT_HMAC_KEY_HEX"); raw != "" {
+		decoded, decodeErr := hex.DecodeString(raw)
+		if decodeErr != nil || len(decoded) != 32 {
+			return Config{}, errors.New("TRUSTED_POOL_BATCH_FINGERPRINT_HMAC_KEY_HEX must encode exactly 32 bytes")
+		}
+		config.BatchFingerprintKey = decoded
+	}
+	if raw := value(lookup, "TRUSTED_POOL_RECOVERY_KEK_HEX"); raw != "" {
+		decoded, decodeErr := hex.DecodeString(raw)
+		if decodeErr != nil || len(decoded) != 32 {
+			return Config{}, errors.New("TRUSTED_POOL_RECOVERY_KEK_HEX must encode exactly 32 bytes")
+		}
+		config.LocalRecoveryKEK = decoded
 	}
 	if err := config.validate(); err != nil {
 		return Config{}, err
@@ -127,6 +159,14 @@ func (c Config) validate() error {
 	if c.KMSKeyRef == "" {
 		return errors.New("TRUSTED_POOL_KMS_KEY_REF is required")
 	}
+	if c.BatchClientID == "" || c.BatchOnlineWrapAlgorithm == "" || c.BatchOnlineDomain == "" ||
+		c.BatchOnlineKeyRef == "" || c.BatchRecoveryWrapAlgorithm == "" || c.BatchRecoveryDomain == "" ||
+		c.BatchRecoveryKeyRef == "" || c.BatchFingerprintKeyRef == "" || len(c.BatchFingerprintKey) != 32 {
+		return errors.New("credential batch client, dual wrapping and fingerprint configuration are required")
+	}
+	if c.BatchOnlineDomain == c.BatchRecoveryDomain || c.BatchOnlineKeyRef == c.BatchRecoveryKeyRef {
+		return errors.New("online and Recovery credential batch wrappers must use independent domains and keys")
+	}
 	if c.Mode == ModeProduction {
 		if c.EnvelopeMode != EnvelopeModeKMS {
 			return errors.New("production mode requires TRUSTED_POOL_ENVELOPE_MODE=kms")
@@ -134,16 +174,19 @@ func (c Config) validate() error {
 		if c.KMSProvider == "" {
 			return errors.New("production mode requires TRUSTED_POOL_KMS_PROVIDER")
 		}
-		if c.AllowLocalKEK || len(c.LocalKEK) != 0 {
-			return errors.New("production mode forbids environment local KEK")
+		if c.AllowLocalKEK || len(c.LocalKEK) != 0 || len(c.LocalRecoveryKEK) != 0 {
+			return errors.New("production mode forbids environment local KEK or Recovery KEK")
 		}
 		return nil
 	}
 	if c.EnvelopeMode != EnvelopeModeLocal {
 		return errors.New("development runtime currently requires TRUSTED_POOL_ENVELOPE_MODE=local")
 	}
-	if !c.AllowLocalKEK || len(c.LocalKEK) != 32 {
-		return errors.New("local KEK requires development mode and TRUSTED_POOL_ALLOW_INSECURE_LOCAL_KEK=true")
+	if !c.AllowLocalKEK || len(c.LocalKEK) != 32 || len(c.LocalRecoveryKEK) != 32 {
+		return errors.New("local online and Recovery KEKs require development mode and TRUSTED_POOL_ALLOW_INSECURE_LOCAL_KEK=true")
+	}
+	if string(c.LocalKEK) == string(c.LocalRecoveryKEK) {
+		return errors.New("development online and Recovery KEKs must differ")
 	}
 	return nil
 }

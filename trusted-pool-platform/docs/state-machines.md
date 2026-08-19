@@ -47,6 +47,19 @@ ACTIVE
 网络超时只意味着结果未知。操作进入 `RECONCILE_REQUIRED`，Seat 保持 `SUSPEND_PENDING` 并查询操作状态，不得恢复为 `ACTIVE`，
 更不得直接开始换员。
 
+### Pending settlement 解除
+
+```text
+INTENT_RECORDED -> IN_FLIGHT -> SUCCEEDED
+                         \-> RECONCILE_REQUIRED
+                         \-> OPERATOR_REVIEW_REQUIRED
+```
+
+- Begin 只允许 `DRAINING` Seat，并在任何上游 POST 前持久化 actor、epoch、request ID、理由和证据。
+- timeout、5xx、坏响应或绑定漂移进入 `RECONCILE_REQUIRED`；普通 4xx 进入人工复核。两者都不表示上游未执行。
+- 只有 Sub2API typed 成功响应与持久 intent 完全匹配，才能把 Operation、case、result 和 trust event 原子置为成功。
+- 未决 intent 时 Seat 不得进入 `ASSIGNMENT_PENDING` 或 `ACTIVE`。历史成功重放不依赖当前 Seat epoch。
+
 ### 临时换员
 
 - 前置状态必须为 `FROZEN`。
@@ -79,8 +92,9 @@ SEALED -> ACTIVE -> RETIRED
 - `ACTIVE`：满足激活条件，可用于当前 Epoch。
 - `RETIRED`：已被新版本替换，不得重新激活。
 
-当前 Go 内核实现以上三个密文生命周期状态。`PREPARED`、Share `DISTRIBUTED` 和失败重试属于
-Phase 2 持久化编排状态，不应被描述为当前已经实现。
+Phase 2-E 持久运行时实现 `PREPARED -> SEALED -> ACTIVE -> RETIRED`。`PREPARED` 是已落库 intent、
+双包装尚未完成的禁用状态；公开 GET 返回 pending profile，不能将它解释为已保护或可用。Share
+`DISTRIBUTED` 和批次明文领取仍未实现。
 
 激活必须使用比较并交换，确保同一 Pool、账号引用、批次类型和 Epoch 只有一个活动版本。
 
@@ -88,8 +102,10 @@ Phase 2 持久化编排状态，不应被描述为当前已经实现。
 token SHA-256 摘要和短 TTL。Provision 领取状态按
 `READY -> ACK_PENDING -> CLAIMED` 推进；结果未知进入 `ACK_RECONCILE_REQUIRED` 并失败关闭，过期进入
 `EXPIRED` 且销毁 credential。成功领取消费摘要并清除待交付明文；token 重放、其他成员代领或重复 ack 均失败。
-Phase 2-A 已持久化 Provision Seat 访问凭据领取；临时换员、恢复、永久换员和 Credential Batch/Share
-领取尚未接入 PersistentCoordinator，相关端点失败关闭。
+Phase 2-C 已持久化 Provision 与临时换员/恢复产生的 Seat 访问凭据领取。Provision 使用
+`READY -> ACK_PENDING -> CLAIMED`；临时换员/恢复的 Sub2API rotate 已在 Operation 成功前确认，Claim 可从
+`READY` 经本地 lease/KMS 解密/fenced CAS 直接进入 `CLAIMED`。Credential Batch 的持久生命周期已接入，
+但不提供 Open/领取；永久换员、control rotation evidence 和 Share 领取继续失败关闭。
 
 ## 4. 风险等级
 

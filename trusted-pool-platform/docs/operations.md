@@ -60,13 +60,11 @@
 
 可信 Seat 每个已准入请求都有一条 `pending_settlement`。正常同步结算完成后精确删除；计费错误、
 panic、超时或删除失败时记录保留，因此 drain/freeze 返回非零 `pending_settlements` 并拒绝冻结。
-运营人员使用普通平台密钥调用 `GET /api/v1/seats/{id}/settlements` 和详情接口，按 Seat、Epoch、
-`settlement_id`、`request_id`、`billing_id`、错误与尝试次数核验。确认账本已补记或请求确实未消费后，
-使用独立 `TRUSTED_POOL_SETTLEMENT_API_KEY` 调用
-`POST /api/v1/seats/{id}/settlements/{settlement_id}/resolve`，提交稳定 `operation_id`、理由和证据引用。
-平台内部再分别以 Sub2API `seat:read` 和 `settlement:resolve` scope 代理请求；运营人员不得直接持有
-Sub2API 集成密钥。Sub2API 在同一事务追加不可变审计并删除精确 pending；相同操作可幂等重放，
-内容漂移返回冲突。禁止直接删除数据库记录，也不得把 resolve 当成实际补账动作。
+Sub2API 已保存 Seat、Epoch、`settlement_id`、`request_id`、`billing_id`、错误和尝试次数。运营先用独立
+只读客户端 list/get，确认补账或上游结果后，再用 `TRUSTED_POOL_SETTLEMENT_API_KEY` 提交 resolve；Header
+`Idempotency-Key` 必须等于 body `operation_id`，并携带读到的 expected epoch/request ID。平台先持久化
+9 键 intent，再使用只含 `settlement:resolve` scope 的独立 actor 调用 Sub2API。结果未知保持禁用并按原
+operation 恢复；未决 intent 禁止换员。resolve 只记录核验结论，不替代实际补账，禁止直接删除数据库记录。
 
 ## 4. Outbox 与对账
 
@@ -84,6 +82,12 @@ Sub2API 集成密钥。Sub2API 在同一事务追加不可变审计并删除精�
 
 - 集成凭据和 HMAC Key 支持重叠轮换，轮换期同时接受当前和下一版本。
 - 指纹 HMAC Key 轮换后保留算法版本；不尝试把不同版本散列强行关联。
+- Credential Batch 使用独立 `TRUSTED_POOL_BATCH_API_KEY` 和独立 operation client ID。Seal/Activate/Retire
+  的 `Idempotency-Key` 必须与 body `operation_id` 一致；请求重放不得更换 Pool、账号、类型、版本、Epoch 或 payload。
+- Seal 只有在线 KMS 与 Recovery wrap-only adapter 都 ready 才开始持久 intent；包装发生在数据库事务外，
+  最终提交会重新核对 Pool 当前 ACTIVE Epoch 和 credential floor。PREPARED 表示包装进行中，不能视为可用凭据。
+- Recovery wrapper 仅允许 Wrap。当前在线服务没有 Recovery Unwrap、Share 或 Reveal 能力；生产不得配置环境
+  Recovery KEK，不得复制在线 wrapped DEK 到 recovery 列。
 - 永久换员先由运营或外部系统核验供应商登录、MFA、恢复和所有权变更证明的真实性，保留不透明的
   `provider_attestation_ref`；Phase 1 平台不校验供应商签名或证明的密码学真实性。
 - 完成新旧 Epoch 的四类控制批次切换：旧 `LOGIN`、`MFA`、`RECOVERY`、`OWNERSHIP` 全部退休，
@@ -114,18 +118,26 @@ Sub2API 集成密钥。Sub2API 在同一事务追加不可变审计并删除精�
 
 指标标签不得包含 API Key、原始指纹、用户 JWT 或任何凭据字段。
 
-## 8. Phase 2-A 运行与重启限制
+## 8. Phase 2-E 运行与重启限制
 
-Provision、Operation、Seat/Owner Assignment 和 Provision Claim 已接入 PostgreSQL。重启后可读取已提交
+Provision、Operation、Seat/Owner Assignment、Provision Claim 和 Suspend/Drain/Freeze 已接入 PostgreSQL。重启后可读取已提交
 状态，并通过数据库 lease/fencing 接管结果未知的 ack；成功 Operation 不会重放上游或重新签发 token。
 Provision 在本地提交前中断时，由原调用方使用相同请求和 operation ID 重放。恢复 worker 会把该状态标记
 为 `CALLER_REPLAY_REQUIRED`，但不会自行生成调用方无法取得的新 token。
 
-暂停、换员、settlement 和 credential batch 尚未持久化，在 PostgreSQL Runtime 中失败关闭；不得切回
-内存 Coordinator 继续操作。风险窗口仍是可丢失观察信号。
+暂停与换员恢复线程都从持久 request snapshot 重建命令。暂停结果未知保持 `SUSPEND_PENDING` 或
+`DRAINING`；临时换员/恢复结果未知保持 `ASSIGNMENT_PENDING`。无法证明上游未应用的普通 4xx 进入
+`OPERATOR_REVIEW_REQUIRED`，不会自动恢复 ACTIVE。结算解除的 timeout/5xx/坏响应进入自动恢复，普通
+4xx 进入人工复核；两者都不会声明上游未执行。Credential Batch 已接入独立 Store，不得切回内存 Manager；
+永久换员和 control rotation evidence 继续失败关闭。风险窗口仍是可丢失观察信号。
+
+历史 Seat 若缺少稳定 Principal、Subscription 或 API Key ID，迁移 005 只会从字段完整的成功 Provision
+快照回填；无法证明绑定的记录保持可读但拒绝 BeginAssignment。运营必须先完成受控对账或重新开通，
+不得手工填充猜测的资源 ID。
 
 虽然代码已使用持久 CAS/租约，本阶段尚未完成真实 PostgreSQL 双连接和多实例崩溃测试，因此仍禁止
-多副本、蓝绿重叠和 rolling update overlap。升级时先停止旧实例，再启动新实例。生产 KMS adapter、
+多副本、蓝绿重叠和 rolling update overlap。升级时先停止旧实例，再启动新实例。生产在线 KMS 与 Recovery
+wrap-only adapter、
 真实数据库恢复演练和多实例竞争测试全部通过后，方可调整该限制。
 
 旧版 initdb 开发卷没有 migration ledger，当前服务会以 `ErrUnmanagedSchema` 拒绝启动。开发卷可以重建；

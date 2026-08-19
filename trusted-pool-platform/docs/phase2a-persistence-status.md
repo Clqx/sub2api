@@ -28,7 +28,9 @@ Phase 2-A 只建立可信成员池工作流的 PostgreSQL 持久化边界，解�
 
 - `cmd/server` 已强制注入 PostgreSQL Store、迁移 runner、KMS 包络 adapter、唯一 worker ID 和恢复循环。
 - Provision 的 Pool/Owner Member 必须由可信流程预创建；不得用占位身份绕过约束。
-- Suspend、Assign、Restore、Replace、settlement 和 credential batch 尚未接入持久 Coordinator，运行时失败关闭。
+- Suspend/Drain/Freeze 已在后续 Phase 2-B 接入，Assign/Restore 已在 Phase 2-C 接入，settlement 查询/解除
+  已在 Phase 2-D 接入，Credential Batch 已在 Phase 2-E 接入持久运行时；Replace、Control Rotation Evidence
+  和完整恢复治理仍失败关闭。
 - 当前不支持把此底座作为生产永久换员完成条件。
 
 ## 已执行验证

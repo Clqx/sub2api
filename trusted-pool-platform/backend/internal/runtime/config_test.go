@@ -17,6 +17,7 @@ func TestLoadConfigRequiresDatabaseAndProductionKMS(t *testing.T) {
 		"TRUSTED_POOL_KMS_PROVIDER": "example-kms",
 		"TRUSTED_POOL_WORKER_ID":    "worker-1",
 	}
+	addBatchConfig(production, false)
 	config, err := loadConfig(envLookup(production))
 	if err != nil {
 		t.Fatalf("production config rejected: %v", err)
@@ -39,6 +40,7 @@ func TestDevelopmentLocalKEKRequiresAllExplicitGates(t *testing.T) {
 		"TRUSTED_POOL_KEK_HEX":       testKEKHex,
 		"TRUSTED_POOL_WORKER_ID":     "worker-1",
 	}
+	addBatchConfig(base, true)
 	if _, err := loadConfig(envLookup(base)); err == nil {
 		t.Fatal("development local KEK was accepted without allow flag")
 	}
@@ -68,6 +70,7 @@ func TestWorkflowConfigRejectsMissingOwnerAndUnsafeDurations(t *testing.T) {
 		"TRUSTED_POOL_RECOVERY_BACKOFF":         "1m",
 		"TRUSTED_POOL_RECOVERY_IDLE_BACKOFF":    "1s",
 	}
+	addBatchConfig(base, true)
 	if _, err := loadConfig(envLookup(base)); err == nil {
 		t.Fatal("configuration without a persistent worker owner was accepted")
 	}
@@ -83,6 +86,21 @@ func TestWorkflowConfigRejectsMissingOwnerAndUnsafeDurations(t *testing.T) {
 	}
 }
 
+func addBatchConfig(values map[string]string, development bool) {
+	values["TRUSTED_POOL_BATCH_CLIENT_ID"] = "batch-client"
+	values["TRUSTED_POOL_BATCH_KMS_WRAP_ALGORITHM"] = "KMS-CONTEXT-WRAP-V1"
+	values["TRUSTED_POOL_BATCH_KMS_DOMAIN"] = "online-domain"
+	values["TRUSTED_POOL_BATCH_KMS_KEY_REF"] = "kms/key/batches"
+	values["TRUSTED_POOL_BATCH_RECOVERY_WRAP_ALGORITHM"] = "RECOVERY-CONTEXT-WRAP-V1"
+	values["TRUSTED_POOL_BATCH_RECOVERY_DOMAIN"] = "recovery-domain"
+	values["TRUSTED_POOL_BATCH_RECOVERY_KEY_REF"] = "recovery/key/batches"
+	values["TRUSTED_POOL_BATCH_FINGERPRINT_KEY_REF"] = "fingerprint/key/v1"
+	values["TRUSTED_POOL_BATCH_FINGERPRINT_HMAC_KEY_HEX"] = testBatchFingerprintHex
+	if development {
+		values["TRUSTED_POOL_RECOVERY_KEK_HEX"] = testRecoveryKEKHex
+	}
+}
+
 func envLookup(values map[string]string) func(string) (string, bool) {
 	return func(name string) (string, bool) {
 		value, ok := values[name]
@@ -91,3 +109,5 @@ func envLookup(values map[string]string) func(string) (string, bool) {
 }
 
 const testKEKHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const testRecoveryKEKHex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+const testBatchFingerprintHex = "89abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567"

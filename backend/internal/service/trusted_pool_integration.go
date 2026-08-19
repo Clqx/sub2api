@@ -157,22 +157,26 @@ type TrustedPoolPendingSettlement struct {
 }
 
 type ResolveTrustedPoolSettlementInput struct {
-	OperationID    string `json:"operation_id"`
-	ActorClientID  string `json:"-"`
-	ExternalPoolID string `json:"-"`
-	Reason         string `json:"reason"`
-	Evidence       string `json:"evidence"`
+	OperationID             string `json:"operation_id"`
+	ExpectedAssignmentEpoch int64  `json:"expected_assignment_epoch"`
+	ExpectedRequestID       string `json:"expected_request_id"`
+	ActorClientID           string `json:"-"`
+	ExternalPoolID          string `json:"-"`
+	Reason                  string `json:"reason"`
+	Evidence                string `json:"evidence"`
 }
 
 type TrustedPoolSettlementResolution struct {
-	SeatID         int64     `json:"seat_id"`
-	ExternalSeatID string    `json:"external_seat_id"`
-	SettlementID   string    `json:"settlement_id"`
-	OperationID    string    `json:"operation_id"`
-	ActorClientID  string    `json:"actor_client_id"`
-	Reason         string    `json:"reason"`
-	Evidence       string    `json:"evidence"`
-	ResolvedAt     time.Time `json:"resolved_at"`
+	SeatID          int64     `json:"seat_id"`
+	ExternalSeatID  string    `json:"external_seat_id"`
+	SettlementID    string    `json:"settlement_id"`
+	OperationID     string    `json:"operation_id"`
+	ActorClientID   string    `json:"actor_client_id"`
+	AssignmentEpoch int64     `json:"assignment_epoch"`
+	RequestID       string    `json:"request_id"`
+	Reason          string    `json:"reason"`
+	Evidence        string    `json:"evidence"`
+	ResolvedAt      time.Time `json:"resolved_at"`
 }
 
 type TrustedPoolRepository interface {
@@ -635,14 +639,17 @@ func (s *TrustedPoolIntegrationService) ResolvePendingSettlement(ctx context.Con
 	}
 	seatID, settlementID = strings.TrimSpace(seatID), strings.TrimSpace(settlementID)
 	input.OperationID = strings.TrimSpace(input.OperationID)
+	input.ExpectedRequestID = strings.TrimSpace(input.ExpectedRequestID)
 	input.ActorClientID = principal.ClientID
 	input.ExternalPoolID = principal.ExternalPoolID
 	input.Reason = strings.TrimSpace(input.Reason)
 	input.Evidence = strings.TrimSpace(input.Evidence)
-	if seatID == "" || settlementID == "" || input.OperationID == "" || input.ActorClientID == "" || input.Reason == "" || input.Evidence == "" {
-		return nil, infraerrors.BadRequest("TRUSTED_POOL_SETTLEMENT_RESOLUTION_INVALID", "operation_id, actor, reason and evidence are required")
+	if seatID == "" || settlementID == "" || input.OperationID == "" || input.ExpectedAssignmentEpoch <= 0 ||
+		input.ExpectedRequestID == "" || input.ActorClientID == "" || input.Reason == "" || input.Evidence == "" {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_SETTLEMENT_RESOLUTION_INVALID", "operation_id, expected pending binding, actor, reason and evidence are required")
 	}
-	if len(seatID) > 128 || len(settlementID) > 128 || len(input.OperationID) > 128 || len(input.ActorClientID) > 64 || len(input.Reason) > 1000 || len(input.Evidence) > 4000 {
+	if len(seatID) > 128 || len(settlementID) > 128 || len(input.OperationID) > 128 || len(input.ExpectedRequestID) > 128 ||
+		len(input.ActorClientID) > 64 || len(input.Reason) > 1000 || len(input.Evidence) > 4000 {
 		return nil, infraerrors.BadRequest("TRUSTED_POOL_SETTLEMENT_RESOLUTION_INVALID", "trusted pool settlement resolution is too long")
 	}
 	return s.repo.ResolvePendingSettlement(ctx, seatID, settlementID, input)

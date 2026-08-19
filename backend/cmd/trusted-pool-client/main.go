@@ -247,6 +247,9 @@ func parseScopes(value string) ([]string, error) {
 	if len(result) == 0 {
 		return nil, errors.New("at least one trusted-pool scope is required")
 	}
+	if _, resolvesSettlements := seen["settlement:resolve"]; resolvesSettlements && len(result) != 1 {
+		return nil, errors.New("settlement:resolve must be the client's only scope")
+	}
 	return result, nil
 }
 

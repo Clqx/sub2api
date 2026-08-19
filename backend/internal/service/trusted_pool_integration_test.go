@@ -182,7 +182,8 @@ func (r *trustedPoolRepoStub) GetPendingSettlement(context.Context, string, stri
 	return nil, ErrTrustedPoolSettlementNotFound
 }
 func (r *trustedPoolRepoStub) ResolvePendingSettlement(_ context.Context, seatID, settlementID string, input ResolveTrustedPoolSettlementInput) (*TrustedPoolSettlementResolution, error) {
-	return &TrustedPoolSettlementResolution{ExternalSeatID: seatID, SettlementID: settlementID, OperationID: input.OperationID}, nil
+	return &TrustedPoolSettlementResolution{ExternalSeatID: seatID, SettlementID: settlementID, OperationID: input.OperationID,
+		AssignmentEpoch: input.ExpectedAssignmentEpoch, RequestID: input.ExpectedRequestID}, nil
 }
 func (r *trustedPoolRepoStub) SuspendSeat(context.Context, string, string, string) (*TrustedPoolSeat, error) {
 	r.seat.State = TrustedPoolSeatStateDraining
@@ -524,7 +525,13 @@ func TestTrustedPoolSettlementResolveRequiresDedicatedScope(t *testing.T) {
 
 	_, err := auth.AuthenticateBearer(context.Background(), "platform", secret, "settlement:resolve")
 	require.ErrorIs(t, err, ErrTrustedPoolForbidden)
-	repo.client.Scopes = append(repo.client.Scopes, "settlement:resolve")
+	repo.client.Scopes = []string{"*"}
+	_, err = auth.AuthenticateBearer(context.Background(), "platform", secret, "settlement:resolve")
+	require.ErrorIs(t, err, ErrTrustedPoolForbidden)
+	repo.client.Scopes = []string{"seat:read", "settlement:resolve"}
+	_, err = auth.AuthenticateBearer(context.Background(), "platform", secret, "settlement:resolve")
+	require.ErrorIs(t, err, ErrTrustedPoolForbidden)
+	repo.client.Scopes = []string{"settlement:resolve"}
 	_, err = auth.AuthenticateBearer(context.Background(), "platform", secret, "settlement:resolve")
 	require.NoError(t, err)
 }

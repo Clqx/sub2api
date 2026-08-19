@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"trusted-pool-platform/backend/internal/application"
+	"trusted-pool-platform/backend/internal/domain"
 )
 
 const operationColumns = `id, integration_client_id, operation_id, operation_type, target_type,
@@ -192,7 +193,8 @@ func (s *Store) AcquireNextOperationLease(ctx context.Context, input application
     SELECT id FROM integration_operations
     WHERE status IN ('RUNNING', 'RETRYABLE', 'RECONCILE_REQUIRED')
       AND migration_state = 'CURRENT'
-      AND (error_code IS NULL OR error_code <> 'CALLER_REPLAY_REQUIRED')
+	  AND operation_type IN ('PROVISION', 'SUSPEND', 'ASSIGN_TEMPORARY', 'RESTORE')
+      AND (error_code IS NULL OR error_code NOT IN ('CALLER_REPLAY_REQUIRED', 'OPERATOR_REVIEW_REQUIRED'))
       AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP)
       AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP)
     ORDER BY COALESCE(next_attempt_at, created_at), created_at
@@ -227,10 +229,11 @@ SET status = $5, response_snapshot = NULLIF($6::text, '')::jsonb,
     lease_owner = NULL, lease_expires_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP
 WHERE integration_client_id = $1 AND operation_id = $2 AND fencing_token = $3
   AND migration_state = 'CURRENT'
+	AND operation_type <> 'RESOLVE_SETTLEMENT'
   AND lease_owner = $4 AND lease_expires_at > CURRENT_TIMESTAMP
   AND status IN ('RUNNING', 'RETRYABLE', 'RECONCILE_REQUIRED')
   AND NOT ($5 = 'SUCCEEDED' AND operation_type IN (
-      'PROVISION', 'ASSIGN_TEMPORARY', 'RESTORE', 'REPLACE_PERMANENTLY'
+      'PROVISION', 'SUSPEND', 'ASSIGN_TEMPORARY', 'RESTORE', 'REPLACE_PERMANENTLY'
   ))
 RETURNING ` + operationColumns
 	op, err := scanOperation(s.db.QueryRowContext(ctx, query, input.Key.ClientID, input.Key.OperationID,
@@ -279,7 +282,7 @@ WHERE integration_client_id = $1 AND operation_id = $2 AND fencing_token = $3
   AND target_type = 'SEAT'
   AND EXISTS (SELECT 1 FROM seats s WHERE s.external_id = target_external_id
       AND s.external_id = $6 AND s.status = 'ACTIVE')
-  AND operation_type IN ('PROVISION', 'ASSIGN_TEMPORARY', 'RESTORE', 'REPLACE_PERMANENTLY')
+	  AND operation_type IN ('PROVISION', 'REPLACE_PERMANENTLY')
 RETURNING `+operationColumns, input.Key.ClientID, input.Key.OperationID, input.FencingToken,
 		input.LeaseOwner, input.ResultSnapshot, input.Claim.SeatExternalID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -332,8 +335,9 @@ ON CONFLICT (integration_operation_id) DO NOTHING`, input.Key.ClientID, input.Ke
 func (s *Store) CommitProvisionWithCredentialClaim(ctx context.Context, input application.CommitProvisionWithCredentialClaimInput) (*application.StoredOperation, *application.StoredCredentialClaim, *application.PersistedSeat, error) {
 	opInput := input.Operation
 	if strings.TrimSpace(input.PoolExternalID) == "" || strings.TrimSpace(input.OwnerExternalID) == "" ||
-		input.ExistingGroupID <= 0 || input.AssignmentEpoch == 0 || opInput.Claim.SeatExternalID == "" ||
-		opInput.Claim.TargetMemberExternalID != input.OwnerExternalID {
+		input.ExistingGroupID <= 0 || input.AssignmentEpoch != 1 || opInput.Claim.SeatExternalID == "" ||
+		opInput.Claim.TargetMemberExternalID != input.OwnerExternalID || input.PrincipalUserID <= 0 ||
+		input.SubscriptionID <= 0 || input.APIKeyID <= 0 {
 		return nil, nil, nil, application.ErrWorkflowInvalidData
 	}
 	if err := validateCreateClaim(opInput.Claim); err != nil {
@@ -348,19 +352,40 @@ func (s *Store) CommitProvisionWithCredentialClaim(ctx context.Context, input ap
 		return nil, nil, nil, fmt.Errorf("begin provision aggregate transaction: %w", err)
 	}
 	defer tx.Rollback()
+	// 所有 Seat 工作流统一先锁 Operation，再锁 Pool/成员和 Seat，避免跨流程反向锁死。
+	var operationTargetID sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT target_id FROM integration_operations
+WHERE integration_client_id = $1 AND operation_id = $2 AND migration_state = 'CURRENT'
+  AND operation_type = 'PROVISION' AND target_type = 'SEAT' AND target_external_id = $3
+  AND fencing_token = $4 AND lease_owner = $5 AND lease_expires_at > CURRENT_TIMESTAMP
+  AND status IN ('RUNNING', 'RETRYABLE', 'RECONCILE_REQUIRED')
+FOR UPDATE`, opInput.Key.ClientID, opInput.Key.OperationID, opInput.Claim.SeatExternalID,
+		opInput.FencingToken, opInput.LeaseOwner).Scan(&operationTargetID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil, application.ErrWorkflowStaleFence
+	}
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("lock provision operation: %w", err)
+	}
 	var poolID, ownerMemberID string
 	var membershipEpoch uint64
-	err = tx.QueryRowContext(ctx, `SELECT p.id, p.membership_epoch, m.id
+	// Pool 是同一成员池内 Provision/Suspend 的公共串行化锁，必须独立先取得。
+	err = tx.QueryRowContext(ctx, `SELECT p.id, p.membership_epoch
 FROM pools p
-JOIN membership_epochs me
-  ON me.pool_id = p.id AND me.epoch = p.membership_epoch AND me.status = 'ACTIVE'
-JOIN membership_epoch_members mem ON mem.epoch_id = me.id
-JOIN members m ON m.id = mem.member_id AND m.external_id = $2 AND m.status = 'ACTIVE'
-WHERE p.external_id = $1 AND p.sub2api_group_id = $3 AND p.membership_epoch > 0
+WHERE p.external_id = $1 AND p.sub2api_group_id = $2 AND p.membership_epoch > 0
   AND p.status IN ('PROVISIONING', 'WAITING_MEMBERS', 'ACTIVE')
-FOR UPDATE OF p, me, mem, m`, input.PoolExternalID, input.OwnerExternalID, input.ExistingGroupID).Scan(&poolID, &membershipEpoch, &ownerMemberID)
+FOR UPDATE`, input.PoolExternalID, input.ExistingGroupID).Scan(&poolID, &membershipEpoch)
 	if err != nil {
-		return nil, nil, nil, translateNotFound("lock provision pool and owner", err)
+		return nil, nil, nil, translateNotFound("lock provision pool", err)
+	}
+	err = tx.QueryRowContext(ctx, `SELECT m.id
+FROM membership_epochs me
+JOIN membership_epoch_members mem ON mem.epoch_id = me.id
+JOIN members m ON m.id = mem.member_id AND m.external_id = $3 AND m.status = 'ACTIVE'
+WHERE me.pool_id = $1 AND me.epoch = $2 AND me.status = 'ACTIVE'
+FOR UPDATE OF me, mem, m`, poolID, membershipEpoch, input.OwnerExternalID).Scan(&ownerMemberID)
+	if err != nil {
+		return nil, nil, nil, translateNotFound("lock provision owner membership", err)
 	}
 	var targetOccupied bool
 	err = tx.QueryRowContext(ctx, `SELECT EXISTS (
@@ -375,39 +400,48 @@ FOR UPDATE OF p, me, mem, m`, input.PoolExternalID, input.OwnerExternalID, input
 	if targetOccupied {
 		return nil, nil, nil, application.ErrWorkflowTargetConflict
 	}
-	var operationTargetID sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT target_id FROM integration_operations
-WHERE integration_client_id = $1 AND operation_id = $2 AND migration_state = 'CURRENT'
-  AND operation_type = 'PROVISION' AND target_external_id = $3
-FOR UPDATE`, opInput.Key.ClientID, opInput.Key.OperationID, opInput.Claim.SeatExternalID).Scan(&operationTargetID)
-	if err != nil {
-		return nil, nil, nil, translateNotFound("lock provision operation", err)
-	}
 	var seatID string
 	var existingAssignmentEpoch uint64
 	var existingOwner, existingSeatStatus sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT id, assignment_epoch, owner_member_id, status FROM seats
+	var existingPrincipalID, existingSubscriptionID, existingAPIKeyID sql.NullInt64
+	var existingAPIKeyVersion uint64
+	err = tx.QueryRowContext(ctx, `SELECT id, assignment_epoch, owner_member_id, status,
+       sub2api_principal_id, sub2api_subscription_id, sub2api_api_key_id, active_api_key_version FROM seats
 WHERE external_id = $1 AND pool_id = $2 AND status IN ('PROVISIONING', 'ACTIVE')
-FOR UPDATE`, opInput.Claim.SeatExternalID, poolID).Scan(&seatID, &existingAssignmentEpoch, &existingOwner, &existingSeatStatus)
+FOR UPDATE`, opInput.Claim.SeatExternalID, poolID).Scan(&seatID, &existingAssignmentEpoch, &existingOwner,
+		&existingSeatStatus, &existingPrincipalID, &existingSubscriptionID, &existingAPIKeyID, &existingAPIKeyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = tx.QueryRowContext(ctx, `INSERT INTO seats (
-external_id, pool_id, seat_no, status, assignment_epoch, owner_member_id, created_at, updated_at
+external_id, pool_id, seat_no, status, assignment_epoch, owner_member_id,
+sub2api_principal_id, sub2api_subscription_id, sub2api_api_key_id, active_api_key_version,
+created_at, updated_at
 )
-SELECT $1, $2, COALESCE(MAX(seat_no), 0) + 1, 'ACTIVE', $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+SELECT $1, $2, COALESCE(MAX(seat_no), 0) + 1, 'ACTIVE', $3, $4, $5, $6, $7, 1,
+       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 FROM seats WHERE pool_id = $2
-RETURNING id`, opInput.Claim.SeatExternalID, poolID, input.AssignmentEpoch, ownerMemberID).Scan(&seatID)
+RETURNING id`, opInput.Claim.SeatExternalID, poolID, input.AssignmentEpoch, ownerMemberID,
+			input.PrincipalUserID, input.SubscriptionID, input.APIKeyID).Scan(&seatID)
 	} else if err == nil {
 		if existingSeatStatus.String == "ACTIVE" && (!operationTargetID.Valid || operationTargetID.String != seatID) {
 			return nil, nil, nil, application.ErrWorkflowTargetConflict
 		}
-		if existingAssignmentEpoch > input.AssignmentEpoch || (existingOwner.Valid && existingOwner.String != ownerMemberID) {
+		if existingAssignmentEpoch > input.AssignmentEpoch || (existingOwner.Valid && existingOwner.String != ownerMemberID) ||
+			(existingPrincipalID.Valid && existingPrincipalID.Int64 != input.PrincipalUserID) ||
+			(existingSubscriptionID.Valid && existingSubscriptionID.Int64 != input.SubscriptionID) ||
+			(existingAPIKeyID.Valid && existingAPIKeyID.Int64 != input.APIKeyID) || existingAPIKeyVersion > 1 {
 			return nil, nil, nil, application.ErrWorkflowInvalidState
 		}
 		var seatResult sql.Result
 		seatResult, err = tx.ExecContext(ctx, `UPDATE seats
 SET status = 'ACTIVE', assignment_epoch = $2, owner_member_id = $3,
+    sub2api_principal_id = $4, sub2api_subscription_id = $5, sub2api_api_key_id = $6,
+    active_api_key_version = 1,
     version = version + 1, updated_at = CURRENT_TIMESTAMP
-WHERE id = $1 AND (owner_member_id IS NULL OR owner_member_id = $3)`, seatID, input.AssignmentEpoch, ownerMemberID)
+WHERE id = $1 AND (owner_member_id IS NULL OR owner_member_id = $3)
+  AND (sub2api_principal_id IS NULL OR sub2api_principal_id = $4)
+  AND (sub2api_subscription_id IS NULL OR sub2api_subscription_id = $5)
+  AND (sub2api_api_key_id IS NULL OR sub2api_api_key_id = $6)`, seatID, input.AssignmentEpoch, ownerMemberID,
+			input.PrincipalUserID, input.SubscriptionID, input.APIKeyID)
 		if err == nil {
 			if rows, rowsErr := seatResult.RowsAffected(); rowsErr != nil || rows != 1 {
 				return nil, nil, nil, application.ErrWorkflowInvalidState
@@ -501,14 +535,15 @@ func (s *Store) LoadPersistedSeat(ctx context.Context, externalID string) (*appl
 	return seat, nil
 }
 
-const persistedSeatQuery = `SELECT s.id, s.external_id, p.external_id, owner.external_id,
-current_member.external_id, s.assignment_epoch, p.membership_epoch, assignment.starts_at, s.updated_at
+const persistedSeatQuery = `SELECT s.id, s.external_id, p.external_id, s.status, owner.external_id,
+current_member.external_id, assignment.assignment_type, s.assignment_epoch, p.membership_epoch, s.sub2api_principal_id,
+s.sub2api_subscription_id, s.sub2api_api_key_id, s.active_api_key_version, assignment.starts_at, s.updated_at
 FROM seats s
 JOIN pools p ON p.id = s.pool_id
 JOIN members owner ON owner.id = s.owner_member_id
 JOIN seat_assignments assignment ON assignment.seat_id = s.id AND assignment.status = 'ACTIVE'
 JOIN members current_member ON current_member.id = assignment.member_id
-WHERE s.external_id = $1 AND s.status = 'ACTIVE'
+WHERE s.external_id = $1 AND s.status IN ('ACTIVE', 'SUSPEND_PENDING', 'DRAINING', 'FROZEN')
   AND (assignment.starts_at IS NULL OR assignment.starts_at <= CURRENT_TIMESTAMP)
   AND (assignment.ends_at IS NULL OR assignment.ends_at > CURRENT_TIMESTAMP)`
 
@@ -523,9 +558,29 @@ func loadPersistedSeatTx(ctx context.Context, tx *sql.Tx, externalID string) (*a
 func scanPersistedSeat(row scanner) (*application.PersistedSeat, error) {
 	seat := &application.PersistedSeat{}
 	var assignedAt sql.NullTime
-	if err := row.Scan(&seat.SeatID, &seat.SeatExternalID, &seat.PoolExternalID, &seat.OwnerExternalID,
-		&seat.CurrentMemberID, &seat.AssignmentEpoch, &seat.MembershipEpoch, &assignedAt, &seat.UpdatedAt); err != nil {
+	var assignmentType string
+	var principalUserID, subscriptionID, apiKeyID sql.NullInt64
+	if err := row.Scan(&seat.SeatID, &seat.SeatExternalID, &seat.PoolExternalID, &seat.State, &seat.OwnerExternalID,
+		&seat.CurrentMemberID, &assignmentType, &seat.AssignmentEpoch, &seat.MembershipEpoch, &principalUserID,
+		&subscriptionID, &apiKeyID, &seat.ActiveAPIKeyVersion, &assignedAt, &seat.UpdatedAt); err != nil {
 		return nil, err
+	}
+	switch assignmentType {
+	case "PERMANENT":
+		seat.CurrentAssignmentKind = domain.AssignmentOwner
+	case "TEMPORARY":
+		seat.CurrentAssignmentKind = domain.AssignmentTemporary
+	default:
+		return nil, fmt.Errorf("unknown persisted assignment type %q", assignmentType)
+	}
+	if principalUserID.Valid {
+		seat.PrincipalUserID = principalUserID.Int64
+	}
+	if subscriptionID.Valid {
+		seat.SubscriptionID = subscriptionID.Int64
+	}
+	if apiKeyID.Valid {
+		seat.APIKeyID = apiKeyID.Int64
 	}
 	if assignedAt.Valid {
 		seat.AssignmentStarted = assignedAt.Time

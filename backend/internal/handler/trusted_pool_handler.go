@@ -82,9 +82,11 @@ type trustedPoolRotateRequest struct {
 	TargetEpoch int64  `json:"target_epoch"`
 }
 type trustedPoolResolveSettlementRequest struct {
-	OperationID string `json:"operation_id"`
-	Reason      string `json:"reason"`
-	Evidence    string `json:"evidence"`
+	OperationID             string `json:"operation_id"`
+	ExpectedAssignmentEpoch int64  `json:"expected_assignment_epoch"`
+	ExpectedRequestID       string `json:"expected_request_id"`
+	Reason                  string `json:"reason"`
+	Evidence                string `json:"evidence"`
 }
 
 func (h *TrustedPoolHandler) Suspend(c *gin.Context) {
@@ -166,10 +168,18 @@ func (h *TrustedPoolHandler) ResolvePendingSettlement(c *gin.Context) {
 		response.BadRequest(c, "invalid trusted pool settlement resolution")
 		return
 	}
+	headerOperationID := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	bodyOperationID := strings.TrimSpace(request.OperationID)
+	if headerOperationID == "" || bodyOperationID == "" || headerOperationID != bodyOperationID {
+		response.BadRequest(c, "idempotency key must match operation_id")
+		return
+	}
 	result, err := h.service.ResolvePendingSettlement(c.Request.Context(), c.Param("seat_id"), c.Param("settlement_id"), service.ResolveTrustedPoolSettlementInput{
-		OperationID: operationID(c, request.OperationID),
-		Reason:      request.Reason,
-		Evidence:    request.Evidence,
+		OperationID:             bodyOperationID,
+		ExpectedAssignmentEpoch: request.ExpectedAssignmentEpoch,
+		ExpectedRequestID:       request.ExpectedRequestID,
+		Reason:                  request.Reason,
+		Evidence:                request.Evidence,
 	})
 	if response.ErrorFrom(c, err) {
 		return

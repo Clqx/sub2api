@@ -10,10 +10,14 @@
 
 - Phase 1（已完成原型）：内存领域协调器、凭据批次加密、风险聚合，以及 Sub2API 受限
   provision/register/suspend/drain/freeze/rotate/usage-risk 资源路由。
-- Phase 2-A（当前）：PostgreSQL Provision/Operation/Seat/Owner/Claim、数据库租约与 fencing、KMS 包络
-  adapter 边界、迁移 runner、readiness 和恢复 worker。暂停/换员/settlement/batch 在运行时失败关闭。
-- Phase 2-B（下一阶段）：暂停排空、结算对账、临时换员/恢复的持久工作流，以及 outbox、用户会话/RBAC。
-- Phase 2-C：Recovery Root、Share、Manifest、生产 KMS/HSM 和永久换员治理。
+- Phase 2-A（已完成开发接线）：PostgreSQL Provision/Operation/Seat/Owner/Claim、数据库租约与 fencing、
+  KMS 包络 adapter 边界、迁移 runner、readiness 和恢复 worker。
+- Phase 2-B（已完成开发接线）：持久化暂停、排空、冻结与重启对账。
+- Phase 2-C（已完成开发接线）：持久化临时换员、正式成员恢复、加密 Claim 与重启对账。
+- Phase 2-D（已完成开发接线）：持久化 pending settlement 查询、解除 intent、审计和重启恢复。
+- Phase 2-E（当前）：持久化 Credential Batch Seal/Get/Activate/Retire；同一 DEK 使用在线 KMS 与独立
+  Recovery wrap-only adapter 双包装。永久换员、control rotation evidence、Recovery Root、Share、
+  Manifest、生产 KMS/HSM、outbox 和用户会话/RBAC 继续失败关闭。
 - Phase 3（范围外）：公开交易、支付结算、多供应商与跨地域高可用。
 
 以下逻辑架构描述 Phase 2 完成后的目标；各阶段真实能力以阶段状态文档为准。
@@ -137,6 +141,11 @@ RUNNING -> SUCCEEDED
 暂停操作采用 fail-closed 语义：未获得冻结确认时不得继续换员。网络超时不能推断执行失败，必须查询
 `operation_id` 或 Seat 状态完成判定。
 
+临时换员和恢复同样采用持久聚合：操作先锁定 FROZEN Seat、当前 Assignment、目标成员、冻结证据及
+稳定 Sub2API 资源 ID，再调用上游轮换。明确成功后，旧 Assignment 结束、目标 Assignment 激活、
+Seat assignment epoch/API Key version 同步加一、Operation 成功和加密 Claim 在一个数据库事务提交。
+Membership Epoch 与正式 Owner 不变；普通 4xx 不能证明上游未应用时进入人工复核并保持 Seat 禁用。
+
 Seat provision 不具备可查询的本地 Seat 时，采用同一写命令重放而非先行落本地状态：`RETRYABLE` 操作
 保留请求摘要，再次调用相同 operation_id 时重投上游；内容漂移返回冲突。已成功操作的重放直接返回
 既有 Seat 和领取状态，不再次调用 Sub2API，也不再次返回 claim token。
@@ -148,15 +157,24 @@ Provision credential 的领取使用独立 `credential:ack` scope。平台以确
 
 ## 8. 范围控制
 
-### 8.1 Phase 2-A Runtime 边界
+### 8.1 Phase 2-E Runtime 边界
 
 当前组合根只使用 PostgreSQL `WorkflowStore`，不再回退内存 Coordinator。已接线的纵向链路是
-Provision、持久 Seat/Owner Assignment、Operation 查询和 Provision credential claim。数据库迁移、
-KMS 包络、readiness 和恢复 worker 都是启动依赖，任一失败即拒绝启动或请求。
+Provision、持久 Seat/Owner Assignment、Operation 查询、Provision credential claim、Suspend/Drain/Freeze、
+临时换员、正式恢复，以及 pending settlement 查询和解除。暂停、换员或解除都先提交本地聚合，再调用
+Sub2API；恢复 worker 从请求快照和持久工单重建命令。解除使用独立只读/写入 client，成功结果严格绑定
+Seat、settlement、epoch、request ID 和 actor；未决解除 intent 会阻止换员。
 
-尚未持久化的 Suspend/Assign/Restore/Replace、settlement 和 credential batch 不与内存实现混用，HTTP
-统一返回 `PERSISTENT_WORKFLOW_UNSUPPORTED`。风险聚合保留为非持久观察面，不参与状态转换。完整边界和
-迁移策略见 [Phase 2-A Runtime 状态](phase2a-runtime-status.md)。
+Credential Batch 使用独立 API Key 和 operation client namespace。Seal 先持久 PREPARED intent，再在事务外
+执行双包装，最终以 lease/fence 和 Pool 当前 ACTIVE Epoch 二次核验提交 SEALED；Activate/Retire 使用数据库
+CAS 和不可变转换审计。公开元数据不包含任何密文、wrapped DEK、key ref、AAD hash 或内容指纹。
+
+尚未持久化的 Replace 和 control rotation evidence 不与内存实现混用，HTTP 统一返回
+`PERSISTENT_WORKFLOW_UNSUPPORTED`。风险聚合保留为非持久观察面，不参与状态转换。完整边界和迁移策略见
+[Phase 2-B 暂停运行时状态](phase2b-suspend-status.md)和
+[Phase 2-C 换员运行时状态](phase2c-assignment-status.md)。
+[Phase 2-D 结算解除运行时状态](phase2d-settlement-status.md)和
+[Phase 2-E 凭据批次状态](phase2e-credential-batch-status.md)。
 
 进入 MVP 的需求必须至少直接服务于以下一项：
 

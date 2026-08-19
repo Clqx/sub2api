@@ -22,14 +22,16 @@
 
 ## 3. 包络加密
 
-Phase 2-A 的 Provision Claim 已实现 AES-256-GCM、AAD 绑定、随机 DEK、在线 KMS adapter 边界和
-持久 `WrappedDEK`。开发模式可显式使用本地 KEK；生产 provider adapter 尚未链接，配置为 production
-时会失败关闭。Recovery Root 双重包装、Share、离线恢复工具，以及 Credential Batch 持久运行时仍未实现。
+Phase 2-A 的 Provision Claim 已实现在线 KMS 单包装。Phase 2-E 已为 Credential Batch 接入 AES-256-GCM、
+规范 AAD、随机 DEK、在线 KMS 与独立 Recovery wrap-only 双包装，以及 PostgreSQL 生命周期。开发模式可
+显式使用两把不同的本地 KEK；生产 provider adapter 尚未链接，配置为 production 时会失败关闭。
+Recovery Root 生成、Share、Manifest、离线恢复工具和在线 Recovery Unwrap 仍未实现。
 
 1. 每个批次版本生成随机 DEK。
 2. 使用 AEAD 加密规范化后的批次内容，关联数据包含 Pool、账号引用、批次类型、版本和 Epoch。
-3. Phase 2-A：DEK 由在线 KMS KEK 包装，用于平台正常运维。
-4. Phase 2-C：DEK 同时由当前 Recovery Root 包装，用于离线恢复。
+3. Provision Claim 的 DEK 由在线 KMS 包装，用于一次性交付。
+4. Credential Batch 的同一 DEK 由在线 KMS 与独立 Recovery wrap-only adapter 分别包装；该 Recovery
+   包装是后续治理输入，不代表当前已有 Root、Share 或可执行离线恢复。
 5. 保存密文、nonce、算法、关联数据散列、包装后 DEK 和内容散列。
 6. 清除内存中的明文和原始 DEK；日志只记录批次 ID 和状态。
 
@@ -114,7 +116,7 @@ PersistentCoordinator 尚未接入这些表，相关 HTTP 端点统一失败关�
   fingerprint；只有明确确认后才交付。结果未知时失败关闭并幂等重放，TTL 到期销毁待交付值。
 - 成功领取即完成 ack，必须消费 token 摘要并清除待交付明文；重放和跨成员代领均失败。
 - Phase 2-A 已持久化 Provision Seat 访问凭据的 token 哈希、KMS 包络、领取状态和 typed ack 证据。
-  Credential Batch/Share 领取仍未接入持久运行时，必须复用相同规则后才能开放。
+  Credential Batch 已持久化但不提供明文领取/Open；Share 领取仍未接入持久运行时。
 
 持久化时只保存 claim token 的带密钥摘要或不可逆哈希，不保存原始 token；待交付秘密必须由 KMS
 包络加密。上游网络调用不得持有数据库事务：先持久化 ack marker，调用上游，再持久化 typed ack；

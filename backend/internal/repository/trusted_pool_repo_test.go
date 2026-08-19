@@ -433,24 +433,25 @@ func TestTrustedPoolResolvePendingSettlementIsAuditedAndIdempotent(t *testing.T)
 	t.Cleanup(func() { _ = db.Close() })
 	repo := &trustedPoolRepository{db: db}
 	input := service.ResolveTrustedPoolSettlementInput{
-		OperationID: "resolve-op-1", ActorClientID: "platform-1", ExternalPoolID: "pool-1", Reason: "verified billing ledger", Evidence: "ticket-123",
+		OperationID: "resolve-op-1", ExpectedAssignmentEpoch: 3, ExpectedRequestID: "request-1",
+		ActorClientID: "platform-1", ExternalPoolID: "pool-1", Reason: "verified billing ledger", Evidence: "ticket-123",
 	}
 	resolvedAt := time.Now()
-	resolutionColumns := []string{"seat_id", "external_seat_id", "settlement_id", "operation_id", "actor_client_id", "reason", "evidence", "resolved_at"}
+	resolutionColumns := []string{"seat_id", "external_seat_id", "settlement_id", "operation_id", "actor_client_id", "expected_assignment_epoch", "expected_request_id", "reason", "evidence", "resolved_at"}
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id FROM trusted_pool_seats").WithArgs("pool-1", "seat-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	mock.ExpectQuery("SELECT id, assignment_epoch FROM trusted_pool_seats").WithArgs("pool-1", "seat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "assignment_epoch"}).AddRow(1, 3))
 	mock.ExpectQuery("(?s)FROM trusted_pool_settlement_resolutions.*operation_id=\\$2").
 		WithArgs(int64(1), "resolve-op-1").WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery("(?s)SELECT settlement_id FROM trusted_pool_pending_settlements.*FOR UPDATE").
-		WithArgs(int64(1), "settlement-1").
-		WillReturnRows(sqlmock.NewRows([]string{"settlement_id"}).AddRow("settlement-1"))
+	mock.ExpectQuery("(?s)SELECT settlement_id, request_id, assignment_epoch FROM trusted_pool_pending_settlements.*FOR UPDATE").
+		WithArgs(int64(1), "settlement-1", "request-1", int64(3)).
+		WillReturnRows(sqlmock.NewRows([]string{"settlement_id", "request_id", "assignment_epoch"}).AddRow("settlement-1", "request-1", 3))
 	mock.ExpectQuery("(?s)INSERT INTO trusted_pool_settlement_resolutions").
-		WithArgs(int64(1), "settlement-1", "resolve-op-1", "platform-1", "verified billing ledger", "ticket-123", "seat-1").
-		WillReturnRows(sqlmock.NewRows(resolutionColumns).AddRow(1, "seat-1", "settlement-1", "resolve-op-1", "platform-1", "verified billing ledger", "ticket-123", resolvedAt))
+		WithArgs(int64(1), "settlement-1", "resolve-op-1", "platform-1", int64(3), "request-1", "verified billing ledger", "ticket-123", "seat-1").
+		WillReturnRows(sqlmock.NewRows(resolutionColumns).AddRow(1, "seat-1", "settlement-1", "resolve-op-1", "platform-1", 3, "request-1", "verified billing ledger", "ticket-123", resolvedAt))
 	mock.ExpectExec("DELETE FROM trusted_pool_pending_settlements").
-		WithArgs(int64(1), "settlement-1").WillReturnResult(sqlmock.NewResult(0, 1))
+		WithArgs(int64(1), "settlement-1", "request-1", int64(3)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	first, err := repo.ResolvePendingSettlement(context.Background(), "seat-1", "settlement-1", input)
@@ -458,11 +459,11 @@ func TestTrustedPoolResolvePendingSettlementIsAuditedAndIdempotent(t *testing.T)
 	require.Equal(t, "resolve-op-1", first.OperationID)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id FROM trusted_pool_seats").WithArgs("pool-1", "seat-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	mock.ExpectQuery("SELECT id, assignment_epoch FROM trusted_pool_seats").WithArgs("pool-1", "seat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "assignment_epoch"}).AddRow(1, 4))
 	mock.ExpectQuery("(?s)FROM trusted_pool_settlement_resolutions.*operation_id=\\$2").
 		WithArgs(int64(1), "resolve-op-1").
-		WillReturnRows(sqlmock.NewRows(resolutionColumns).AddRow(1, "seat-1", "settlement-1", "resolve-op-1", "platform-1", "verified billing ledger", "ticket-123", resolvedAt))
+		WillReturnRows(sqlmock.NewRows(resolutionColumns).AddRow(1, "seat-1", "settlement-1", "resolve-op-1", "platform-1", 3, "request-1", "verified billing ledger", "ticket-123", resolvedAt))
 	mock.ExpectCommit()
 
 	retry, err := repo.ResolvePendingSettlement(context.Background(), "seat-1", "settlement-1", input)
@@ -477,28 +478,59 @@ func TestTrustedPoolConcurrentResolveRereadsAuditAfterPendingLockWait(t *testing
 	t.Cleanup(func() { _ = db.Close() })
 	repo := &trustedPoolRepository{db: db}
 	input := service.ResolveTrustedPoolSettlementInput{
-		OperationID: "resolve-op-1", ActorClientID: "platform-1", ExternalPoolID: "pool-1", Reason: "verified billing ledger", Evidence: "ticket-123",
+		OperationID: "resolve-op-1", ExpectedAssignmentEpoch: 3, ExpectedRequestID: "request-1",
+		ActorClientID: "platform-1", ExternalPoolID: "pool-1", Reason: "verified billing ledger", Evidence: "ticket-123",
 	}
 	resolvedAt := time.Now()
-	resolutionColumns := []string{"seat_id", "external_seat_id", "settlement_id", "operation_id", "actor_client_id", "reason", "evidence", "resolved_at"}
+	resolutionColumns := []string{"seat_id", "external_seat_id", "settlement_id", "operation_id", "actor_client_id", "expected_assignment_epoch", "expected_request_id", "reason", "evidence", "resolved_at"}
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id FROM trusted_pool_seats").WithArgs("pool-1", "seat-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	mock.ExpectQuery("SELECT id, assignment_epoch FROM trusted_pool_seats").WithArgs("pool-1", "seat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "assignment_epoch"}).AddRow(1, 3))
 	// 第二事务在首轮审计查询时尚未观察到第一事务提交。
 	mock.ExpectQuery("(?s)FROM trusted_pool_settlement_resolutions.*operation_id=\\$2").
 		WithArgs(int64(1), "resolve-op-1").WillReturnError(sql.ErrNoRows)
 	// 等待 pending 行锁后，第一事务已提交并删除 pending。
-	mock.ExpectQuery("(?s)SELECT settlement_id FROM trusted_pool_pending_settlements.*FOR UPDATE").
-		WithArgs(int64(1), "settlement-1").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("(?s)SELECT settlement_id, request_id, assignment_epoch FROM trusted_pool_pending_settlements.*FOR UPDATE").
+		WithArgs(int64(1), "settlement-1", "request-1", int64(3)).WillReturnError(sql.ErrNoRows)
 	// READ COMMITTED 下新语句必须重读审计并返回原结果，不能返回 404。
 	mock.ExpectQuery("(?s)FROM trusted_pool_settlement_resolutions.*operation_id=\\$2").
 		WithArgs(int64(1), "resolve-op-1").
-		WillReturnRows(sqlmock.NewRows(resolutionColumns).AddRow(1, "seat-1", "settlement-1", "resolve-op-1", "platform-1", "verified billing ledger", "ticket-123", resolvedAt))
+		WillReturnRows(sqlmock.NewRows(resolutionColumns).AddRow(1, "seat-1", "settlement-1", "resolve-op-1", "platform-1", 3, "request-1", "verified billing ledger", "ticket-123", resolvedAt))
 	mock.ExpectCommit()
 
 	resolution, err := repo.ResolvePendingSettlement(context.Background(), "seat-1", "settlement-1", input)
 	require.NoError(t, err)
 	require.Equal(t, "resolve-op-1", resolution.OperationID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTrustedPoolResolvePendingSettlementRejectsBindingDrift(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &trustedPoolRepository{db: db}
+	input := service.ResolveTrustedPoolSettlementInput{
+		OperationID: "resolve-op-2", ExpectedAssignmentEpoch: 3, ExpectedRequestID: "request-wrong",
+		ActorClientID: "platform-1", ExternalPoolID: "pool-1", Reason: "verified billing ledger", Evidence: "ticket-124",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id, assignment_epoch FROM trusted_pool_seats").WithArgs("pool-1", "seat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "assignment_epoch"}).AddRow(1, 3))
+	mock.ExpectQuery("(?s)FROM trusted_pool_settlement_resolutions.*operation_id=\\$2").
+		WithArgs(int64(1), "resolve-op-2").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("(?s)SELECT settlement_id, request_id, assignment_epoch FROM trusted_pool_pending_settlements.*FOR UPDATE").
+		WithArgs(int64(1), "settlement-1", "request-wrong", int64(3)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("(?s)FROM trusted_pool_settlement_resolutions.*operation_id=\\$2").
+		WithArgs(int64(1), "resolve-op-2").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("(?s)SELECT 1 FROM trusted_pool_pending_settlements").
+		WithArgs(int64(1), "settlement-1").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+	mock.ExpectRollback()
+
+	resolution, err := repo.ResolvePendingSettlement(context.Background(), "seat-1", "settlement-1", input)
+	require.Nil(t, resolution)
+	require.ErrorIs(t, err, service.ErrTrustedPoolSeatConflict)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

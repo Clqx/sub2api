@@ -5,8 +5,10 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,8 +53,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	readiness, err := appRuntime.NewReadiness(2*time.Second,
-		postgres.DBProbe{DB: db}, appRuntime.EnvelopeProbe{Cipher: cryptoRuntime.Cipher})
+	batchSealer, err := appRuntime.BuildBatchSealer(runtimeConfig, cryptoRuntime.Wrapper, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -65,15 +66,23 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	batchAPIKey, err := requiredSecret("TRUSTED_POOL_BATCH_API_KEY", 32)
+	if err != nil {
+		return err
+	}
 	fingerprintKey, err := requiredSecret("TRUSTED_POOL_FINGERPRINT_HMAC_KEY", 32)
 	if err != nil {
 		return err
 	}
 	baseURL := os.Getenv("SUB2API_BASE_URL")
+	if err := validateSub2APITransport(runtimeConfig.Mode, baseURL); err != nil {
+		return err
+	}
 	integrationClientID, err := requiredSecret("SUB2API_INTEGRATION_CLIENT_ID", 1)
 	if err != nil {
 		return err
 	}
+	integrationClientID = strings.TrimSpace(integrationClientID)
 	integrationSecret, err := requiredSecret("SUB2API_INTEGRATION_SECRET", 16)
 	if err != nil {
 		return err
@@ -82,11 +91,44 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	riskAggregator, err := risk.NewAggregator([]byte(fingerprintKey), risk.DefaultPolicy())
+	settlementReadClientID, err := requiredSecret("SUB2API_SETTLEMENT_READ_CLIENT_ID", 1)
 	if err != nil {
 		return err
 	}
-	credentialManager, err := credentials.NewManager(cryptoRuntime.Wrapper, nil, time.Now)
+	settlementReadClientID = strings.TrimSpace(settlementReadClientID)
+	settlementReadSecret, err := requiredSecret("SUB2API_SETTLEMENT_READ_SECRET", 16)
+	if err != nil {
+		return err
+	}
+	settlementResolveClientID, err := requiredSecret("SUB2API_SETTLEMENT_RESOLVE_CLIENT_ID", 1)
+	if err != nil {
+		return err
+	}
+	settlementResolveClientID = strings.TrimSpace(settlementResolveClientID)
+	settlementResolveSecret, err := requiredSecret("SUB2API_SETTLEMENT_RESOLVE_SECRET", 16)
+	if err != nil {
+		return err
+	}
+	if err := validateIndependentSettlementCredentials(
+		integrationClientID, integrationSecret,
+		settlementReadClientID, settlementReadSecret,
+		settlementResolveClientID, settlementResolveSecret,
+	); err != nil {
+		return err
+	}
+	if err := validateIndependentBatchClient(runtimeConfig.BatchClientID,
+		integrationClientID, settlementReadClientID, settlementResolveClientID); err != nil {
+		return err
+	}
+	settlementRead, err := sub2api.NewSettlementReadClient(baseURL, settlementReadClientID, settlementReadSecret, nil)
+	if err != nil {
+		return err
+	}
+	settlementResolve, err := sub2api.NewSettlementResolveClient(baseURL, settlementResolveClientID, settlementResolveSecret, nil)
+	if err != nil {
+		return err
+	}
+	riskAggregator, err := risk.NewAggregator([]byte(fingerprintKey), risk.DefaultPolicy())
 	if err != nil {
 		return err
 	}
@@ -97,6 +139,9 @@ func run() error {
 	coordinator, err := application.NewPersistentCoordinator(workflowStore, upstream, applicationCipher,
 		application.PersistentCoordinatorOptions{
 			IntegrationClientID: integrationClientID,
+			SettlementActorID:   settlementResolveClientID,
+			SettlementRead:      settlementRead,
+			SettlementResolve:   settlementResolve,
 			WorkerID:            runtimeConfig.WorkerID,
 			LeaseDuration:       runtimeConfig.WorkflowLease,
 			ClaimTTL:            runtimeConfig.ClaimTTL,
@@ -106,7 +151,22 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	api, err := httpapi.NewServer(coordinator, riskAggregator, credentialManager, apiKey, settlementAPIKey)
+	credentialBatchManager, err := credentials.NewPersistentManager(workflowStore, batchSealer,
+		credentials.PersistentManagerConfig{
+			ClientID: runtimeConfig.BatchClientID, LeaseOwner: runtimeConfig.WorkerID,
+			LeaseDuration: runtimeConfig.WorkflowLease,
+		})
+	if err != nil {
+		return err
+	}
+	readiness, err := appRuntime.NewReadiness(2*time.Second,
+		postgres.DBProbe{DB: db}, appRuntime.EnvelopeProbe{Cipher: cryptoRuntime.Cipher},
+		appRuntime.BatchProbe{Manager: credentialBatchManager})
+	if err != nil {
+		return err
+	}
+	api, err := httpapi.NewServer(coordinator, riskAggregator, credentialBatchManager,
+		apiKey, settlementAPIKey, batchAPIKey)
 	if err != nil {
 		return err
 	}
@@ -172,6 +232,54 @@ func run() error {
 		return nil
 	}
 	return err
+}
+
+func validateIndependentBatchClient(batchID string, otherIDs ...string) error {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
+		return errors.New("credential batch client id must not be empty")
+	}
+	for _, otherID := range otherIDs {
+		if batchID == strings.TrimSpace(otherID) {
+			return errors.New("credential batch client id must use an independent idempotency namespace")
+		}
+	}
+	return nil
+}
+
+func validateSub2APITransport(runtimeMode, rawURL string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return errors.New("SUB2API_BASE_URL is invalid")
+	}
+	if runtimeMode == appRuntime.ModeProduction && !strings.EqualFold(parsed.Scheme, "https") {
+		return errors.New("production mode requires an HTTPS SUB2API_BASE_URL")
+	}
+	return nil
+}
+
+func validateIndependentSettlementCredentials(controlID, controlSecret, readID, readSecret, resolveID, resolveSecret string) error {
+	controlID, readID, resolveID = strings.TrimSpace(controlID), strings.TrimSpace(readID), strings.TrimSpace(resolveID)
+	if controlID == "" || readID == "" || resolveID == "" {
+		return errors.New("Sub2API client ids must not be empty")
+	}
+	ids := map[string]struct{}{controlID: {}}
+	if _, exists := ids[readID]; exists {
+		return errors.New("Sub2API settlement read client id must differ from the control client id")
+	}
+	ids[readID] = struct{}{}
+	if _, exists := ids[resolveID]; exists {
+		return errors.New("Sub2API settlement resolve client id must be independently scoped")
+	}
+	secrets := map[string]struct{}{controlSecret: {}}
+	if _, exists := secrets[readSecret]; exists {
+		return errors.New("Sub2API settlement read secret must differ from the control secret")
+	}
+	secrets[readSecret] = struct{}{}
+	if _, exists := secrets[resolveSecret]; exists {
+		return errors.New("Sub2API settlement resolve secret must be independently scoped")
+	}
+	return nil
 }
 
 func requiredSecret(name string, minimumLength int) (string, error) {

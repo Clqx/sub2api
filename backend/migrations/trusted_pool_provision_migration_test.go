@@ -55,3 +55,19 @@ func TestTrustedPoolClientSecurityMigrationFailsClosed(t *testing.T) {
 	require.Contains(t, sql, "NOT VALID")
 	require.Contains(t, sql, "never valid HMAC signing material")
 }
+
+func TestTrustedPoolSettlementResolutionBindingMigrationFailsClosed(t *testing.T) {
+	content, err := FS.ReadFile("225_trusted_pool_settlement_resolution_binding.sql")
+	require.NoError(t, err)
+
+	sql := strings.Join(strings.Fields(string(content)), " ")
+	require.Contains(t, sql, "ADD COLUMN IF NOT EXISTS expected_assignment_epoch BIGINT")
+	require.Contains(t, sql, "ADD COLUMN IF NOT EXISTS expected_request_id VARCHAR(128)")
+	require.Contains(t, sql, "expected_assignment_epoch > 0")
+	require.Contains(t, sql, "CREATE TRIGGER trg_trusted_pool_resolution_require_binding")
+	require.Contains(t, sql, "BEFORE INSERT ON trusted_pool_settlement_resolutions")
+	require.Contains(t, sql, "trusted pool settlement resolution requires expected epoch and request id")
+	require.Contains(t, sql, "ck_trusted_pool_resolve_scope_isolation")
+	require.Contains(t, sql, "cardinality(scopes) = 1 AND scopes[1] = 'settlement:resolve'")
+	require.Contains(t, sql, "SET status = 'disabled'")
+}

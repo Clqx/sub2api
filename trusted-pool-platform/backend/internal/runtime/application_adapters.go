@@ -55,6 +55,7 @@ func cloneBytes(value []byte) []byte {
 
 type PersistentRecoveryScanner interface {
 	RecoverNextOperation(context.Context) (bool, error)
+	RecoverNextSettlementResolution(context.Context) (bool, error)
 	RecoverNextCredentialClaim(context.Context) (bool, error)
 }
 
@@ -70,18 +71,22 @@ func NewPersistentRecoveryLoop(scanner PersistentRecoveryScanner, idleBackoff ti
 	return &PersistentRecoveryLoop{scanner: scanner, idleBackoff: idleBackoff}, nil
 }
 
-// Run 每轮公平扫描 operation 与 claim；空闲时退避，持久层错误则交给进程生命周期处理。
+// Run 每轮公平扫描通用 operation、settlement 专用聚合与 claim；空闲时退避。
 func (w *PersistentRecoveryLoop) Run(ctx context.Context) error {
 	for {
 		operationWorked, err := w.scanner.RecoverNextOperation(ctx)
 		if err != nil {
 			return fmt.Errorf("recover persistent operation: %w", err)
 		}
+		settlementWorked, err := w.scanner.RecoverNextSettlementResolution(ctx)
+		if err != nil {
+			return fmt.Errorf("recover persistent settlement resolution: %w", err)
+		}
 		claimWorked, err := w.scanner.RecoverNextCredentialClaim(ctx)
 		if err != nil {
 			return fmt.Errorf("recover persistent credential claim: %w", err)
 		}
-		if operationWorked || claimWorked {
+		if operationWorked || settlementWorked || claimWorked {
 			continue
 		}
 		timer := time.NewTimer(w.idleBackoff)

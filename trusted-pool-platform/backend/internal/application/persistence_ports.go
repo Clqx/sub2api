@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"trusted-pool-platform/backend/internal/domain"
 )
 
 var (
@@ -29,6 +31,26 @@ type WorkflowStore interface {
 	CommitOperationWithCredentialClaim(context.Context, CommitOperationWithCredentialClaimInput) (*StoredOperation, *StoredCredentialClaim, error)
 	CommitProvisionWithCredentialClaim(context.Context, CommitProvisionWithCredentialClaimInput) (*StoredOperation, *StoredCredentialClaim, *PersistedSeat, error)
 	LoadPersistedSeat(context.Context, string) (*PersistedSeat, error)
+
+	// BeginSuspend 原子持久化 intent/case、切换 Seat 并取得首个 operation fence；返回后才能调用网络。
+	BeginSuspend(context.Context, BeginSuspendInput) (*SuspendTarget, bool, error)
+	// LoadSuspendTarget 在恢复 worker 已取得 operation lease 后读取稳定目标，不持有跨网络事务。
+	LoadSuspendTarget(context.Context, OperationKey) (*SuspendTarget, error)
+	CommitSuspendProgress(context.Context, CommitSuspendProgressInput) (*SuspendTarget, error)
+
+	// BeginAssignment 在任何网关调用前原子固化冻结证据、目标成员、pending Assignment 和首个 fence。
+	BeginAssignment(context.Context, BeginAssignmentInput) (*AssignmentTarget, bool, error)
+	// LoadAssignmentTarget 只读取已持久化的可信目标，供持有 operation lease 的恢复 worker 使用。
+	LoadAssignmentTarget(context.Context, OperationKey) (*AssignmentTarget, error)
+	CommitAssignmentWithCredentialClaim(context.Context, CommitAssignmentWithCredentialClaimInput) (*StoredOperation, *StoredCredentialClaim, *PersistedSeat, error)
+	CommitAssignmentFailure(context.Context, CommitAssignmentFailureInput) (*AssignmentTarget, error)
+
+	// Settlement resolve 使用独立 operation/case 聚合；任何网络调用都必须发生在这些事务之外。
+	BeginSettlementResolution(context.Context, BeginSettlementResolutionInput) (*SettlementResolutionTarget, bool, error)
+	LoadSettlementResolutionTarget(context.Context, OperationKey) (*SettlementResolutionTarget, error)
+	AcquireNextSettlementResolution(context.Context, AcquireNextSettlementResolutionInput) (*SettlementResolutionTarget, error)
+	CommitSettlementResolution(context.Context, CommitSettlementResolutionInput) (*StoredOperation, *StoredSettlementResolution, error)
+	CommitSettlementResolutionFailure(context.Context, CommitSettlementResolutionFailureInput) (*SettlementResolutionTarget, error)
 
 	CreateCredentialClaim(context.Context, CreateCredentialClaimInput) (*StoredCredentialClaim, bool, error)
 	LoadCredentialClaim(context.Context, ClaimKey) (*StoredCredentialClaim, error)
@@ -131,19 +153,281 @@ type CommitProvisionWithCredentialClaimInput struct {
 	OwnerExternalID string
 	ExistingGroupID int64
 	AssignmentEpoch uint64
+	PrincipalUserID int64
+	SubscriptionID  int64
+	APIKeyID        int64
 }
 
 // PersistedSeat 是数据库 Seat 与当前 ACTIVE Assignment 的只读投影。
 type PersistedSeat struct {
-	SeatID            string
-	SeatExternalID    string
-	PoolExternalID    string
-	OwnerExternalID   string
-	CurrentMemberID   string
-	AssignmentEpoch   uint64
-	MembershipEpoch   uint64
-	AssignmentStarted time.Time
-	UpdatedAt         time.Time
+	SeatID                string
+	SeatExternalID        string
+	PoolExternalID        string
+	State                 domain.SeatState
+	OwnerExternalID       string
+	CurrentMemberID       string
+	CurrentAssignmentKind domain.AssignmentKind
+	AssignmentEpoch       uint64
+	MembershipEpoch       uint64
+	PrincipalUserID       int64
+	SubscriptionID        int64
+	APIKeyID              int64
+	ActiveAPIKeyVersion   uint64
+	AssignmentStarted     time.Time
+	UpdatedAt             time.Time
+}
+
+type SuspendCaseStatus string
+
+const (
+	SuspendCasePending  SuspendCaseStatus = "SUSPEND_PENDING"
+	SuspendCaseDraining SuspendCaseStatus = "DRAINING"
+	SuspendCaseFrozen   SuspendCaseStatus = "FROZEN"
+)
+
+const SuspendReasonManualPolicyBreach = "MANUAL_POLICY_BREACH"
+
+type BeginSuspendInput struct {
+	Key             OperationKey
+	SeatExternalID  string
+	RequestHash     [32]byte
+	RequestSnapshot []byte
+	ReasonCode      string
+	LeaseOwner      string
+	LeaseDuration   time.Duration
+}
+
+type StoredSuspensionCase struct {
+	ID                      string
+	IntegrationOperationID  string
+	OperationID             string
+	SeatID                  string
+	MigrationState          string
+	Status                  SuspendCaseStatus
+	ReasonCode              string
+	ExpectedAssignmentEpoch uint64
+	CurrentConcurrency      *int
+	PendingSettlements      *int
+	BlockedAt               *time.Time
+	FrozenAt                *time.Time
+	FreezeSnapshot          []byte
+	ErrorCode               string
+	Version                 int64
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+}
+
+// SuspendSeatTarget 是暂停调用所需的可信数据库投影，不包含任何用户提供的身份提示。
+type SuspendSeatTarget struct {
+	SeatID          string
+	SeatExternalID  string
+	PoolExternalID  string
+	OwnerExternalID string
+	CurrentMemberID string
+	Status          domain.SeatState
+	AssignmentEpoch uint64
+	MembershipEpoch uint64
+}
+
+type SuspendTarget struct {
+	Operation *StoredOperation
+	Case      *StoredSuspensionCase
+	Seat      SuspendSeatTarget
+}
+
+type CommitSuspendProgressInput struct {
+	Key                     OperationKey
+	LeaseOwner              string
+	FencingToken            int64
+	Progress                SuspendCaseStatus
+	ExpectedAssignmentEpoch uint64
+	// 指针区分“明确观测到 0”和“尚未观测”；冻结门禁禁止用 Go 零值冒充证据。
+	CurrentConcurrency *int
+	PendingSettlements *int
+	Freeze             *domain.FreezeSnapshot
+	ResultSnapshot     []byte
+	ErrorCode          string
+	ErrorDetail        string
+	NextAttemptAt      *time.Time
+}
+
+type AssignmentCaseStatus string
+
+const (
+	AssignmentCasePending   AssignmentCaseStatus = "ASSIGNMENT_PENDING"
+	AssignmentCaseSucceeded AssignmentCaseStatus = "SUCCEEDED"
+	AssignmentCaseCancelled AssignmentCaseStatus = "CANCELLED"
+)
+
+type BeginAssignmentInput struct {
+	Key                    OperationKey
+	Kind                   OperationKind
+	SeatExternalID         string
+	TargetMemberExternalID string
+	RequestHash            [32]byte
+	RequestSnapshot        []byte
+	LeaseOwner             string
+	LeaseDuration          time.Duration
+}
+
+// StoredAssignmentCase 固化换员开始时的冻结基线；正式恢复也不会修改 owner 或 Membership Epoch。
+type StoredAssignmentCase struct {
+	ID                      string
+	IntegrationOperationID  string
+	SeatID                  string
+	PoolID                  string
+	TargetMemberID          string
+	PreviousMemberID        string
+	PendingAssignmentID     string
+	FreezeSuspensionCaseID  string
+	Kind                    OperationKind
+	Status                  AssignmentCaseStatus
+	ExpectedAssignmentEpoch uint64
+	NextAssignmentEpoch     uint64
+	MembershipEpoch         uint64
+	PrincipalUserID         int64
+	SubscriptionID          int64
+	APIKeyID                int64
+	ExpectedAPIKeyVersion   uint64
+	NextAPIKeyVersion       uint64
+	FreezeOperationID       string
+	FreezeSnapshot          []byte
+	ErrorCode               string
+	Version                 int64
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+}
+
+type AssignmentSeatTarget struct {
+	SeatID              string
+	SeatExternalID      string
+	PoolExternalID      string
+	OwnerExternalID     string
+	CurrentMemberID     string
+	TargetMemberID      string
+	Status              domain.SeatState
+	AssignmentEpoch     uint64
+	MembershipEpoch     uint64
+	PrincipalUserID     int64
+	SubscriptionID      int64
+	APIKeyID            int64
+	ActiveAPIKeyVersion uint64
+}
+
+type AssignmentTarget struct {
+	Operation *StoredOperation
+	Case      *StoredAssignmentCase
+	Seat      AssignmentSeatTarget
+}
+
+type CommitAssignmentWithCredentialClaimInput struct {
+	Key                     OperationKey
+	LeaseOwner              string
+	FencingToken            int64
+	ExpectedAssignmentEpoch uint64
+	ResultSnapshot          []byte
+	Claim                   CreateCredentialClaimInput
+}
+
+type CommitAssignmentFailureInput struct {
+	Key                OperationKey
+	LeaseOwner         string
+	FencingToken       int64
+	ResultSnapshot     []byte
+	ErrorCode          string
+	ErrorDetail        string
+	NextAttemptAt      *time.Time
+	ConfirmedUnchanged bool
+}
+
+type SettlementResolutionCaseStatus string
+
+const (
+	SettlementResolutionPending   SettlementResolutionCaseStatus = "RESOLUTION_PENDING"
+	SettlementResolutionSucceeded SettlementResolutionCaseStatus = "SUCCEEDED"
+)
+
+type BeginSettlementResolutionInput struct {
+	Key                     OperationKey
+	SeatExternalID          string
+	SettlementID            string
+	ExpectedRequestID       string
+	ExpectedAssignmentEpoch uint64
+	ExpectedActorClientID   string
+	RequestHash             [32]byte
+	RequestSnapshot         []byte
+	LeaseOwner              string
+	LeaseDuration           time.Duration
+}
+
+type StoredSettlementResolutionCase struct {
+	ID                      string
+	IntegrationOperationID  string
+	SeatID                  string
+	SettlementID            string
+	ExpectedRequestID       string
+	ExpectedAssignmentEpoch uint64
+	ExpectedActorClientID   string
+	Reason                  string
+	Evidence                string
+	Status                  SettlementResolutionCaseStatus
+	ErrorCode               string
+	Version                 int64
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+}
+
+type SettlementResolutionSeat struct {
+	SeatID          string
+	SeatExternalID  string
+	PoolExternalID  string
+	AssignmentEpoch uint64
+	Status          domain.SeatState
+}
+
+type StoredSettlementResolution struct {
+	ID                     string
+	IntegrationOperationID string
+	CaseID                 string
+	TrustEventID           string
+	UpstreamSeatID         int64
+	ExternalSeatID         string
+	SettlementID           string
+	RequestID              string
+	AssignmentEpoch        uint64
+	OperationID            string
+	ActorClientID          string
+	Reason                 string
+	Evidence               string
+	ResolvedAt             time.Time
+	CreatedAt              time.Time
+}
+
+type SettlementResolutionTarget struct {
+	Operation  *StoredOperation
+	Case       *StoredSettlementResolutionCase
+	Seat       SettlementResolutionSeat
+	Resolution *StoredSettlementResolution
+}
+
+type AcquireNextSettlementResolutionInput struct {
+	LeaseOwner    string
+	LeaseDuration time.Duration
+}
+
+type CommitSettlementResolutionInput struct {
+	Key          OperationKey
+	LeaseOwner   string
+	FencingToken int64
+	Result       SettlementResolution
+}
+
+type CommitSettlementResolutionFailureInput struct {
+	Key           OperationKey
+	LeaseOwner    string
+	FencingToken  int64
+	ErrorCode     string
+	NextAttemptAt *time.Time
 }
 
 type ClaimKey struct {

@@ -164,6 +164,7 @@ func TestCommitOperationRejectsStaleFenceAndRequiresOwner(t *testing.T) {
 	script := &fakeScript{steps: []fakeStep{{
 		kind: "query", contains: []string{
 			"fencing_token = $3", "lease_owner = $4", "lease_expires_at > CURRENT_TIMESTAMP",
+			"operation_type <> 'RESOLVE_SETTLEMENT'",
 		}, columns: operationColumnNames(),
 	}}}
 	store, cleanup := newFakeStore(t, script)
@@ -184,7 +185,7 @@ func TestAcquireNextOperationLeaseUsesSkipLockedAndRetrySchedule(t *testing.T) {
 	now := time.Date(2026, 8, 18, 1, 0, 0, 0, time.UTC)
 	hash := bytes32(1)
 	script := &fakeScript{steps: []fakeStep{{
-		kind: "query", contains: []string{"next_attempt_at <= CURRENT_TIMESTAMP", "error_code <> 'CALLER_REPLAY_REQUIRED'", "FOR UPDATE SKIP LOCKED", "migration_state = 'CURRENT'"},
+		kind: "query", contains: []string{"next_attempt_at <= CURRENT_TIMESTAMP", "error_code NOT IN ('CALLER_REPLAY_REQUIRED', 'OPERATOR_REVIEW_REQUIRED')", "operation_type IN ('PROVISION', 'SUSPEND', 'ASSIGN_TEMPORARY', 'RESTORE')", "FOR UPDATE SKIP LOCKED", "migration_state = 'CURRENT'"},
 		columns: operationColumnNames(), rows: [][]driver.Value{operationRow(hash[:], "RETRYABLE", 8, "recovery-1", now.Add(time.Minute), now)},
 	}}}
 	store, cleanup := newFakeStore(t, script)
@@ -256,8 +257,12 @@ func TestCommitOperationWithCredentialClaimIsAtomic(t *testing.T) {
 func TestCommitProvisionRejectsAnotherSuccessfulOperationForSameSeat(t *testing.T) {
 	script := &fakeScript{steps: []fakeStep{
 		{kind: "begin"},
-		{kind: "query", contains: []string{"p.sub2api_group_id = $3", "p.membership_epoch > 0", "me.pool_id = p.id", "me.epoch = p.membership_epoch", "me.status = 'ACTIVE'", "mem.epoch_id = me.id", "m.id = mem.member_id", "FOR UPDATE OF p, me, mem, m"},
-			columns: []string{"pool_id", "membership_epoch", "member_id"}, rows: [][]driver.Value{{"pool-db-id", int64(1), "member-db-id"}}},
+		{kind: "query", contains: []string{"SELECT target_id", "operation_type = 'PROVISION'", "fencing_token = $4", "FOR UPDATE"},
+			columns: []string{"target_id"}, rows: [][]driver.Value{{nil}}},
+		{kind: "query", contains: []string{"p.sub2api_group_id = $2", "p.membership_epoch > 0", "FOR UPDATE"},
+			columns: []string{"pool_id", "membership_epoch"}, rows: [][]driver.Value{{"pool-db-id", int64(1)}}},
+		{kind: "query", contains: []string{"me.pool_id = $1", "mem.epoch_id = me.id", "m.id = mem.member_id", "FOR UPDATE OF me, mem, m"},
+			columns: []string{"member_id"}, rows: [][]driver.Value{{"member-db-id"}}},
 		{kind: "query", contains: []string{"SELECT EXISTS", "target_external_id = $1", "status = 'SUCCEEDED'"},
 			columns: []string{"exists"}, rows: [][]driver.Value{{true}}},
 		{kind: "rollback"},
@@ -271,15 +276,29 @@ func TestCommitProvisionRejectsAnotherSuccessfulOperationForSameSeat(t *testing.
 	script.assertDone(t)
 }
 
+func TestCommitProvisionRequiresStableSub2APIResourceIDs(t *testing.T) {
+	store, cleanup := newFakeStore(t, &fakeScript{})
+	defer cleanup()
+	input := provisionAggregateInput()
+	input.APIKeyID = 0
+	_, _, _, err := store.CommitProvisionWithCredentialClaim(context.Background(), input)
+	if !errors.Is(err, application.ErrWorkflowInvalidData) {
+		t.Fatalf("missing stable API Key ID was accepted: %v", err)
+	}
+}
+
 func TestCommitProvisionRejectsAssignmentEpochRegression(t *testing.T) {
 	script := &fakeScript{steps: []fakeStep{
 		{kind: "begin"},
-		{kind: "query", contains: []string{"FOR UPDATE OF p, m"},
-			columns: []string{"pool_id", "membership_epoch", "member_id"}, rows: [][]driver.Value{{"pool-db-id", int64(1), "member-db-id"}}},
+		{kind: "query", contains: []string{"SELECT target_id", "fencing_token = $4", "lease_owner = $5", "FOR UPDATE"}, columns: []string{"target_id"}, rows: [][]driver.Value{{"seat-db-id"}}},
+		{kind: "query", contains: []string{"FROM pools p", "FOR UPDATE"},
+			columns: []string{"pool_id", "membership_epoch"}, rows: [][]driver.Value{{"pool-db-id", int64(1)}}},
+		{kind: "query", contains: []string{"FROM membership_epochs me", "FOR UPDATE OF me, mem, m"},
+			columns: []string{"member_id"}, rows: [][]driver.Value{{"member-db-id"}}},
 		{kind: "query", contains: []string{"SELECT EXISTS"}, columns: []string{"exists"}, rows: [][]driver.Value{{false}}},
-		{kind: "query", contains: []string{"SELECT target_id", "FOR UPDATE"}, columns: []string{"target_id"}, rows: [][]driver.Value{{"seat-db-id"}}},
-		{kind: "query", contains: []string{"SELECT id, assignment_epoch, owner_member_id, status FROM seats", "FOR UPDATE"},
-			columns: []string{"id", "assignment_epoch", "owner_member_id", "status"}, rows: [][]driver.Value{{"seat-db-id", int64(2), "member-db-id", "PROVISIONING"}}},
+		{kind: "query", contains: []string{"SELECT id, assignment_epoch, owner_member_id, status", "sub2api_api_key_id", "FOR UPDATE"},
+			columns: []string{"id", "assignment_epoch", "owner_member_id", "status", "principal_id", "subscription_id", "api_key_id", "api_key_version"},
+			rows:    [][]driver.Value{{"seat-db-id", int64(2), "member-db-id", "PROVISIONING", nil, nil, nil, int64(0)}}},
 		{kind: "rollback"},
 	}}
 	store, cleanup := newFakeStore(t, script)
@@ -287,6 +306,23 @@ func TestCommitProvisionRejectsAssignmentEpochRegression(t *testing.T) {
 	_, _, _, err := store.CommitProvisionWithCredentialClaim(context.Background(), provisionAggregateInput())
 	if !errors.Is(err, application.ErrWorkflowInvalidState) {
 		t.Fatalf("expected epoch regression rejection, got %v", err)
+	}
+	script.assertDone(t)
+}
+
+func TestCommitProvisionLocksOperationBeforePoolAndSeat(t *testing.T) {
+	script := &fakeScript{steps: []fakeStep{
+		{kind: "begin"},
+		{kind: "query", contains: []string{"SELECT target_id", "operation_type = 'PROVISION'", "lease_expires_at > CURRENT_TIMESTAMP", "FOR UPDATE"},
+			columns: []string{"target_id"}, rows: [][]driver.Value{{nil}}},
+		{kind: "query", contains: []string{"FROM pools p", "FOR UPDATE"}, err: errors.New("stop after lock-order assertion")},
+		{kind: "rollback"},
+	}}
+	store, cleanup := newFakeStore(t, script)
+	defer cleanup()
+	_, _, _, err := store.CommitProvisionWithCredentialClaim(context.Background(), provisionAggregateInput())
+	if err == nil || !strings.Contains(err.Error(), "stop after lock-order assertion") {
+		t.Fatalf("expected pool query sentinel after operation lock, got %v", err)
 	}
 	script.assertDone(t)
 }
@@ -560,6 +596,7 @@ func provisionAggregateInput() application.CommitProvisionWithCredentialClaimInp
 			LeaseOwner: "worker-1", FencingToken: 1, ResultSnapshot: []byte(`{"applied":true}`), Claim: claim,
 		},
 		PoolExternalID: "pool-1", OwnerExternalID: "member-1", ExistingGroupID: 10, AssignmentEpoch: 1,
+		PrincipalUserID: 101, SubscriptionID: 201, APIKeyID: 301,
 	}
 }
 

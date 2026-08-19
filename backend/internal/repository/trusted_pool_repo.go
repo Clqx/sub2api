@@ -721,8 +721,19 @@ func (r *trustedPoolRepository) GetPendingSettlement(ctx context.Context, extern
 
 func scanTrustedPoolSettlementResolution(scanner interface{ Scan(...any) error }) (*service.TrustedPoolSettlementResolution, error) {
 	item := new(service.TrustedPoolSettlementResolution)
+	var assignmentEpoch sql.NullInt64
+	var requestID sql.NullString
 	err := scanner.Scan(&item.SeatID, &item.ExternalSeatID, &item.SettlementID, &item.OperationID,
-		&item.ActorClientID, &item.Reason, &item.Evidence, &item.ResolvedAt)
+		&item.ActorClientID, &assignmentEpoch, &requestID, &item.Reason, &item.Evidence, &item.ResolvedAt)
+	if err != nil {
+		return nil, err
+	}
+	// 历史审计没有 pending 绑定，不能作为当前严格请求的成功重放证据。
+	if !assignmentEpoch.Valid || assignmentEpoch.Int64 <= 0 || !requestID.Valid || strings.TrimSpace(requestID.String) == "" {
+		return nil, service.ErrTrustedPoolSeatConflict
+	}
+	item.AssignmentEpoch = assignmentEpoch.Int64
+	item.RequestID = requestID.String
 	return item, err
 }
 
@@ -733,7 +744,8 @@ type trustedPoolQueryRower interface {
 func getTrustedPoolResolutionByOperation(ctx context.Context, queryer trustedPoolQueryRower, seatID int64, operationID string) (*service.TrustedPoolSettlementResolution, error) {
 	return scanTrustedPoolSettlementResolution(queryer.QueryRowContext(ctx, `
 		SELECT r.seat_id, s.external_seat_id, r.settlement_id, r.operation_id,
-		       r.actor_client_id, r.reason, r.evidence, r.resolved_at
+		       r.actor_client_id, r.expected_assignment_epoch, r.expected_request_id,
+		       r.reason, r.evidence, r.resolved_at
 		FROM trusted_pool_settlement_resolutions r
 		JOIN trusted_pool_seats s ON s.id=r.seat_id
 		WHERE r.seat_id=$1 AND r.operation_id=$2
@@ -741,7 +753,9 @@ func getTrustedPoolResolutionByOperation(ctx context.Context, queryer trustedPoo
 }
 
 func validateTrustedPoolResolutionReplay(existing *service.TrustedPoolSettlementResolution, settlementID string, input service.ResolveTrustedPoolSettlementInput) error {
-	if existing == nil || existing.SettlementID != settlementID || existing.ActorClientID != input.ActorClientID || existing.Reason != input.Reason || existing.Evidence != input.Evidence {
+	if existing == nil || existing.SettlementID != settlementID || existing.ActorClientID != input.ActorClientID ||
+		existing.AssignmentEpoch != input.ExpectedAssignmentEpoch || existing.RequestID != input.ExpectedRequestID ||
+		existing.Reason != input.Reason || existing.Evidence != input.Evidence {
 		return service.ErrTrustedPoolSeatConflict
 	}
 	return nil
@@ -754,10 +768,10 @@ func (r *trustedPoolRepository) ResolvePendingSettlement(ctx context.Context, ex
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var seatID int64
+	var seatID, currentAssignmentEpoch int64
 	if err = tx.QueryRowContext(ctx, `
-		SELECT id FROM trusted_pool_seats WHERE external_pool_id=$1 AND external_seat_id=$2
-	`, input.ExternalPoolID, externalSeatID).Scan(&seatID); err != nil {
+		SELECT id, assignment_epoch FROM trusted_pool_seats WHERE external_pool_id=$1 AND external_seat_id=$2
+	`, input.ExternalPoolID, externalSeatID).Scan(&seatID, &currentAssignmentEpoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, service.ErrTrustedPoolSeatNotFound
 		}
@@ -776,12 +790,17 @@ func (r *trustedPoolRepository) ResolvePendingSettlement(ctx context.Context, ex
 	if !errors.Is(existingErr, sql.ErrNoRows) {
 		return nil, existingErr
 	}
-	var lockedSettlementID string
+	if currentAssignmentEpoch != input.ExpectedAssignmentEpoch {
+		return nil, service.ErrTrustedPoolSeatConflict
+	}
+	var lockedSettlementID, lockedRequestID string
+	var lockedAssignmentEpoch int64
 	if err = tx.QueryRowContext(ctx, `
-		SELECT settlement_id FROM trusted_pool_pending_settlements
-		WHERE seat_id=$1 AND settlement_id=$2
+		SELECT settlement_id, request_id, assignment_epoch FROM trusted_pool_pending_settlements
+		WHERE seat_id=$1 AND settlement_id=$2 AND request_id=$3 AND assignment_epoch=$4
 		FOR UPDATE
-	`, seatID, settlementID).Scan(&lockedSettlementID); err != nil {
+	`, seatID, settlementID, input.ExpectedRequestID, input.ExpectedAssignmentEpoch).
+		Scan(&lockedSettlementID, &lockedRequestID, &lockedAssignmentEpoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// 同幂等请求可能刚在等待行锁期间由首事务完成并删除 pending；重新读审计而不是误报 404。
 			existing, existingErr = getTrustedPoolResolutionByOperation(ctx, tx, seatID, input.OperationID)
@@ -795,6 +814,17 @@ func (r *trustedPoolRepository) ResolvePendingSettlement(ctx context.Context, ex
 				return existing, nil
 			}
 			if errors.Is(existingErr, sql.ErrNoRows) {
+				var mismatched int
+				mismatchErr := tx.QueryRowContext(ctx, `
+					SELECT 1 FROM trusted_pool_pending_settlements
+					WHERE seat_id=$1 AND settlement_id=$2
+				`, seatID, settlementID).Scan(&mismatched)
+				if mismatchErr == nil {
+					return nil, service.ErrTrustedPoolSeatConflict
+				}
+				if !errors.Is(mismatchErr, sql.ErrNoRows) {
+					return nil, mismatchErr
+				}
 				return nil, service.ErrTrustedPoolSettlementNotFound
 			}
 			return nil, existingErr
@@ -804,18 +834,24 @@ func (r *trustedPoolRepository) ResolvePendingSettlement(ctx context.Context, ex
 	resolution, err := scanTrustedPoolSettlementResolution(tx.QueryRowContext(ctx, `
 		WITH inserted AS (
 			INSERT INTO trusted_pool_settlement_resolutions(
-				seat_id, settlement_id, operation_id, actor_client_id, reason, evidence
-			) VALUES ($1,$2,$3,$4,$5,$6)
-			RETURNING seat_id, settlement_id, operation_id, actor_client_id, reason, evidence, resolved_at
+				seat_id, settlement_id, operation_id, actor_client_id,
+				expected_assignment_epoch, expected_request_id, reason, evidence
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			RETURNING seat_id, settlement_id, operation_id, actor_client_id,
+			          expected_assignment_epoch, expected_request_id, reason, evidence, resolved_at
 		)
-		SELECT i.seat_id, $7, i.settlement_id, i.operation_id,
-		       i.actor_client_id, i.reason, i.evidence, i.resolved_at
+		SELECT i.seat_id, $9, i.settlement_id, i.operation_id,
+		       i.actor_client_id, i.expected_assignment_epoch, i.expected_request_id,
+		       i.reason, i.evidence, i.resolved_at
 		FROM inserted i
-	`, seatID, settlementID, input.OperationID, input.ActorClientID, input.Reason, input.Evidence, externalSeatID))
+	`, seatID, settlementID, input.OperationID, input.ActorClientID, input.ExpectedAssignmentEpoch,
+		input.ExpectedRequestID, input.Reason, input.Evidence, externalSeatID))
 	if err != nil {
 		return nil, translateTrustedPoolConflict(err)
 	}
-	if err = execTrustedPoolOne(ctx, tx, `DELETE FROM trusted_pool_pending_settlements WHERE seat_id=$1 AND settlement_id=$2`, seatID, settlementID); err != nil {
+	if err = execTrustedPoolOne(ctx, tx, `DELETE FROM trusted_pool_pending_settlements
+		WHERE seat_id=$1 AND settlement_id=$2 AND request_id=$3 AND assignment_epoch=$4`,
+		seatID, settlementID, input.ExpectedRequestID, input.ExpectedAssignmentEpoch); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {

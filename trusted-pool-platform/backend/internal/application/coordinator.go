@@ -53,11 +53,12 @@ const (
 type OperationKind string
 
 const (
-	OperationProvision  OperationKind = "PROVISION"
-	OperationSuspend    OperationKind = "SUSPEND"
-	OperationAssignTemp OperationKind = "ASSIGN_TEMPORARY"
-	OperationRestore    OperationKind = "RESTORE"
-	OperationReplace    OperationKind = "REPLACE_PERMANENTLY"
+	OperationProvision         OperationKind = "PROVISION"
+	OperationSuspend           OperationKind = "SUSPEND"
+	OperationAssignTemp        OperationKind = "ASSIGN_TEMPORARY"
+	OperationRestore           OperationKind = "RESTORE"
+	OperationReplace           OperationKind = "REPLACE_PERMANENTLY"
+	OperationResolveSettlement OperationKind = "RESOLVE_SETTLEMENT"
 )
 
 type Operation struct {
@@ -102,11 +103,16 @@ type ProvisionSeatCommand struct {
 }
 
 type ProvisionGatewayResult struct {
-	ExternalPoolID  string
-	ExternalSeatID  string
-	State           string
-	AssignmentEpoch uint64
-	Credential      string
+	ExternalPoolID      string
+	ExternalSeatID      string
+	State               string
+	AssignmentEpoch     uint64
+	PrincipalUserID     int64
+	SubscriptionID      int64
+	APIKeyID            int64
+	ActiveAPIKeyVersion uint64
+	LastOperationID     string
+	Credential          string
 }
 
 type ProvisionSeatResult struct {
@@ -148,24 +154,41 @@ type AssignmentCommand struct {
 	AssignmentEpoch            uint64        `json:"assignment_epoch"`
 	MembershipEpoch            uint64        `json:"membership_epoch"`
 	FreezeOperationID          string        `json:"freeze_operation_id"`
+	PrincipalUserID            int64         `json:"principal_user_id"`
+	SubscriptionID             int64         `json:"subscription_id"`
+	APIKeyID                   int64         `json:"api_key_id"`
+	ActiveAPIKeyVersion        uint64        `json:"active_api_key_version"`
 	Permanent                  bool          `json:"permanent"`
 	Mode                       OperationKind `json:"mode"`
 	ControlRotationEvidenceRef string        `json:"control_rotation_evidence_ref,omitempty"`
 }
 
 type AssignmentResult struct {
+	ExternalPoolID                   string
+	ExternalSeatID                   string
+	State                            string
+	AssignmentEpoch                  uint64
+	PrincipalUserID                  int64
+	SubscriptionID                   int64
+	APIKeyID                         int64
+	ActiveAPIKeyVersion              uint64
+	LastOperationID                  string
 	AccessCredentialRotationComplete bool
 	Credential                       string
 }
 
 type SuspendResult struct {
-	Draining bool
-	Freeze   *domain.FreezeSnapshot
+	Draining           bool
+	CurrentConcurrency int
+	PendingSettlements int
+	Freeze             *domain.FreezeSnapshot
 }
 
 type GatewayOperationResult struct {
 	Applied                          bool
 	Draining                         bool
+	CurrentConcurrency               int
+	PendingSettlements               int
 	Freeze                           *domain.FreezeSnapshot
 	AccessCredentialRotationComplete bool
 	Credential                       string
@@ -203,26 +226,39 @@ type PendingSettlement struct {
 }
 
 type ResolvePendingSettlementCommand struct {
-	OperationID string `json:"operation_id"`
-	Reason      string `json:"reason"`
-	Evidence    string `json:"evidence"`
+	OperationID             string `json:"operation_id"`
+	ExpectedAssignmentEpoch uint64 `json:"expected_assignment_epoch"`
+	ExpectedRequestID       string `json:"expected_request_id"`
+	Reason                  string `json:"reason"`
+	Evidence                string `json:"evidence"`
 }
 
 type SettlementResolution struct {
-	SeatID         int64     `json:"seat_id"`
-	ExternalSeatID string    `json:"external_seat_id"`
-	SettlementID   string    `json:"settlement_id"`
-	OperationID    string    `json:"operation_id"`
-	ActorClientID  string    `json:"actor_client_id"`
-	Reason         string    `json:"reason"`
-	Evidence       string    `json:"evidence"`
-	ResolvedAt     time.Time `json:"resolved_at"`
+	SeatID          int64     `json:"seat_id"`
+	ExternalSeatID  string    `json:"external_seat_id"`
+	SettlementID    string    `json:"settlement_id"`
+	OperationID     string    `json:"operation_id"`
+	ActorClientID   string    `json:"actor_client_id"`
+	AssignmentEpoch uint64    `json:"assignment_epoch"`
+	RequestID       string    `json:"request_id"`
+	Reason          string    `json:"reason"`
+	Evidence        string    `json:"evidence"`
+	ResolvedAt      time.Time `json:"resolved_at"`
 }
 
 // PendingSettlementGateway 与成员变更 Gateway 分离，避免不支持人工对账的实现被误认为具备该能力。
 type PendingSettlementGateway interface {
 	ListPendingSettlements(context.Context, string, int) ([]PendingSettlement, error)
 	GetPendingSettlement(context.Context, string, string) (*PendingSettlement, error)
+	ResolvePendingSettlement(context.Context, string, string, ResolvePendingSettlementCommand) (*SettlementResolution, error)
+}
+
+type PendingSettlementReadGateway interface {
+	ListPendingSettlements(context.Context, string, int) ([]PendingSettlement, error)
+	GetPendingSettlement(context.Context, string, string) (*PendingSettlement, error)
+}
+
+type PendingSettlementResolveGateway interface {
 	ResolvePendingSettlement(context.Context, string, string, ResolvePendingSettlementCommand) (*SettlementResolution, error)
 }
 
@@ -604,7 +640,8 @@ func (c *Coordinator) ResolvePendingSettlement(ctx context.Context, seatID, sett
 	command.Reason = strings.TrimSpace(command.Reason)
 	command.Evidence = strings.TrimSpace(command.Evidence)
 	if !validSettlementIdentifier(seatID) || !validSettlementIdentifier(settlementID) ||
-		!validSettlementIdentifier(command.OperationID) || command.Reason == "" || command.Evidence == "" ||
+		!validSettlementIdentifier(command.OperationID) || command.ExpectedAssignmentEpoch == 0 ||
+		!validSettlementIdentifier(command.ExpectedRequestID) || command.Reason == "" || command.Evidence == "" ||
 		len(command.Reason) > 1000 || len(command.Evidence) > 4000 {
 		return nil, ErrInvalidSettlementRequest
 	}

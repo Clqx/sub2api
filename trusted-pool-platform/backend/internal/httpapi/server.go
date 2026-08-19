@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -23,10 +24,18 @@ const maxRequestBytes = 1 << 20
 type Server struct {
 	coordinator          Coordinator
 	risk                 *risk.Aggregator
-	credentials          *credentials.Manager
+	credentialBatches    CredentialBatchService
 	apiKeyHash           [32]byte
 	settlementAPIKeyHash [32]byte
+	batchAPIKeyHash      [32]byte
 	handler              http.Handler
+}
+
+type CredentialBatchService interface {
+	Seal(context.Context, credentials.PersistentSealRequest) (*credentials.StoredCredentialBatch, error)
+	Get(context.Context, string) (*credentials.StoredCredentialBatch, error)
+	Activate(context.Context, credentials.PersistentBatchTransitionRequest) (*credentials.StoredCredentialBatch, error)
+	Retire(context.Context, credentials.PersistentBatchTransitionRequest) (*credentials.StoredCredentialBatch, error)
 }
 
 type Coordinator interface {
@@ -44,9 +53,10 @@ type Coordinator interface {
 	AcknowledgeCredential(context.Context, string, string, string) (*application.CredentialDelivery, error)
 }
 
-func NewServer(coordinator Coordinator, riskAggregator *risk.Aggregator, credentialManager *credentials.Manager, apiKey, settlementAPIKey string) (*Server, error) {
-	if coordinator == nil || riskAggregator == nil || credentialManager == nil {
-		return nil, errors.New("coordinator, risk aggregator and credential manager are required")
+func NewServer(coordinator Coordinator, riskAggregator *risk.Aggregator, credentialBatches CredentialBatchService,
+	apiKey, settlementAPIKey, batchAPIKey string) (*Server, error) {
+	if coordinator == nil || riskAggregator == nil || credentialBatches == nil {
+		return nil, errors.New("coordinator, risk aggregator and credential batch service are required")
 	}
 	if len(apiKey) < 32 {
 		return nil, errors.New("API key must contain at least 32 characters")
@@ -54,17 +64,24 @@ func NewServer(coordinator Coordinator, riskAggregator *risk.Aggregator, credent
 	if len(settlementAPIKey) < 32 {
 		return nil, errors.New("settlement API key must contain at least 32 characters")
 	}
+	if len(batchAPIKey) < 32 {
+		return nil, errors.New("credential batch API key must contain at least 32 characters")
+	}
 	apiKeyHash := sha256.Sum256([]byte(apiKey))
 	settlementAPIKeyHash := sha256.Sum256([]byte(settlementAPIKey))
-	if subtle.ConstantTimeCompare(apiKeyHash[:], settlementAPIKeyHash[:]) == 1 {
-		return nil, errors.New("settlement API key must differ from the regular API key")
+	batchAPIKeyHash := sha256.Sum256([]byte(batchAPIKey))
+	if subtle.ConstantTimeCompare(apiKeyHash[:], settlementAPIKeyHash[:]) == 1 ||
+		subtle.ConstantTimeCompare(apiKeyHash[:], batchAPIKeyHash[:]) == 1 ||
+		subtle.ConstantTimeCompare(settlementAPIKeyHash[:], batchAPIKeyHash[:]) == 1 {
+		return nil, errors.New("regular, settlement and credential batch API keys must be distinct")
 	}
 	server := &Server{
 		coordinator:          coordinator,
 		risk:                 riskAggregator,
-		credentials:          credentialManager,
+		credentialBatches:    credentialBatches,
 		apiKeyHash:           apiKeyHash,
 		settlementAPIKeyHash: settlementAPIKeyHash,
+		batchAPIKeyHash:      batchAPIKeyHash,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
@@ -109,6 +126,9 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		if isSettlementResolveRequest(request) {
 			// 人工解除结算屏障使用独立平台密钥，普通服务密钥不能取得该权限。
 			expected = s.settlementAPIKeyHash
+		} else if isCredentialBatchRequest(request) {
+			// 账号控制凭据是独立高权限面，不能复用普通工作流或结算密钥。
+			expected = s.batchAPIKeyHash
 		}
 		if subtle.ConstantTimeCompare(provided[:], expected[:]) != 1 {
 			writeError(writer, http.StatusUnauthorized, "UNAUTHORIZED", "服务访问凭据无效")
@@ -118,12 +138,43 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 	})
 }
 
+func isCredentialBatchRequest(request *http.Request) bool {
+	if request == nil {
+		return false
+	}
+	rawParts := strings.Split(strings.Trim(request.URL.EscapedPath(), "/"), "/")
+	if len(rawParts) < 3 {
+		return false
+	}
+	parts := make([]string, 3)
+	for i := range parts {
+		decoded, err := url.PathUnescape(rawParts[i])
+		if err != nil {
+			return false
+		}
+		parts[i] = decoded
+	}
+	// 只要命中高权限前缀就必须使用 batch key；后缀异常也不能回退到普通 key。
+	return parts[0] == "api" && parts[1] == "v1" && parts[2] == "credential-batches"
+}
+
 func isSettlementResolveRequest(request *http.Request) bool {
 	if request == nil || request.Method != http.MethodPost {
 		return false
 	}
-	parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
-	return len(parts) == 7 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "seats" &&
+	rawParts := strings.Split(strings.Trim(request.URL.EscapedPath(), "/"), "/")
+	if len(rawParts) != 7 {
+		return false
+	}
+	parts := make([]string, len(rawParts))
+	for i := range rawParts {
+		decoded, err := url.PathUnescape(rawParts[i])
+		if err != nil {
+			return false
+		}
+		parts[i] = decoded
+	}
+	return parts[0] == "api" && parts[1] == "v1" && parts[2] == "seats" &&
 		parts[4] == "settlements" && parts[6] == "resolve"
 }
 
@@ -198,6 +249,11 @@ func (s *Server) getPendingSettlement(writer http.ResponseWriter, request *http.
 func (s *Server) resolvePendingSettlement(writer http.ResponseWriter, request *http.Request) {
 	var command application.ResolvePendingSettlementCommand
 	if !decodeJSON(writer, request, &command) {
+		return
+	}
+	idempotencyKey := strings.TrimSpace(request.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" || len(idempotencyKey) > 128 || idempotencyKey != strings.TrimSpace(command.OperationID) {
+		writeError(writer, http.StatusBadRequest, "IDEMPOTENCY_KEY_MISMATCH", "Idempotency-Key 必须与 operation_id 一致")
 		return
 	}
 	resolution, err := s.coordinator.ResolvePendingSettlement(
@@ -337,24 +393,27 @@ func (s *Server) riskSummary(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Server) sealBatch(writer http.ResponseWriter, request *http.Request) {
-	if s.rejectPersistentMemoryWorkflow(writer) {
-		return
-	}
 	var body struct {
+		OperationID     string                `json:"operation_id"`
+		BatchID         string                `json:"batch_id"`
 		PoolID          string                `json:"pool_id"`
 		AccountRef      string                `json:"account_ref"`
 		Type            credentials.BatchType `json:"batch_type"`
 		Version         uint64                `json:"version"`
 		MembershipEpoch uint64                `json:"membership_epoch"`
-		KeyRef          string                `json:"key_ref"`
 		Payload         json.RawMessage       `json:"payload"`
 	}
 	if !decodeJSON(writer, request, &body) {
 		return
 	}
-	batch, err := s.credentials.Seal(request.Context(), credentials.SealRequest{
+	defer clear(body.Payload)
+	if !requireMatchingIdempotencyKey(writer, request, body.OperationID) {
+		return
+	}
+	batch, err := s.credentialBatches.Seal(request.Context(), credentials.PersistentSealRequest{
+		OperationID: body.OperationID, BatchExternalID: body.BatchID,
 		PoolID: body.PoolID, AccountRef: body.AccountRef, Type: body.Type, Version: body.Version,
-		MembershipEpoch: body.MembershipEpoch, KeyRef: body.KeyRef, Plaintext: body.Payload,
+		MembershipEpoch: body.MembershipEpoch, Payload: body.Payload,
 	})
 	if err != nil {
 		writeDomainError(writer, err)
@@ -364,22 +423,29 @@ func (s *Server) sealBatch(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) getBatch(writer http.ResponseWriter, request *http.Request) {
-	if s.rejectPersistentMemoryWorkflow(writer) {
+	batch, err := s.credentialBatches.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeDomainError(writer, err)
 		return
 	}
-	batch, ok := s.credentials.Get(request.PathValue("id"))
-	if !ok {
-		writeError(writer, http.StatusNotFound, "CREDENTIAL_BATCH_NOT_FOUND", "凭据批次不存在")
-		return
+	status := http.StatusOK
+	if batch.State == credentials.BatchState("PREPARED") {
+		status = http.StatusAccepted
 	}
-	writeJSON(writer, http.StatusOK, batchMetadata(batch))
+	writeJSON(writer, status, batchMetadata(batch))
 }
 
 func (s *Server) activateBatch(writer http.ResponseWriter, request *http.Request) {
-	if s.rejectPersistentMemoryWorkflow(writer) {
+	var body struct {
+		OperationID     string `json:"operation_id"`
+		ExpectedVersion int64  `json:"expected_version"`
+	}
+	if !decodeJSON(writer, request, &body) || !requireMatchingIdempotencyKey(writer, request, body.OperationID) {
 		return
 	}
-	batch, err := s.credentials.Activate(request.PathValue("id"))
+	batch, err := s.credentialBatches.Activate(request.Context(), credentials.PersistentBatchTransitionRequest{
+		OperationID: body.OperationID, BatchExternalID: request.PathValue("id"), ExpectedVersion: body.ExpectedVersion,
+	})
 	if err != nil {
 		writeDomainError(writer, err)
 		return
@@ -388,10 +454,16 @@ func (s *Server) activateBatch(writer http.ResponseWriter, request *http.Request
 }
 
 func (s *Server) retireBatch(writer http.ResponseWriter, request *http.Request) {
-	if s.rejectPersistentMemoryWorkflow(writer) {
+	var body struct {
+		OperationID     string `json:"operation_id"`
+		ExpectedVersion int64  `json:"expected_version"`
+	}
+	if !decodeJSON(writer, request, &body) || !requireMatchingIdempotencyKey(writer, request, body.OperationID) {
 		return
 	}
-	batch, err := s.credentials.Retire(request.PathValue("id"))
+	batch, err := s.credentialBatches.Retire(request.Context(), credentials.PersistentBatchTransitionRequest{
+		OperationID: body.OperationID, BatchExternalID: request.PathValue("id"), ExpectedVersion: body.ExpectedVersion,
+	})
 	if err != nil {
 		writeDomainError(writer, err)
 		return
@@ -400,44 +472,37 @@ func (s *Server) retireBatch(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Server) issueControlRotationEvidence(writer http.ResponseWriter, request *http.Request) {
-	if s.rejectPersistentMemoryWorkflow(writer) {
-		return
-	}
-	var body struct {
-		PoolID                 string `json:"pool_id"`
-		AccountRef             string `json:"account_ref"`
-		FromEpoch              uint64 `json:"from_membership_epoch"`
-		ToEpoch                uint64 `json:"to_membership_epoch"`
-		ProviderAttestationRef string `json:"provider_attestation_ref"`
-	}
-	if !decodeJSON(writer, request, &body) {
-		return
-	}
-	evidence, err := s.credentials.IssueControlRotationEvidence(body.PoolID, body.AccountRef, body.FromEpoch, body.ToEpoch, body.ProviderAttestationRef)
-	if err != nil {
-		writeDomainError(writer, err)
-		return
-	}
-	writeJSON(writer, http.StatusCreated, evidence)
-}
-
-func (s *Server) rejectPersistentMemoryWorkflow(writer http.ResponseWriter) bool {
-	provider, ok := s.coordinator.(interface{ StorageStatus() string })
-	if !ok || !strings.EqualFold(strings.TrimSpace(provider.StorageStatus()), "postgres") {
-		return false
-	}
+	// Phase2-E 只持久化凭据批次；证据签发仍依赖未实现的 Recovery Root/Share/Manifest 治理。
 	writeDomainError(writer, application.ErrPersistentWorkflowUnsupported)
-	return true
 }
 
-func batchMetadata(batch *credentials.Batch) map[string]any {
+func batchMetadata(batch *credentials.StoredCredentialBatch) map[string]any {
+	protectionProfile := "ONLINE_KMS_AND_RECOVERY_WRAP"
+	if batch.State == credentials.BatchState("PREPARED") {
+		protectionProfile = "PENDING_DUAL_WRAP"
+	}
 	return map[string]any{
-		"id": batch.ID, "pool_id": batch.PoolID, "account_ref": batch.AccountRef,
-		"batch_type": batch.Type, "version": batch.Version, "membership_epoch": batch.MembershipEpoch,
-		"state": batch.State, "algorithm": batch.Algorithm, "key_ref": batch.KeyRef,
-		"aad_hash": batch.AADHash, "created_at": batch.CreatedAt,
+		"id": batch.ExternalID, "pool_id": batch.PoolExternalID, "account_ref": batch.AccountRef,
+		"batch_type": batch.Type, "version": batch.BatchVersion, "membership_epoch": batch.MembershipEpoch,
+		"state": batch.State, "record_version": batch.Version,
+		"protection_profile": protectionProfile, "algorithm": batch.EncryptionAlgorithm,
+		"created_at": batch.CreatedAt, "sealed_at": batch.SealedAt,
 		"activated_at": batch.ActivatedAt, "retired_at": batch.RetiredAt,
 	}
+}
+
+func requireMatchingIdempotencyKey(writer http.ResponseWriter, request *http.Request, operationID string) bool {
+	header := strings.TrimSpace(request.Header.Get("Idempotency-Key"))
+	operationID = strings.TrimSpace(operationID)
+	if header == "" {
+		writeError(writer, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key 不能为空")
+		return false
+	}
+	if operationID == "" || header != operationID {
+		writeError(writer, http.StatusBadRequest, "IDEMPOTENCY_KEY_MISMATCH", "Idempotency-Key 必须与 operation_id 一致")
+		return false
+	}
+	return true
 }
 
 func decodeJSON(writer http.ResponseWriter, request *http.Request, destination any) bool {
@@ -486,6 +551,19 @@ func writeDomainError(writer http.ResponseWriter, err error) {
 		status, reason, message = http.StatusServiceUnavailable, "WORKFLOW_CORRUPT_STATE", "持久化工作流状态不完整"
 	case errors.Is(err, application.ErrPersistentWorkflowUnsupported):
 		status, reason, message = http.StatusServiceUnavailable, "PERSISTENT_WORKFLOW_UNSUPPORTED", err.Error()
+	case errors.Is(err, credentials.ErrBatchNotFound):
+		status, reason, message = http.StatusNotFound, "CREDENTIAL_BATCH_NOT_FOUND", "凭据批次不存在"
+	case errors.Is(err, credentials.ErrBatchInvalidData):
+		status, reason, message = http.StatusBadRequest, "INVALID_CREDENTIAL_BATCH", "凭据批次请求无效"
+	case errors.Is(err, credentials.ErrBatchHashDrift):
+		status, reason, message = http.StatusConflict, "CREDENTIAL_BATCH_INTENT_CONFLICT", "凭据批次幂等意图冲突"
+	case errors.Is(err, credentials.ErrBatchTargetConflict):
+		status, reason, message = http.StatusConflict, "CREDENTIAL_BATCH_TARGET_CONFLICT", "凭据批次目标已被其他操作占用"
+	case errors.Is(err, credentials.ErrBatchInvalidState), errors.Is(err, credentials.ErrBatchLeaseHeld),
+		errors.Is(err, credentials.ErrBatchStaleFence), errors.Is(err, credentials.ErrBatchLegacy):
+		status, reason, message = http.StatusConflict, "CREDENTIAL_BATCH_STATE_CONFLICT", "凭据批次状态不允许当前操作"
+	case errors.Is(err, credentials.ErrRecoveryRootUnavailable):
+		status, reason, message = http.StatusServiceUnavailable, "RECOVERY_ROOT_UNAVAILABLE", "独立 Recovery 包装服务不可用"
 	case errors.Is(err, application.ErrSettlementGatewayUnavailable):
 		status, reason = http.StatusServiceUnavailable, "SETTLEMENT_GATEWAY_UNAVAILABLE"
 	case errors.Is(err, application.ErrInvalidSettlementRequest):
@@ -536,7 +614,9 @@ func persistentOperationHTTPError(code string) (int, string, string) {
 	case "PROVISION_GATEWAY_UNAVAILABLE":
 		return http.StatusServiceUnavailable, "PROVISION_GATEWAY_UNAVAILABLE", "席位开通网关不可用"
 	case "UPSTREAM_RESPONSE_INVALID":
-		return http.StatusBadGateway, "UPSTREAM_RESPONSE_INVALID", "上游开通结果未通过一致性校验"
+		return http.StatusBadGateway, "UPSTREAM_RESPONSE_INVALID", "上游结果未通过一致性校验"
+	case "OPERATOR_REVIEW_REQUIRED":
+		return http.StatusConflict, "OPERATOR_REVIEW_REQUIRED", "操作需要人工核对上游状态"
 	default:
 		return http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", "持久化或密钥服务暂时不可用"
 	}

@@ -47,6 +47,20 @@
 23. provision claim token 只绑定 owner；平台必须先以独立 `credential:ack` scope、相同 claim operation ID
     和 credential fingerprint 取得 Sub2API 明确确认。ambiguous ack 不披露且可幂等重放；ack 跨越 TTL、
     token 过期、错误 fingerprint 和上游已领取均清除或拒绝 credential，平台重启后不能重新发放。
+24. 临时换员与恢复只能从完整 FROZEN 证据发起；Begin 本地事务提交前上游调用次数为零，结果未知或
+    普通 4xx 均保持 `ASSIGNMENT_PENDING`，只有可验证的成功结果才能激活目标成员。
+25. 换员前后 Principal、Subscription、API Key 资源 ID 和 Pool Membership Epoch 保持不变；
+    assignment epoch 与本地 active API Key version 同步加一，正式 Owner 不因临时分配改变。
+26. 成功换员必须在同一事务结束旧 Assignment、激活目标 Assignment、更新 Seat、完成 Operation 并创建
+    加密 READY Claim；成功重放/Operation GET 不返回 claim token，目标成员只能领取一次。
+27. ASSIGN_TEMPORARY 的当前 Assignment 必须投影为 TEMPORARY；RESTORE 只能恢复数据库锁定的正式 Owner。
+    待激活 Assignment 的 Seat、Pool、类型或稳定资源 ID 任一错配时，数据库延迟聚合约束必须拒绝提交。
+28. Credential Batch 任一 wrapper 未就绪或失败时，不得调用 Store Begin 或提交部分 envelope；两侧必须包装
+    同一 DEK，但 domain/key/output 独立，相同包装、裸 DEK 或全零包装均拒绝。
+29. Batch request snapshot 只含规范元数据和 HMAC 内容指纹；数据库参数、响应、日志与错误不得出现已知
+    payload canary、原始 AAD、key ref、密文或 wrapped DEK。
+30. Seal 提交重新核对 Pool 当前 ACTIVE Epoch 和 credential floor；并发 Seal/Activate/Retire、旧 fence、
+    同 operation 漂移与同范围双 ACTIVE 均由 CAS、唯一索引和延迟聚合约束拒绝。
 
 ## 3. Phase 2 数据库契约验收
 
@@ -54,6 +68,8 @@
 - 同一 Seat 不能存在两个活动 Assignment；同一成员也不能在同一 Pool 占用两个活动 Seat。
 - Assignment 携带的 `pool_id` 必须与 Seat 所属 Pool 一致。
 - Credential Batch 不能引用不存在或属于其他 Pool 的 Membership Epoch。
+- migration 007 的 Legacy Credential Batch 必须标记 `LEGACY_UNRECOVERABLE` 并拒绝 API Get/Activate/Retire；
+  不得猜测 wrapper domain/key ref 或把旧行升级为 CURRENT。
 - Manifest Signature 的成员必须属于该 Manifest 对应的 Membership Epoch。
 - Phase 2 增加领取持久化前，必须验证数据库只存 token 哈希和加密待交付值，ack 与消费同事务提交。
 
@@ -70,6 +86,18 @@
 
 - Sub2API 调用提交成功但响应丢失时，相同 `operation_id` 可恢复原结果。
 - 平台重启后能读取持久 Provision/Claim，并通过数据库 lease/fencing 接管 ack 对账；后台不得新发 claim token。
+- 平台重启后能从持久 SUSPEND 请求快照重建 Seat、operation 和 assignment epoch，不依赖客户端内存 map。
+- 平台重启后能从持久 ASSIGN_TEMPORARY/RESTORE 请求快照和 AssignmentCase 重建目标成员、冻结证据、
+  稳定资源 ID 与目标 epoch；不得依赖客户端内存 map，也不得生成新的 operation ID。
+- 平台重启后能从 9 键 settlement intent 重建原 actor、Seat、settlement、epoch、request ID、reason 和 evidence；
+  通用 worker 不得扫描 resolve operation，专用 worker 不得生成新的 operation ID。
+- resolve 的普通 key、`*` scope、混合 scope、encoded-path 绕过、Header/body 幂等键漂移、epoch/request/actor
+  响应漂移均被拒绝；结果未知时 Seat 保持禁用，未决 intent 同时阻止 ASSIGNMENT_PENDING 和直接 ACTIVE。
+- suspend、drain-status、freeze 返回的 Pool、Seat 或 assignment epoch 任一缺失/错配时必须失败关闭。
+- 同一 Seat 的 Provision 完成与 Suspend 使用公共 Pool 行锁串行，真实 PostgreSQL 双连接交错测试不得形成
+  Pool/Seat 反向死锁；暂停期间单独修改 Seat assignment epoch 必须被延迟聚合约束拒绝。
+- BeginSuspend 本地事务失败时上游调用次数为零；DRAINING 保存真实并发/结算计数，结果未知不回退 ACTIVE。
+- Operation、Seat、SuspensionCase 和 freeze snapshot 必须在同一事务进入 FROZEN，旧 fence 提交被拒绝。
 - `CALLER_REPLAY_REQUIRED` 不被恢复 worker 反复扫描，原调用方可用同请求和 operation ID 重放。
 - 过期 Claim 先持久清密，且不再调用 Sub2API ack 或 KMS 解密。
 - 结果未知时 `SUSPEND_PENDING` 不会自动进入 `FROZEN` 或开始换员。
@@ -84,10 +112,11 @@
 - 暂停与换员端到端场景通过。
 - 敏感数据扫描无高危发现。
 - OpenAPI 与实现契约测试通过。
-- 数据库迁移在空库和已有测试数据上均验证成功。
+- 数据库迁移在空库和已有测试数据上均验证成功，包括平台 `001 -> 007`、`006 -> 007` 和 Sub2API
+  `221 -> 225` 的历史审计与混合 scope 处理。
 - migration ledger、checksum 漂移和 unmanaged 历史卷的受控 baseline 演练通过。
-- 生产 KMS/HSM adapter 与双连接 lease/fence、两实例同 Claim 竞争测试通过。
+- 生产在线 KMS 与 Recovery wrap-only adapter、双连接 lease/fence、两实例同 Claim/Batch 竞争测试通过。
 - 运维人员完成暂停结果未知和永久换员演练。
 
-Phase 2-A 当前只通过 Go 单元/契约与静态检查；真实 PostgreSQL、崩溃注入、生产 KMS 和完整换员
+Phase 2-E 当前只通过 Go 单元/契约与静态检查；真实 PostgreSQL、崩溃注入、生产双包装 adapter 和完整永久换员
 端到端尚未通过，因此本节发布门禁仍未满足。

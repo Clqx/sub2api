@@ -17,6 +17,10 @@
 
 ## 当前开放能力
 
+本节记录 Phase 2-A 当时的开放边界；后续 Phase 2-B/2-C/2-D 已增量接入暂停/冻结、临时换员/恢复与
+pending settlement 查询/解除，当前能力
+应以根 README 和对应阶段状态文档为准。
+
 PostgreSQL Runtime 只开放以下持久能力：
 
 - `POST /api/v1/seats`：在可信预建 Pool 和 Owner Member 上开通 Seat。
@@ -78,7 +82,7 @@ KMS AAD、迁移 checksum/unmanaged schema 和 persistent 模式端点 fail-clos
 
 本机 Docker daemon 未运行且没有本地 PostgreSQL 客户端，本轮未能执行真实 PostgreSQL 测试。上线前必须补齐：
 
-1. PostgreSQL 16 空库 `001 -> 002 -> 003` 和已有受管数据升级。
+1. PostgreSQL 16 空库 `001 -> 002 -> 003 -> 004 -> 005` 和已有受管数据升级。
 2. 双连接 lease 接管、旧 fence 拒绝、同一 Seat/Claim 并发竞争。
 3. 迁移并发、checksum 漂移、unmanaged schema 与受控 baseline 演练。
 4. 上游、KMS、数据库提交前后崩溃注入及重启恢复。
@@ -86,5 +90,5 @@ KMS AAD、迁移 checksum/unmanaged schema 和 persistent 模式端点 fail-clos
 6. 生产 KMS/HSM adapter、权限、轮换、停用和灾备演练。
 7. 上述门禁通过前保持单副本并禁止 rolling overlap。
 
-下一阶段先持久化 Suspend/Drain/Freeze 与 settlement 对账，再接入临时换员和恢复；永久换员必须等待
-Recovery Root、Share、Manifest 和供应商证明治理全部完成。
+后续 Phase 2-B/2-C 已分别接入 Suspend/Drain/Freeze 与临时换员/恢复；永久换员仍必须等待 Recovery
+Root、Share、Manifest 和供应商证明治理全部完成。

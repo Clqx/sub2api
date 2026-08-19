@@ -24,10 +24,25 @@ an existing client's authority.
 $env:DATABASE_DSN = 'host=127.0.0.1 port=5432 user=sub2api password=... dbname=sub2api sslmode=disable'
 $env:TOTP_ENCRYPTION_KEY = '<the same 64-character hex key used by Sub2API>'
 go run ./cmd/trusted-pool-client `
-  -client-id platform-pool-a `
+  -client-id platform-pool-a-control `
   -external-pool-id pool-a `
-  -scopes seat:read,seat:write,seat:provision,credential:ack,settlement:resolve
+  -scopes seat:write,seat:provision,credential:ack
+
+go run ./cmd/trusted-pool-client `
+  -client-id platform-pool-a-settlement-read `
+  -external-pool-id pool-a `
+  -scopes seat:read
+
+go run ./cmd/trusted-pool-client `
+  -client-id platform-pool-a-settlement-resolve `
+  -external-pool-id pool-a `
+  -scopes settlement:resolve
 ```
+
+`settlement:resolve` 必须是该客户端唯一的 scope；CLI、运行时认证和迁移约束都会拒绝将它与
+`seat:*` 或其他权限混用。平台的控制、结算只读和结算解除三组 client ID 与 secret 也必须互不相同。
+未完成的解除 intent 固化 resolve client ID，因此只能分阶段轮换其 secret；更换 client ID 前必须先清空
+待恢复 intent。
 
 Redirect stdout directly to the target secret store. The
 `bearer_secret` and `hmac_secret` are shown once and cannot be recovered through
