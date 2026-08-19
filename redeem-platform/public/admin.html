@@ -290,7 +290,8 @@
         <input type="hidden" name="id">
         <div class="form-grid">
           <label>商品 SKU<input name="sku" maxlength="50" placeholder="BALANCE-100" required></label>
-          <label>商品名称<input name="name" maxlength="100" required></label>
+          <label>商品名称（中文）<input name="name" maxlength="100" required></label>
+          <label>商品名称（英文）<input name="name_en" maxlength="100" placeholder="Optional English name"></label>
           <label>展示价格<input name="price" inputmode="decimal" placeholder="99.00" required></label>
           <label>货币
             <select name="currency">
@@ -299,7 +300,8 @@
               <option value="HKD">HKD 港币</option>
             </select>
           </label>
-          <label class="full-field">商品说明<textarea name="description" rows="3" maxlength="1000"></textarea></label>
+          <label class="full-field">商品说明（中文）<textarea name="description" rows="3" maxlength="1000"></textarea></label>
+          <label class="full-field">商品说明（英文）<textarea name="description_en" rows="3" maxlength="1000" placeholder="Optional English description"></textarea></label>
           <label class="full-field">商品图标 URL<input name="icon_url" type="url" maxlength="2048" placeholder="https://cdn.example.com/product.png"></label>
           <label class="full-field">外部购买链接<input name="purchase_url" type="url" maxlength="2048" placeholder="https://store.example.com/product"></label>
         </div>

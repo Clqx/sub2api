@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -954,6 +955,107 @@ func (s *AccountRepoSuite) TestClearRateLimit() {
 	s.Require().Nil(got.RateLimitedAt)
 	s.Require().Nil(got.RateLimitResetAt)
 	s.Require().Nil(got.OverloadUntil)
+}
+
+func (s *AccountRepoSuite) TestConditionalAdminRecoveryPreservesUnrelatedStateAndRejectsStaleResponseTimestamp() {
+	resetAt := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	tempUntil := time.Now().Add(45 * time.Minute).UTC().Truncate(time.Second)
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:         "acc-conditional-recovery",
+		Status:       service.StatusError,
+		ErrorMessage: "credentials rejected",
+		Schedulable:  false,
+		Extra: map[string]any{
+			"model_rate_limits": map[string]any{"gpt-5": map[string]any{"reset_at": resetAt.Format(time.RFC3339)}},
+		},
+	})
+	s.Require().NoError(s.repo.SetSchedulable(s.ctx, account.ID, false))
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, resetAt))
+	s.Require().NoError(s.repo.SetOverloaded(s.ctx, account.ID, resetAt))
+	s.Require().NoError(s.repo.SetTempUnschedulable(s.ctx, account.ID, tempUntil, "new isolation"))
+
+	observed, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	// Exercise the same RFC3339 JSON round trip used by the admin account
+	// response and monitor request, including PostgreSQL timestamp precision.
+	payload, err := json.Marshal(struct {
+		UpdatedAt time.Time `json:"updated_at"`
+	}{UpdatedAt: observed.UpdatedAt})
+	s.Require().NoError(err)
+	var responseSnapshot struct {
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	s.Require().NoError(json.Unmarshal(payload, &responseSnapshot))
+
+	cleared, err := s.repo.ClearErrorIf(s.ctx, account.ID, service.AccountStatePrecondition{
+		ExpectedUpdatedAt: &responseSnapshot.UpdatedAt,
+	})
+	s.Require().NoError(err)
+	s.Require().True(cleared)
+
+	afterErrorClear, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(service.StatusActive, afterErrorClear.Status)
+	s.Require().Empty(afterErrorClear.ErrorMessage)
+	s.Require().False(afterErrorClear.Schedulable)
+	s.Require().NotNil(afterErrorClear.RateLimitResetAt)
+	s.Require().NotNil(afterErrorClear.OverloadUntil)
+	s.Require().NotNil(afterErrorClear.TempUnschedulableUntil)
+	s.Require().Contains(afterErrorClear.Extra, "model_rate_limits")
+
+	// The response timestamp used above is stale after clear-error. It must not
+	// clear a newly observed/re-armed runtime state.
+	cleared, err = s.repo.ClearAccountRateLimitIf(s.ctx, account.ID, service.AccountStatePrecondition{
+		ExpectedUpdatedAt: &responseSnapshot.UpdatedAt,
+	})
+	s.Require().NoError(err)
+	s.Require().False(cleared)
+
+	fresh, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	cleared, err = s.repo.ClearAccountRateLimitIf(s.ctx, account.ID, service.AccountStatePrecondition{
+		ExpectedUpdatedAt: &fresh.UpdatedAt,
+	})
+	s.Require().NoError(err)
+	s.Require().True(cleared)
+
+	final, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Nil(final.RateLimitedAt)
+	s.Require().Nil(final.RateLimitResetAt)
+	s.Require().Nil(final.OverloadUntil)
+	s.Require().False(final.Schedulable)
+	s.Require().NotNil(final.TempUnschedulableUntil)
+	s.Require().Contains(final.Extra, "model_rate_limits")
+
+	cleared, err = s.repo.ClearErrorIf(s.ctx, account.ID, service.AccountStatePrecondition{
+		ExpectedUpdatedAt: &final.UpdatedAt,
+	})
+	s.Require().NoError(err)
+	s.Require().False(cleared, "conditional clear-error must not activate a non-error account")
+}
+
+func (s *AccountRepoSuite) TestClearTempUnschedulableIfProtectsNewGeneration() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-temp-conditional"})
+	observedUntil := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	newUntil := observedUntil.Add(10 * time.Minute)
+	s.Require().NoError(s.repo.SetTempUnschedulable(s.ctx, account.ID, observedUntil, "old isolation"))
+	observed, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().NoError(s.repo.SetTempUnschedulable(s.ctx, account.ID, newUntil, "new isolation"))
+
+	cleared, err := s.repo.ClearTempUnschedulableIf(s.ctx, account.ID, service.AccountStatePrecondition{
+		ExpectedUpdatedAt:              &observed.UpdatedAt,
+		ExpectedTempUnschedulableUntil: &observedUntil,
+	})
+	s.Require().NoError(err)
+	s.Require().False(cleared)
+
+	current, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(current.TempUnschedulableUntil)
+	s.Require().WithinDuration(newUntil, *current.TempUnschedulableUntil, time.Second)
+	s.Require().Equal("new isolation", current.TempUnschedulableReason)
 }
 
 func (s *AccountRepoSuite) TestTempUnschedulableFieldsLoadedByGetByIDAndGetByIDs() {

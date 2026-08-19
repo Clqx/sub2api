@@ -1274,6 +1274,10 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 				response.BadRequest(c, "Custom menu item label is too long (max 50 characters)")
 				return
 			}
+			if len(item.LabelEN) > maxMenuItemLabelLen {
+				response.BadRequest(c, "Custom menu item English label is too long (max 50 characters)")
+				return
+			}
 			urlTrimmed := strings.TrimSpace(item.URL)
 			if strings.HasPrefix(urlTrimmed, "md:") {
 				// Markdown page mode: URL = "md:<slug>"

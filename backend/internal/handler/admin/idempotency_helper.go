@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -13,6 +14,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func executeAdminOptionalIdempotentJSON(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	execute func(context.Context) (any, error),
+) {
+	if strings.TrimSpace(c.GetHeader("Idempotency-Key")) == "" {
+		data, err := execute(c.Request.Context())
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		response.Success(c, data)
+		return
+	}
+	executeAdminIdempotentJSON(c, scope, payload, ttl, execute)
+}
 
 type idempotencyStoreUnavailableMode int
 

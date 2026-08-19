@@ -80,6 +80,13 @@ export default {
           perRequestPrice: '单次价格'
         }
       },
+      timePricingValidation: {
+        timezone: '请选择有效的 IANA 时区',
+        format: '开始时间和结束时间必须使用 HH:mm:ss 格式',
+        range: '开始时间必须早于结束时间；跨午夜请拆分为两个时间段',
+        overlap: '时间段不能重叠',
+        multiplier: '倍率必须大于 0，且最多保留两位小数'
+      },
       deleteConfirm: '确定要删除渠道「{name}」吗？此操作不可撤销。',
       columns: {
         name: '名称',
@@ -93,7 +100,8 @@ export default {
       billingMode: {
         token: 'Token',
         perRequest: '按次',
-        image: '图片（按次）'
+        image: '图片（按次）',
+        video: '视频（按秒）'
       },
       form: {
         name: '名称',
@@ -121,12 +129,20 @@ export default {
         imageOutputPrice: '图片输出价格',
         pricePlaceholder: '默认',
         intervals: '上下文区间定价（可选）',
+        timePricing: '时间段定价（可选）',
+        timezone: '时区',
+        addTimePeriod: '添加时间段',
+        startTime: '开始时间',
+        endTime: '结束时间',
+        multiplier: '倍率',
+        removeTimePeriod: '删除时间段',
         minTokens: '最小',
         maxTokens: '最大',
         inclusive: '（含）',
         addInterval: '添加区间',
         requestTiers: '按次计费层级',
         imageTiers: '图片计费层级（按次）',
+        videoTiers: '视频分辨率层级（按秒）',
         addTier: '添加层级',
         noTiersYet: '暂无层级，点击添加配置按次计费价格',
         noPricingRules: '暂无定价规则，点击"添加"创建',
@@ -143,6 +159,7 @@ export default {
         billingModelSourceChannelMapped: '以渠道映射后的模型计费',
         billingModelSourceRequested: '以请求模型计费',
         billingModelSourceUpstream: '以最终模型计费',
+        billingModelSourceResponse: '按上游响应模型计费',
         billingModelSourceHint: '控制使用哪个模型名称进行定价查找',
         selectedCount: '已选 {count} 个',
         searchGroups: '搜索分组...',
@@ -151,6 +168,7 @@ export default {
         restrictModelsHint: '开启后，仅允许模型定价列表中的模型。不在列表中的模型请求将被拒绝。',
         defaultPerRequestPrice: '默认单次价格（未命中层级时使用）',
         defaultImagePrice: '默认图片价格（未命中层级时使用）',
+        defaultVideoPrice: '默认视频每秒价格（未命中层级时使用）',
         platformConfig: '平台配置',
         webSearchEmulation: 'Web Search 模拟',
         webSearchEmulationHint: '⚠️ 开启后该渠道下所有 Anthropic 分组的账号将自动拦截 web_search 请求，请谨慎操作',

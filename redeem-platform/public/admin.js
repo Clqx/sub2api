@@ -511,7 +511,7 @@ function openProductModal(id = '') {
   const product = state.products.find((item) => item.id === id)
   $('#productModalTitle').textContent = product ? '编辑商品' : '新建商品'
   if (product) {
-    for (const key of ['id', 'sku', 'name', 'price', 'currency', 'description', 'icon_url', 'purchase_url', 'value', 'status', 'sort_order']) {
+    for (const key of ['id', 'sku', 'name', 'name_en', 'price', 'currency', 'description', 'description_en', 'icon_url', 'purchase_url', 'value', 'status', 'sort_order']) {
       if (form.elements[key]) form.elements[key].value = product[key] ?? ''
     }
     const benefit = $(`[name="benefit_type"][value="${product.benefit_type}"]`, form)

@@ -72,6 +72,10 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	if s == nil || account == nil {
 		return false
 	}
+	// Team 联动熔断必须先于 model-not-found 与账户级临时不可调度规则的早退。
+	if s.rateLimitService != nil {
+		s.rateLimitService.maybeHandleOpenAITeamLinkedError(stateCtx, account, statusCode, responseBody)
+	}
 	stateCtx = withTempUnschedulableModel(stateCtx, canonicalModel)
 	if s.rateLimitService != nil && len(canonicalModel) > 0 && s.rateLimitService.HandleUpstreamModelNotFound(stateCtx, account, canonicalModel[0], statusCode, responseBody) {
 		return true
@@ -220,6 +224,44 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 	defer mu.Unlock()
 	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
 	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+}
+
+func (s *OpenAIGatewayService) AccountSchedulingBlockGeneration(accountID int64) (uint64, bool) {
+	if s == nil || accountID <= 0 {
+		return 0, false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, exists := s.openaiAccountRuntimeBlockUntil.Load(accountID); !exists {
+		return 0, false
+	}
+	value, exists := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	if !exists {
+		return 0, false
+	}
+	generation, ok := value.(uint64)
+	return generation, ok
+}
+
+func (s *OpenAIGatewayService) ClearAccountSchedulingBlockIfGeneration(accountID int64, generation uint64) bool {
+	if s == nil || accountID <= 0 || generation == 0 {
+		return false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+	value, exists := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	currentGeneration, ok := value.(uint64)
+	if !exists || !ok || currentGeneration != generation {
+		return false
+	}
+	if _, exists := s.openaiAccountRuntimeBlockUntil.Load(accountID); !exists {
+		return false
+	}
+	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+	return true
 }
 
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {

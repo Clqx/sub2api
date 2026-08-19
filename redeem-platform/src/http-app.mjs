@@ -12,9 +12,41 @@ import { UpstreamError } from './sub2api-client.mjs'
 const STATIC_FILES = new Map([
   ['/assets/styles.css', ['styles.css', 'text/css; charset=utf-8']],
   ['/assets/user.js', ['user.js', 'text/javascript; charset=utf-8']],
+  ['/assets/user-i18n.js', ['user-i18n.js', 'text/javascript; charset=utf-8']],
   ['/assets/admin.js', ['admin.js', 'text/javascript; charset=utf-8']],
   ['/assets/logo.svg', ['logo.svg', 'image/svg+xml']],
 ])
+
+const ENGLISH_USER_PAGE_TEXT = new Map([
+  ['<html lang="zh-CN">', '<html lang="en">'],
+  ['<title>Sub2API 兑换中心</title>', '<title>Sub2API Redemption Center</title>'],
+  ['aria-label="Sub2API 兑换中心"', 'aria-label="Sub2API Redemption Center"'],
+  ['>兑换中心</small>', '>Redemption Center</small>'],
+  ['>用户</strong>', '>User</strong>'],
+  ['>兑换中心</h1>', '>Redemption Center</h1>'],
+  ['>正在确认账户</strong>', '>Confirming your account</strong>'],
+  ['>请稍候</p>', '>Please wait</p>'],
+  ['>可兑换商品</h2>', '>Available Products</h2>'],
+  ['>暂无在售商品</strong>', '>No products available</strong>'],
+  ['>商品上架后将在这里显示</p>', '>Products will appear here when they become available.</p>'],
+  ['>输入兑换码</h2>', '>Enter a redemption code</h2>'],
+  ['>安全连接</span>', '>Secure connection</span>'],
+  ['>兑换码</label>', '>Redemption code</label>'],
+  ['>确认兑换</button>', '>Redeem</button>'],
+  ['>最近兑换</h2>', '>Recent Redemptions</h2>'],
+  ['>刷新</button>', '>Refresh</button>'],
+  ['>暂无兑换记录</strong>', '>No redemption history</strong>'],
+  ['>成功兑换后将在这里显示</p>', '>Successful redemptions will appear here.</p>'],
+])
+
+function userPageHTML(publicDir, locale) {
+  let body = fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8')
+  if (locale !== 'en') return body
+  for (const [source, translation] of ENGLISH_USER_PAGE_TEXT) {
+    body = body.replace(source, translation)
+  }
+  return body
+}
 
 function securityHeaders(config, isAPI = false) {
   return {
@@ -293,7 +325,10 @@ export function createHTTPHandler({ config, database, service, sub2api, logger =
             '登录凭证不能放在 URL 查询参数中，请从 Sub2API 用户中心重新进入',
           )
         }
-        const body = fs.readFileSync(path.join(config.publicDir, 'index.html'))
+        const locale = String(url.searchParams.get('lang') || '').toLowerCase().startsWith('en')
+          ? 'en'
+          : 'zh'
+        const body = userPageHTML(config.publicDir, locale)
         return send(res, 200, {
           ...securityHeaders(config),
           'Content-Type': 'text/html; charset=utf-8',

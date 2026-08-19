@@ -16,9 +16,16 @@ from app.config import Settings
 
 
 class ConnectorError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        reason: str | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.reason = reason
 
 
 class ContractError(ConnectorError):
@@ -66,6 +73,7 @@ class NormalizedAccount:
     overload_until: datetime | None
     temp_unschedulable_until: datetime | None
     observed_at: datetime
+    source_updated_at: datetime | None = None
     priority: int | None = None
     rate_multiplier: float | None = None
     upstream_billing_probe_enabled: bool = False
@@ -89,6 +97,7 @@ class NormalizedAccount:
             "rate_limit_reset_at": _iso(self.rate_limit_reset_at),
             "overload_until": _iso(self.overload_until),
             "temp_unschedulable_until": _iso(self.temp_unschedulable_until),
+            "source_updated_at": _iso(self.source_updated_at),
             "rate_multiplier": self.rate_multiplier,
             "upstream_billing_probe_enabled": self.upstream_billing_probe_enabled,
             "upstream_billing_rate_sync_enabled": self.upstream_billing_rate_sync_enabled,
@@ -307,7 +316,8 @@ class Sub2APIConnector:
         return True
 
     async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        headers = {**self._headers(), **kwargs.pop("headers", {})}
+        request_headers = dict(kwargs.pop("headers", {}))
+        headers = {**self._headers(), **request_headers}
         try:
             response = await self._send_bounded(method, path, headers=headers, **kwargs)
         except httpx.TimeoutException as exc:
@@ -315,7 +325,8 @@ class Sub2APIConnector:
         except httpx.HTTPError as exc:
             raise ConnectorError("target request failed") from exc
         if response.status_code == 401 and await self._refresh_token_pair():
-            response = await self._send_bounded(method, path, headers=self._headers(), **kwargs)
+            retry_headers = {**self._headers(), **request_headers}
+            response = await self._send_bounded(method, path, headers=retry_headers, **kwargs)
         return response
 
     async def _send_bounded(
@@ -840,20 +851,35 @@ class Sub2APIConnector:
         return fact, events, len(data) < bounded_limit
 
     async def execute_account_action(
-        self, external_account_id: str, action: str, *, idempotency_key: str
+        self,
+        external_account_id: str,
+        action: str,
+        *,
+        idempotency_key: str,
+        expected_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if action not in ACCOUNT_AUTOMATION_ACTIONS:
             raise ValueError("unsupported account automation action")
         account_id = quote(external_account_id, safe="")
         method = "POST"
         path = f"/api/v1/admin/accounts/{account_id}/{action.replace('_', '-')}"
-        kwargs: dict[str, Any] = {}
+        conditions: dict[str, Any] = {}
+        if expected_state is not None:
+            conditions = {
+                "expected_updated_at": expected_state.get("source_updated_at"),
+                "expected_status": expected_state.get("status"),
+                "expected_schedulable": expected_state.get("schedulable"),
+                "expected_temp_unschedulable_until": expected_state.get(
+                    "temp_unschedulable_until"
+                ),
+            }
+        kwargs: dict[str, Any] = {"json": conditions} if conditions else {}
         if action == "clear_temp_unschedulable":
             method = "DELETE"
             path = f"/api/v1/admin/accounts/{account_id}/temp-unschedulable"
         elif action == "set_schedulable":
             path = f"/api/v1/admin/accounts/{account_id}/schedulable"
-            kwargs["json"] = {"schedulable": True}
+            kwargs["json"] = {"schedulable": True, **conditions}
         response = await self.request(
             method,
             path,
@@ -861,9 +887,12 @@ class Sub2APIConnector:
             **kwargs,
         )
         if response.status_code < 200 or response.status_code >= 300:
+            reason = _envelope_error_reason(response)
             raise ConnectorError(
-                f"account action returned HTTP {response.status_code}",
+                f"account action returned HTTP {response.status_code}"
+                + (f" ({reason})" if reason else ""),
                 status_code=response.status_code,
+                reason=reason,
             )
         return {
             "http_status": response.status_code,
@@ -1141,6 +1170,7 @@ def normalize_account(raw: dict[str, Any], now: datetime | None = None) -> Norma
         ),
         upstream_billing_probe=_sanitize_probe_snapshot(probe),
         observed_at=observed_at,
+        source_updated_at=_parse_datetime(raw.get("updated_at")),
         quotas=quotas,
     )
 
@@ -1308,6 +1338,17 @@ def _envelope_data(response: httpx.Response) -> Any:
     return body.get("data", body)
 
 
+def _envelope_error_reason(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    reason = body.get("reason")
+    return reason.strip()[:100] if isinstance(reason, str) and reason.strip() else None
+
+
 def _require_dict_data(response: httpx.Response, name: str) -> dict[str, Any]:
     data = _envelope_data(response)
     if not isinstance(data, dict):
@@ -1395,6 +1436,10 @@ def _normalize_channel_results(raw: Any) -> list[ChannelCheckResult]:
 def _parse_datetime(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
     if isinstance(value, (int, float)):
         # Sub2API account DTO uses Unix seconds for expires_at.
         return datetime.fromtimestamp(value, timezone.utc)

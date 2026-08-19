@@ -54,6 +54,7 @@ pnpm-debug.log*
 *.env
 !.env.example
 docker-compose.override.yml
+.secrets/
 
 # ===================
 # IDE / 编辑器

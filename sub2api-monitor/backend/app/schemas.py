@@ -488,14 +488,26 @@ class AutomationRuleCreate(BaseModel):
             "overloaded",
             "temporarily_unschedulable",
         ]
-    ] = Field(default_factory=list)
+    ] = Field(min_length=1)
+    reason_match_mode: Literal["any", "all"] = "any"
     cooldown_seconds: int = Field(default=900, ge=300, le=86400)
     confirm_side_effects: bool = False
 
     @model_validator(mode="after")
     def validate_execution_confirmation(self) -> AutomationRuleCreate:
-        if self.enabled and self.mode == "execute" and not self.confirm_side_effects:
-            raise ValueError("confirm_side_effects is required for enabled execution rules")
+        from app.services.automation import ACTION_REASON_ALLOWLIST
+
+        allowed_reasons = ACTION_REASON_ALLOWLIST[self.action]
+        invalid_reasons = set(self.reason_filters) - allowed_reasons
+        if invalid_reasons:
+            invalid = ", ".join(sorted(invalid_reasons))
+            raise ValueError(f"reason_filters are incompatible with {self.action}: {invalid}")
+        if self.enabled and self.action in {"recover_state", "set_schedulable"}:
+            raise ValueError(f"{self.action} rules cannot be enabled for account fault automation")
+        if self.enabled and self.mode == "execute":
+            raise ValueError(
+                "account fault execution rules cannot be enabled; manual approval is required"
+            )
         return self
 
 
@@ -508,6 +520,7 @@ class AutomationRuleResponse(ORMModel):
     action: str
     mode: str
     reason_filters: list[str]
+    reason_match_mode: str
     cooldown_seconds: int
     created_at: datetime
     updated_at: datetime

@@ -520,6 +520,90 @@ async def test_account_usage_stats_rejects_invalid_contract_and_http_errors(
 
 
 @pytest.mark.asyncio
+async def test_account_action_refresh_retry_preserves_idempotency_header_and_body(
+    settings_dict: dict[str, object],
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/auth/refresh":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"access_token": "new-access", "refresh_token": "new-refresh"},
+                },
+            )
+        action_attempts = sum(
+            item.url.path.endswith("/clear-error") for item in requests
+        )
+        if action_attempts == 1:
+            return httpx.Response(401, json={"code": 401, "message": "expired"})
+        return httpx.Response(200, json={"code": 0, "data": {"updated": True}})
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="token_pair",
+        secret={"access_token": "old-access", "refresh_token": "old-refresh"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        await connector.execute_account_action(
+            "17",
+            "clear_error",
+            idempotency_key="stable-recovery-key",
+            expected_state={
+                "source_updated_at": "2026-08-10T03:04:05.123456Z",
+                "status": "error",
+                "schedulable": False,
+            },
+        )
+
+    action_requests = [item for item in requests if item.url.path.endswith("/clear-error")]
+    assert len(action_requests) == 2
+    assert [item.headers["Idempotency-Key"] for item in action_requests] == [
+        "stable-recovery-key",
+        "stable-recovery-key",
+    ]
+    assert action_requests[0].headers["Authorization"] == "Bearer old-access"
+    assert action_requests[1].headers["Authorization"] == "Bearer new-access"
+    assert action_requests[0].content == action_requests[1].content
+
+
+@pytest.mark.asyncio
+async def test_account_action_exposes_structured_error_reason(
+    settings_dict: dict[str, object],
+) -> None:
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                409,
+                json={
+                    "code": 409,
+                    "message": "idempotent request is in progress",
+                    "reason": "IDEMPOTENCY_IN_PROGRESS",
+                },
+            )
+        ),
+    )
+    async with connector:
+        with pytest.raises(ConnectorError) as error:
+            await connector.execute_account_action(
+                "17", "clear_error", idempotency_key="stable-key"
+            )
+
+    assert error.value.status_code == 409
+    assert error.value.reason == "IDEMPOTENCY_IN_PROGRESS"
+    assert "IDEMPOTENCY_IN_PROGRESS" in str(error.value)
+
+
+@pytest.mark.asyncio
 async def test_connector_pins_validated_dns_address(
     settings_dict: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:

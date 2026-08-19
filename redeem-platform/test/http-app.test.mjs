@@ -115,6 +115,52 @@ test('user page rejects credentials in URL query parameters', async (t) => {
   assert.equal(result.response.headers.get('cache-control'), 'no-store')
 })
 
+test('serves the user localization module', async (t) => {
+  const config = testConfig()
+  const server = http.createServer(createHTTPHandler({
+    config,
+    database: {},
+    service: {},
+    sub2api: {},
+    logger: silentLogger,
+  }))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const address = server.address()
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/assets/user-i18n.js`)
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('content-type'), /^text\/javascript/)
+  assert.match(await response.text(), /Sub2API Redemption Center/)
+})
+
+test('renders the initial user page in the requested language', async (t) => {
+  const config = testConfig()
+  const server = http.createServer(createHTTPHandler({
+    config,
+    database: {},
+    service: {},
+    sub2api: {},
+    logger: silentLogger,
+  }))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const address = server.address()
+  const baseURL = `http://127.0.0.1:${address.port}`
+
+  const english = await fetch(`${baseURL}/?lang=en`)
+  const englishHTML = await english.text()
+  assert.match(englishHTML, /<html lang="en">/)
+  assert.match(englishHTML, />Redemption Center<\/h1>/)
+  assert.match(englishHTML, />Redeem<\/button>/)
+  assert.doesNotMatch(englishHTML, />兑换中心<\/h1>/)
+
+  const chinese = await fetch(`${baseURL}/?lang=zh`)
+  const chineseHTML = await chinese.text()
+  assert.match(chineseHTML, /<html lang="zh-CN">/)
+  assert.match(chineseHTML, />兑换中心<\/h1>/)
+})
+
 databaseTest('HTTP flow exchanges identity, generates, redeems, and lists records', async (t) => {
   const config = testConfig()
   const database = await temporaryDatabase(t)
@@ -163,7 +209,9 @@ databaseTest('HTTP flow exchanges identity, generates, redeems, and lists record
     body: JSON.stringify({
       sku: 'SUB-30',
       name: '30 天订阅',
+      name_en: '30-day subscription',
       description: '标准订阅商品',
+      description_en: 'Standard subscription product',
       price: '149',
       currency: 'CNY',
       benefit_type: 'subscription',
@@ -185,6 +233,8 @@ databaseTest('HTTP flow exchanges identity, generates, redeems, and lists record
   assert.equal(catalog.response.status, 200)
   assert.equal(catalog.body.data.length, 1)
   assert.equal(catalog.body.data[0].price, '149')
+  assert.equal(catalog.body.data[0].name_en, '30-day subscription')
+  assert.equal(catalog.body.data[0].description_en, 'Standard subscription product')
   assert.equal(catalog.body.data[0].icon_url, 'https://cdn.example.com/sub-30.png')
   assert.equal(catalog.body.data[0].created_by, undefined)
   assert.equal(catalog.body.data[0].status, undefined)
@@ -226,6 +276,7 @@ databaseTest('HTTP flow exchanges identity, generates, redeems, and lists record
   assert.equal(redeemed.body.data.status, 'succeeded')
   assert.equal(redeemed.body.data.user_id, 7001)
   assert.equal(redeemed.body.data.product_name, '30 天订阅')
+  assert.equal(redeemed.body.data.product_name_en, '30-day subscription')
 
   const history = await jsonRequest(baseURL, '/api/my-redemptions', {
     headers: { Authorization: authorization.Authorization },
@@ -233,6 +284,7 @@ databaseTest('HTTP flow exchanges identity, generates, redeems, and lists record
   assert.equal(history.body.data.total, 1)
   assert.equal(history.body.data.items[0].campaign, '=http-test')
   assert.equal(history.body.data.items[0].product_sku, 'SUB-30')
+  assert.equal(history.body.data.items[0].product_name_en, '30-day subscription')
 
   const records = await jsonRequest(baseURL, '/api/admin/redemptions?search=7001')
   assert.equal(records.body.data.total, 1)

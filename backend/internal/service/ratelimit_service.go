@@ -30,13 +30,35 @@ type RateLimitService struct {
 	settingService        *SettingService
 	tokenCacheInvalidator TokenCacheInvalidator
 	runtimeBlocker        AccountRuntimeBlocker
+	tempRecoveryRuntime   sync.Map
 	usageCacheMu          sync.RWMutex
 	usageCache            map[int64]*geminiUsageCacheEntry
+
+	// OpenAI Team 联动熔断的进程内去重：teamID → 去重窗口截止时间
+	openaiTeamLinkedMu     sync.Mutex
+	openaiTeamLinkedRecent map[string]time.Time
 }
 
 type AccountRuntimeBlocker interface {
 	BlockAccountScheduling(account *Account, until time.Time, reason string)
 	ClearAccountSchedulingBlock(accountID int64)
+}
+
+type AccountRuntimeBlockGenerationGuard interface {
+	AccountSchedulingBlockGeneration(accountID int64) (uint64, bool)
+	ClearAccountSchedulingBlockIfGeneration(accountID int64, generation uint64) bool
+}
+
+type capturedRuntimeBlockGeneration struct {
+	guard      AccountRuntimeBlockGenerationGuard
+	accountID  int64
+	generation uint64
+	captured   bool
+}
+
+type pendingTempRecoveryRuntime struct {
+	cacheGeneration string
+	runtime         capturedRuntimeBlockGeneration
 }
 
 // SuccessfulTestRecoveryResult 表示测试成功后恢复了哪些运行时状态。
@@ -268,6 +290,9 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 // 返回是否应该停止该账号的调度
 func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) (shouldDisable bool) {
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
+	// Team 联动熔断必须先于池模式/自定义错误码/临时不可调度的各类早退；
+	// 同请求内与 fastpath 调用点的重复触发由方法内去重吸收。
+	s.maybeHandleOpenAITeamLinkedError(ctx, account, statusCode, responseBody)
 	customErrorCodesEnabled := account.IsCustomErrorCodesEnabled()
 
 	// 池模式默认不标记本地账号状态；但管理员显式配置的临时不可调度规则优先。
@@ -436,6 +461,13 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			shouldDisable = true
 		}
 	case 402:
+		// 国产供应商：余额不足是可恢复状态（充值/检测恢复后由周期任务自动解除），
+		// 不能走 handleAuthError 永久置 status=error。改为可恢复的临时停调。
+		if account.IsCNProvider() {
+			s.handleCNProviderInsufficientBalance(ctx, account, upstreamMsg)
+			shouldDisable = true
+			break
+		}
 		// OpenAI: deactivated_workspace 表示工作区已停用，直接标记 error
 		if account.Platform == PlatformOpenAI && gjson.GetBytes(responseBody, "detail.code").String() == "deactivated_workspace" {
 			msg := "Workspace deactivated (402): workspace has been deactivated"
@@ -899,7 +931,10 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 	if account.Platform == PlatformAntigravity {
 		return s.handleAntigravity403(ctx, account, upstreamMsg, responseBody)
 	}
-	if account.Platform == PlatformOpenAI {
+	// 国产供应商与 openai 同口径:HTML 403(CDN/代理拦截页)不构成账号失效证据,
+	// 且 403 在 failover 状态集里会被逐账号重放——直接 SetError 会让一个坏请求/
+	// 一层坏代理连环永久禁用整组账号。走 HTML 豁免 + N 次累计 + 临时冷却。
+	if account.Platform == PlatformOpenAI || IsCNProvider(account.Platform) {
 		return s.handleOpenAI403(ctx, account, upstreamMsg, responseBody)
 	}
 	// 非 Antigravity 平台：保持原有行为
@@ -914,6 +949,28 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 }
 
 func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) (shouldDisable bool) {
+	// 上游代理 / CDN 在请求到达 OpenAI API 之前就拦下时，回的是 HTML 403 页面而不是
+	// {"error":{...}} 结构化错误。这类响应描述的是「这条链路 / 这个端点被挡了」，
+	// 不构成账号凭据或权限失效的证据——例如无效的 /v1/responses 子路径（#5334）。
+	//
+	// 据此写账号状态会把请求级错误放大成账号级处罚：首次即 temp-unschedulable，
+	// 连续 openAI403DisableThreshold 次直接永久禁用；而 403 又在 failover 状态集里，
+	// 同一个坏请求会被逐个账号重放，足以把整组账号打下线。
+	//
+	// 与既有口径一致：count_tokens 路径的 isOpenAIOAuthInputTokensUnsupported 已把
+	// 「HTML 403 page without a structured error」按端点级响应处理；
+	// shouldApplyOpenAIAlphaSearchAccountErrorSideEffects 的不变式也是端点级错误
+	// 只换号、不写账号错误状态。这里只跳过账号处罚，不改变 failover 行为——
+	// 换个走不同代理的账号仍有可能成功。
+	if isHTMLResponse(responseBody) {
+		slog.Warn(
+			"openai_403_html_body_skips_account_penalty",
+			"account_id", account.ID,
+			"upstream_message", upstreamMsg,
+		)
+		return false
+	}
+
 	msg := buildForbiddenErrorMessage(
 		"Access forbidden (403):",
 		upstreamMsg,
@@ -1025,6 +1082,13 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// QueryUsage→persistOpenAICodexProbeSnapshot 维护,枯竭由调度守卫处理。
 	if account.IsShadow() {
 		return
+	}
+	// 国产供应商（kimi/zhipu/deepseek）的 429 走专用可恢复路径：余额不足 → 临时停调，
+	// Coding Plan 窗口耗尽 → 冷却到快照重置点。未命中则继续默认 429 逻辑。
+	if account.IsCNProvider() {
+		if s.applyCNProviderReactive429(ctx, account, headers, responseBody) {
+			return
+		}
 	}
 	// 1. OpenAI 平台：优先尝试解析 x-codex-* 响应头（用于 rate_limit_exceeded）
 	if account.Platform == PlatformOpenAI {
@@ -1846,6 +1910,93 @@ func (s *RateLimitService) ClearRateLimit(ctx context.Context, accountID int64) 
 	return nil
 }
 
+// ClearAccountRateLimitConditionally is the precise administrative operation:
+// it clears only account-level rate-limit and overload columns. Model limits,
+// quota scopes, temporary isolation, and manual scheduling state are untouched.
+func (s *RateLimitService) ClearAccountRateLimitConditionally(ctx context.Context, accountID int64, precondition AccountStatePrecondition) error {
+	if precondition.Empty() {
+		return s.ClearRateLimit(ctx, accountID)
+	}
+	conditionalRepo, ok := s.accountRepo.(ConditionalAccountStateRepository)
+	if !ok {
+		return ErrAccountConditionalUpdateUnavailable
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if err := accountMatchesStatePrecondition(account, precondition); err != nil {
+		return err
+	}
+	runtimeGeneration := captureRuntimeBlockGeneration(s.runtimeBlocker, account, false, true, false)
+	updated, err := conditionalRepo.ClearAccountRateLimitIf(ctx, accountID, precondition)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return ErrAccountStateChanged
+	}
+	runtimeGeneration.clearIfUnchanged()
+	return nil
+}
+
+// RecoverAccountStateConditionally is the precise administrative unified
+// recovery operation. It intentionally excludes temporary isolation, model
+// limits, quota scopes, and the manual schedulable switch.
+func (s *RateLimitService) RecoverAccountStateConditionally(ctx context.Context, accountID int64, precondition AccountStatePrecondition, invalidateToken bool) (*SuccessfulTestRecoveryResult, error) {
+	if precondition.Empty() {
+		return s.RecoverAccountState(ctx, accountID, AccountRecoveryOptions{InvalidateToken: invalidateToken})
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if err := accountMatchesStatePrecondition(account, precondition); err != nil {
+		return nil, err
+	}
+
+	clearError := account.Status == StatusError
+	clearRateLimit := hasAccountLevelRecoverableState(account)
+	result := &SuccessfulTestRecoveryResult{
+		ClearedError:     clearError,
+		ClearedRateLimit: clearRateLimit,
+	}
+	if !clearError && !clearRateLimit {
+		return result, nil
+	}
+
+	// If a conditional caller supplied semantic fields but omitted updated_at,
+	// still protect the read/update gap against a concurrent re-arm.
+	effectivePrecondition := precondition
+	if effectivePrecondition.ExpectedUpdatedAt == nil {
+		expectedUpdatedAt := account.UpdatedAt
+		effectivePrecondition.ExpectedUpdatedAt = &expectedUpdatedAt
+	}
+	conditionalRepo, ok := s.accountRepo.(ConditionalAccountStateRepository)
+	if !ok {
+		return nil, ErrAccountConditionalUpdateUnavailable
+	}
+	runtimeGeneration := captureRuntimeBlockGeneration(
+		s.runtimeBlocker,
+		account,
+		clearError,
+		clearRateLimit,
+		false,
+	)
+	updated, updateErr := conditionalRepo.RecoverAccountStateIf(ctx, accountID, clearError, clearRateLimit, effectivePrecondition)
+	if updateErr != nil {
+		return nil, updateErr
+	}
+	if !updated {
+		return nil, ErrAccountStateChanged
+	}
+
+	if clearError || clearRateLimit {
+		runtimeGeneration.clearIfUnchanged()
+	}
+	return result, nil
+}
+
 func (s *RateLimitService) ResetOpenAI403Counter(ctx context.Context, accountID int64) {
 	if s == nil || s.openAI403CounterCache == nil || accountID <= 0 {
 		return
@@ -1914,6 +2065,200 @@ func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID
 	return nil
 }
 
+// ClearTempUnschedulableConditionally clears only the observed temporary
+// isolation generation. It does not clear model-level rate limits.
+func (s *RateLimitService) ClearTempUnschedulableConditionally(ctx context.Context, accountID int64, precondition AccountStatePrecondition) error {
+	if precondition.Empty() {
+		return s.ClearTempUnschedulable(ctx, accountID)
+	}
+	conditionalRepo, ok := s.accountRepo.(ConditionalAccountStateRepository)
+	if !ok {
+		return ErrAccountConditionalUpdateUnavailable
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	// A previous attempt may have committed the DB CAS but failed to remove the
+	// cache. Retrying the same idempotent request may finish that cleanup only
+	// while the DB remains clear; the cache token protects a concurrent re-arm.
+	if account.TempUnschedulableUntil == nil && precondition.ExpectedTempUnschedulableUntil != nil {
+		return s.clearTempUnschedCacheAfterCommittedDBClear(ctx, accountID)
+	}
+	if err := accountMatchesStatePrecondition(account, precondition); err != nil {
+		return err
+	}
+	if account.TempUnschedulableUntil == nil {
+		return ErrAccountStateChanged
+	}
+	var conditionalCache ConditionalTempUnschedCache
+	observedCacheGeneration := ""
+	if s.tempUnschedCache != nil {
+		var supported bool
+		conditionalCache, supported = s.tempUnschedCache.(ConditionalTempUnschedCache)
+		if !supported {
+			return ErrAccountConditionalUpdateUnavailable
+		}
+		cachedState, cacheErr := s.tempUnschedCache.GetTempUnsched(ctx, accountID)
+		if cacheErr != nil {
+			return cacheErr
+		}
+		if cachedState != nil {
+			if cachedState.Generation == "" {
+				return ErrAccountConditionalUpdateUnavailable
+			}
+			observedCacheGeneration = cachedState.Generation
+		}
+	}
+	runtimeGeneration := captureRuntimeBlockGeneration(s.runtimeBlocker, account, false, false, true)
+	updated, err := conditionalRepo.ClearTempUnschedulableIf(ctx, accountID, precondition)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return ErrAccountStateChanged
+	}
+	if conditionalCache != nil {
+		deleted, deleteErr := conditionalCache.DeleteTempUnschedIfObserved(
+			ctx,
+			accountID,
+			observedCacheGeneration,
+		)
+		if deleteErr != nil {
+			s.rememberPendingTempRecoveryRuntime(accountID, observedCacheGeneration, runtimeGeneration)
+			return deleteErr
+		}
+		if !deleted {
+			return ErrAccountStateChanged
+		}
+	}
+	s.tempRecoveryRuntime.Delete(accountID)
+	runtimeGeneration.clearIfUnchanged()
+	return nil
+}
+
+func (s *RateLimitService) clearTempUnschedCacheAfterCommittedDBClear(ctx context.Context, accountID int64) error {
+	if s.tempUnschedCache == nil {
+		return nil
+	}
+	conditionalCache, ok := s.tempUnschedCache.(ConditionalTempUnschedCache)
+	if !ok {
+		return ErrAccountConditionalUpdateUnavailable
+	}
+	cachedState, err := s.tempUnschedCache.GetTempUnsched(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if cachedState == nil {
+		s.takePendingTempRecoveryRuntime(accountID, "").clearIfUnchanged()
+		return nil
+	}
+	if cachedState.Generation == "" {
+		return ErrAccountConditionalUpdateUnavailable
+	}
+
+	// Fault writers persist DB state before publishing the cache generation.
+	// Re-check after observing the token so a concurrent DB re-arm fails closed.
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if account.TempUnschedulableUntil != nil {
+		return ErrAccountStateChanged
+	}
+	deleted, err := conditionalCache.DeleteTempUnschedIfObserved(ctx, accountID, cachedState.Generation)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return ErrAccountStateChanged
+	}
+	s.takePendingTempRecoveryRuntime(accountID, cachedState.Generation).clearIfUnchanged()
+	return nil
+}
+
+func (s *RateLimitService) rememberPendingTempRecoveryRuntime(
+	accountID int64,
+	cacheGeneration string,
+	runtime capturedRuntimeBlockGeneration,
+) {
+	if s == nil || accountID <= 0 || cacheGeneration == "" || !runtime.captured {
+		return
+	}
+	s.tempRecoveryRuntime.Store(accountID, pendingTempRecoveryRuntime{
+		cacheGeneration: cacheGeneration,
+		runtime:         runtime,
+	})
+}
+
+func (s *RateLimitService) takePendingTempRecoveryRuntime(
+	accountID int64,
+	cacheGeneration string,
+) capturedRuntimeBlockGeneration {
+	if s == nil || accountID <= 0 {
+		return capturedRuntimeBlockGeneration{}
+	}
+	value, ok := s.tempRecoveryRuntime.LoadAndDelete(accountID)
+	if !ok {
+		return capturedRuntimeBlockGeneration{}
+	}
+	pending, ok := value.(pendingTempRecoveryRuntime)
+	if !ok || (cacheGeneration != "" && pending.cacheGeneration != cacheGeneration) {
+		return capturedRuntimeBlockGeneration{}
+	}
+	return pending.runtime
+}
+
+func captureRuntimeBlockGeneration(
+	blocker AccountRuntimeBlocker,
+	account *Account,
+	clearError bool,
+	clearRateLimit bool,
+	clearTempUnschedulable bool,
+) capturedRuntimeBlockGeneration {
+	guard, ok := blocker.(AccountRuntimeBlockGenerationGuard)
+	if !ok || account == nil || hasUnclearedRuntimeRecoveryState(
+		account,
+		clearError,
+		clearRateLimit,
+		clearTempUnschedulable,
+	) {
+		return capturedRuntimeBlockGeneration{}
+	}
+	generation, captured := guard.AccountSchedulingBlockGeneration(account.ID)
+	return capturedRuntimeBlockGeneration{
+		guard:      guard,
+		accountID:  account.ID,
+		generation: generation,
+		captured:   captured,
+	}
+}
+
+func (c capturedRuntimeBlockGeneration) clearIfUnchanged() {
+	if c.captured && c.guard != nil {
+		c.guard.ClearAccountSchedulingBlockIfGeneration(c.accountID, c.generation)
+	}
+}
+
+func hasUnclearedRuntimeRecoveryState(
+	account *Account,
+	clearError bool,
+	clearRateLimit bool,
+	clearTempUnschedulable bool,
+) bool {
+	if account.Status == StatusError && !clearError {
+		return true
+	}
+	if hasAccountLevelRecoverableState(account) && !clearRateLimit {
+		return true
+	}
+	if account.TempUnschedulableUntil != nil && !clearTempUnschedulable {
+		return true
+	}
+	return hasNonEmptyMapValue(account.Extra, "model_rate_limits") ||
+		hasNonEmptyMapValue(account.Extra, "antigravity_quota_scopes")
+}
+
 func hasRecoverableRuntimeState(account *Account) bool {
 	if account == nil {
 		return false
@@ -1926,6 +2271,10 @@ func hasRecoverableRuntimeState(account *Account) bool {
 	}
 	return hasNonEmptyMapValue(account.Extra, "model_rate_limits") ||
 		hasNonEmptyMapValue(account.Extra, "antigravity_quota_scopes")
+}
+
+func hasAccountLevelRecoverableState(account *Account) bool {
+	return account != nil && (account.RateLimitedAt != nil || account.RateLimitResetAt != nil || account.OverloadUntil != nil)
 }
 
 func hasNonEmptyMapValue(extra map[string]any, key string) bool {
@@ -1947,16 +2296,6 @@ func hasNonEmptyMapValue(extra map[string]any, key string) bool {
 
 func (s *RateLimitService) GetTempUnschedStatus(ctx context.Context, accountID int64) (*TempUnschedState, error) {
 	now := time.Now().Unix()
-	if s.tempUnschedCache != nil {
-		state, err := s.tempUnschedCache.GetTempUnsched(ctx, accountID)
-		if err != nil {
-			return nil, err
-		}
-		if state != nil && state.UntilUnix > now {
-			return state, nil
-		}
-	}
-
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -1981,12 +2320,6 @@ func (s *RateLimitService) GetTempUnschedStatus(ctx context.Context, accountID i
 			state = &parsed
 		} else {
 			state.ErrorMessage = account.TempUnschedulableReason
-		}
-	}
-
-	if s.tempUnschedCache != nil {
-		if err := s.tempUnschedCache.SetTempUnsched(ctx, accountID, state); err != nil {
-			slog.Warn("temp_unsched_cache_set_failed", "account_id", accountID, "error", err)
 		}
 	}
 

@@ -327,6 +327,7 @@ export interface AutomationRule {
   trigger_rule_key: 'account.unavailable'
   action: AutomationAction
   mode: 'recommend' | 'execute'
+  reason_match_mode: 'any' | 'all'
   reason_filters: string[]
   cooldown_seconds: number
   created_at: string
@@ -342,7 +343,7 @@ export interface AutomationExecution {
   external_account_id: string
   action: AutomationAction
   mode: 'recommend' | 'execute'
-  status: 'recommended' | 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped'
+  status: 'recommended' | 'approved' | 'queued' | 'running' | 'applied' | 'verified' | 'verification_failed' | 'skipped_stale' | 'skipped_unverifiable' | 'cancelled' | 'failed' | 'succeeded' | 'skipped'
   attempts: number
   result: Record<string, unknown>
   last_error?: string | null

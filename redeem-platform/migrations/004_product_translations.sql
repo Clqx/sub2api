@@ -1,0 +1,3 @@
+ALTER TABLE products
+  ADD COLUMN name_en TEXT NOT NULL DEFAULT '',
+  ADD COLUMN description_en TEXT NOT NULL DEFAULT '';

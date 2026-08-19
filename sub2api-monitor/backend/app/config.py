@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     worker_stale_seconds: int = Field(default=60, ge=10, le=3600)
     history_retention_days: int = Field(default=30, ge=1, le=3650)
     maintenance_interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    automation_verification_timeout_seconds: int = Field(default=300, ge=30, le=86_400)
     cost_routing_decision_retention_days: int = Field(default=30, ge=1, le=365)
     producer_id: str = "hub-worker"
     log_level: str = "INFO"

@@ -87,6 +87,7 @@ from app.security import (
     login_throttle,
     revoke_session_token,
 )
+from app.services.automation import approve_recommendation
 from app.services.monitoring import (
     account_connector,
     channel_payload,
@@ -1408,19 +1409,10 @@ async def approve_automation_execution(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "automation execution not found")
     if execution.status not in {"recommended", "failed"}:
         raise HTTPException(status.HTTP_409_CONFLICT, "execution cannot be queued from its state")
-    execution.mode = "execute"
-    execution.status = "queued"
-    execution.last_error = None
-    execution.finished_at = None
-    session.add(
-        AuditEvent(
-            actor=user.username,
-            action="automation.execution.approve",
-            target_id=execution.target_id,
-            details={"execution_id": execution.id, "action": execution.action},
-        )
-    )
+    approved, reason = await approve_recommendation(session, execution, actor=user.username)
     await session.commit()
+    if not approved:
+        raise HTTPException(status.HTTP_409_CONFLICT, reason)
     await session.refresh(execution)
     return execution
 

@@ -298,6 +298,7 @@ class AccountCurrent(Base):
     overload_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     temp_unschedulable_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_observation_id: Mapped[str | None] = mapped_column(String(36))
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -539,6 +540,7 @@ class AutomationRule(Base):
     action: Mapped[str] = mapped_column(String(50), nullable=False)
     mode: Mapped[str] = mapped_column(String(20), default="recommend", nullable=False)
     reason_filters: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    reason_match_mode: Mapped[str] = mapped_column(String(10), default="any", nullable=False)
     cooldown_seconds: Mapped[int] = mapped_column(Integer, default=900, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

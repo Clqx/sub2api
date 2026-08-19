@@ -10,10 +10,40 @@ import (
 )
 
 var (
-	ErrAccountNotFound      = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
-	ErrAccountNilInput      = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
-	ErrAccountNotInFallback = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
+	ErrAccountNotFound                     = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
+	ErrAccountNilInput                     = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
+	ErrAccountNotInFallback                = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
+	ErrAccountStateChanged                 = infraerrors.Conflict("ACCOUNT_STATE_CHANGED", "account state changed since it was observed")
+	ErrAccountConditionalUpdateUnavailable = infraerrors.ServiceUnavailable(
+		"ACCOUNT_CONDITIONAL_UPDATE_UNAVAILABLE",
+		"conditional account state updates are unavailable",
+	)
 )
+
+// AccountStatePrecondition protects an administrative state mutation from
+// applying to a newer account snapshot. Zero values mean that no condition was
+// supplied, preserving compatibility with existing callers.
+type AccountStatePrecondition struct {
+	ExpectedUpdatedAt              *time.Time
+	ExpectedStatus                 *string
+	ExpectedSchedulable            *bool
+	ExpectedTempUnschedulableUntil *time.Time
+}
+
+func (p AccountStatePrecondition) Empty() bool {
+	return p.ExpectedUpdatedAt == nil && p.ExpectedStatus == nil && p.ExpectedSchedulable == nil && p.ExpectedTempUnschedulableUntil == nil
+}
+
+// ConditionalAccountStateRepository is kept separate from AccountRepository so
+// existing gateway/test implementations do not need to implement admin-only
+// compare-and-set operations.
+type ConditionalAccountStateRepository interface {
+	ClearErrorIf(ctx context.Context, id int64, precondition AccountStatePrecondition) (bool, error)
+	ClearAccountRateLimitIf(ctx context.Context, id int64, precondition AccountStatePrecondition) (bool, error)
+	RecoverAccountStateIf(ctx context.Context, id int64, clearError, clearRateLimit bool, precondition AccountStatePrecondition) (bool, error)
+	SetSchedulableIf(ctx context.Context, id int64, schedulable bool, precondition AccountStatePrecondition) (bool, error)
+	ClearTempUnschedulableIf(ctx context.Context, id int64, precondition AccountStatePrecondition) (bool, error)
+}
 
 const AccountListGroupUngrouped int64 = -1
 const AccountPrivacyModeUnsetFilter = "__unset__"
@@ -166,6 +196,9 @@ type AccountBulkUpdate struct {
 	Credentials    map[string]any
 	Extra          map[string]any
 	ProbeEnabled   *bool
+	// EnsureCodexFingerprintSeed asks the repository to atomically preserve an
+	// existing valid Codex fingerprint seed or create one for eligible rows.
+	EnsureCodexFingerprintSeed bool
 }
 
 // CreateAccountRequest 创建账号请求
@@ -233,7 +266,7 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		Platform:    req.Platform,
 		Type:        req.Type,
 		Credentials: SanitizeStoredCredentials(req.Platform, req.Credentials),
-		Extra:       req.Extra,
+		Extra:       prepareCodexFingerprintExtraForCreate(req.Platform, req.Type, req.Extra),
 		ProxyID:     req.ProxyID,
 		Concurrency: req.Concurrency,
 		Priority:    req.Priority,
@@ -336,7 +369,9 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		delete(extra, OllamaCloudUsageSessionExtraKey)
 		delete(extra, OllamaCloudUsageAutoRefreshExtraKey)
 		delete(extra, OllamaCloudUsageSnapshotExtraKey)
-		account.Extra = extra
+		account.Extra = prepareCodexFingerprintExtraForUpdate(account, extra)
+	} else {
+		account.Extra = prepareCodexFingerprintExtraForUpdate(account, account.Extra)
 	}
 
 	if req.ProxyID != nil {
@@ -508,6 +543,9 @@ func (s *AccountService) TestCredentials(ctx context.Context, id int64) error {
 		return nil
 	case PlatformGrok:
 		// Grok OAuth credentials are validated via token exchange/refresh and request-path probes.
+		return nil
+	case PlatformKimi, PlatformZhipu, PlatformDeepseek:
+		// 国产 OpenAI 兼容供应商：凭证为 API Key，实际可用性经余额/额度探测与转发路径验证。
 		return nil
 	default:
 		return fmt.Errorf("unsupported platform: %s", account.Platform)

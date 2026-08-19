@@ -31,22 +31,32 @@ def test_upstream_billing_interval_matches_target_contract() -> None:
         UpstreamBillingSettings(enabled=True, interval_minutes=4)
 
 
-def test_execution_automation_requires_explicit_side_effect_confirmation() -> None:
+def test_fault_automation_cannot_enable_unattended_execution() -> None:
     with pytest.raises(ValidationError):
         AutomationRuleCreate(
             name="recover",
             enabled=True,
-            action="recover_state",
+            action="clear_error",
             mode="execute",
+            reason_filters=["status:error"],
         )
-    rule = AutomationRuleCreate(
+    with pytest.raises(ValidationError, match="manual approval"):
+        AutomationRuleCreate(
+            name="recover",
+            enabled=True,
+            action="clear_error",
+            mode="execute",
+            reason_filters=["status:error"],
+            confirm_side_effects=True,
+        )
+    legacy_disabled_rule = AutomationRuleCreate(
         name="recover",
-        enabled=True,
+        enabled=False,
         action="recover_state",
         mode="execute",
-        confirm_side_effects=True,
+        reason_filters=["status:error"],
     )
-    assert rule.enabled
+    assert not legacy_disabled_rule.enabled
 
 
 def test_notification_contract_distinguishes_ntfy_and_webhook() -> None:

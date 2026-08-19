@@ -1,3 +1,5 @@
+import { createTranslator, localizedError, resolveLocale } from './user-i18n.js'
+
 const SESSION_KEY = 'sub2api.redeem.session'
 
 const authState = document.querySelector('#authState')
@@ -17,19 +19,31 @@ const refreshHistory = document.querySelector('#refreshHistory')
 const productList = document.querySelector('#productList')
 const productEmpty = document.querySelector('#productEmpty')
 
+const entryURL = new URL(window.location.href)
+const locale = resolveLocale(entryURL.searchParams.get('lang'), navigator.language)
+const intlLocale = locale === 'zh' ? 'zh-CN' : 'en-US'
+const t = createTranslator(locale)
 let sessionToken = sessionStorage.getItem(SESSION_KEY) || ''
 
-const entryURL = new URL(window.location.href)
+document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'
+document.title = t('pageTitle')
+document.querySelectorAll('[data-i18n]').forEach((element) => {
+  element.textContent = t(element.dataset.i18n)
+})
+document.querySelectorAll('[data-i18n-aria-label]').forEach((element) => {
+  element.setAttribute('aria-label', t(element.dataset.i18nAriaLabel))
+})
+
 if (entryURL.searchParams.get('ui_mode') === 'embedded' || window.self !== window.top) {
   document.body.classList.add('embedded')
 }
 
 const statusLabels = {
-  pending: '等待处理',
-  processing: '处理中',
-  retryable: '等待重试',
-  succeeded: '兑换成功',
-  failed: '处理失败',
+  pending: t('statusPending'),
+  processing: t('statusProcessing'),
+  retryable: t('statusRetryable'),
+  succeeded: t('statusSucceeded'),
+  failed: t('statusFailed'),
 }
 
 function escapeHTML(value) {
@@ -45,7 +59,7 @@ function formatDate(value) {
   if (!value) return '-'
   const date = new Date(value)
   if (!Number.isFinite(date.getTime())) return '-'
-  return new Intl.DateTimeFormat('zh-CN', {
+  return new Intl.DateTimeFormat(intlLocale, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -55,14 +69,14 @@ function formatDate(value) {
 
 function benefitText(item) {
   if (item.benefit_type === 'subscription') {
-    return `订阅续期 ${Number(item.validity_days || 0)} 天`
+    return t('subscriptionBenefit', { days: Number(item.validity_days || 0) })
   }
-  return `余额充值 ${item.value}`
+  return t('balanceBenefit', { value: item.value })
 }
 
 function formatPrice(item) {
   try {
-    return new Intl.NumberFormat('zh-CN', {
+    return new Intl.NumberFormat(intlLocale, {
       style: 'currency',
       currency: item.currency,
       minimumFractionDigits: 0,
@@ -94,8 +108,9 @@ async function request(path, options = {}) {
   const response = await fetch(path, { ...options, headers })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const error = new Error(body.message || '请求未完成，请稍后重试')
-    error.reason = body.reason || ''
+    const reason = body.reason || ''
+    const error = new Error(localizedError(locale, reason, body.message, t('requestFailed')))
+    error.reason = reason
     error.status = response.status
     throw error
   }
@@ -103,7 +118,7 @@ async function request(path, options = {}) {
 }
 
 function showIdentity(user) {
-  const displayName = user.username || user.email || `用户 ${user.id}`
+  const displayName = user.username || user.email || t('userWithId', { id: user.id })
   identityName.textContent = displayName
   identityEmail.textContent = user.email || `ID ${user.id}`
   identityAvatar.textContent = displayName.trim().charAt(0).toUpperCase() || 'U'
@@ -112,12 +127,15 @@ function showIdentity(user) {
 
 function showResult(redemption) {
   const succeeded = redemption.status === 'succeeded'
+  const productName = locale === 'en' && redemption.product_name_en
+    ? redemption.product_name_en
+    : redemption.product_name
   redemptionResult.className = `redemption-result ${succeeded ? 'success' : 'pending'}`
   redemptionResult.innerHTML = `
     <span class="result-icon" aria-hidden="true">${succeeded ? '✓' : '…'}</span>
     <div>
-      <strong>${succeeded ? '兑换成功' : '兑换请求已受理'}</strong>
-      <p>${redemption.product_name ? `${escapeHTML(redemption.product_name)}，` : ''}${escapeHTML(benefitText(redemption))}${succeeded ? '，权益已经发放到账户。' : '，系统正在自动处理。'}</p>
+      <strong>${succeeded ? t('statusSucceeded') : t('redeemAccepted')}</strong>
+      <p>${productName ? `${escapeHTML(productName)}${locale === 'zh' ? '，' : ': '}` : ''}${escapeHTML(benefitText(redemption))}${succeeded ? t('benefitDelivered') : t('processingAutomatically')}</p>
     </div>
   `
   redemptionResult.hidden = false
@@ -128,6 +146,9 @@ function renderHistory(result) {
   historyEmpty.hidden = items.length > 0
   historyList.replaceChildren()
   for (const item of items) {
+    const productName = locale === 'en' && item.product_name_en
+      ? item.product_name_en
+      : item.product_name
     const article = document.createElement('article')
     article.className = 'history-item'
     article.innerHTML = `
@@ -136,7 +157,7 @@ function renderHistory(result) {
       </span>
       <div class="history-copy">
         <div>
-          <strong>${escapeHTML(item.product_name || benefitText(item))}</strong>
+          <strong>${escapeHTML(productName || benefitText(item))}</strong>
           <span class="status-badge ${escapeHTML(item.status)}">${escapeHTML(statusLabels[item.status] || item.status)}</span>
         </div>
         <p>
@@ -154,26 +175,30 @@ function renderProducts(items) {
   productList.replaceChildren()
   productEmpty.hidden = items.length > 0
   for (const item of items) {
+    const productName = locale === 'en' && item.name_en ? item.name_en : item.name
+    const productDescription = locale === 'en' && item.description_en
+      ? item.description_en
+      : item.description
     const article = document.createElement('article')
     article.className = 'product-card'
     article.innerHTML = `
       <div class="product-card-heading">
         <span class="product-icon" aria-hidden="true">
-          <span>${escapeHTML(item.name.slice(0, 1).toUpperCase())}</span>
+          <span>${escapeHTML(productName.slice(0, 1).toUpperCase())}</span>
           ${item.icon_url ? `<img src="${escapeHTML(item.icon_url)}" alt="">` : ''}
         </span>
         <div class="product-title-copy">
           <small>${escapeHTML(item.sku)}</small>
-          <h3>${escapeHTML(item.name)}</h3>
+          <h3>${escapeHTML(productName)}</h3>
         </div>
         <strong class="product-price">${escapeHTML(formatPrice(item))}</strong>
       </div>
-      <p class="product-description">${escapeHTML(item.description)}</p>
+      <p class="product-description">${escapeHTML(productDescription)}</p>
       <div class="product-card-footer">
         <span>${escapeHTML(benefitText(item))}</span>
         ${item.purchase_url
-          ? `<a class="primary-button product-buy" href="${escapeHTML(item.purchase_url)}" target="_blank" rel="noopener noreferrer">前往购买 <span aria-hidden="true">↗</span></a>`
-          : '<button class="secondary-button product-buy" type="button" disabled>暂未开放</button>'}
+          ? `<a class="primary-button product-buy" href="${escapeHTML(item.purchase_url)}" target="_blank" rel="noopener noreferrer">${t('buy')} <span aria-hidden="true">↗</span></a>`
+          : `<button class="secondary-button product-buy" type="button" disabled>${t('unavailable')}</button>`}
       </div>
     `
     const icon = article.querySelector('img')
@@ -187,7 +212,7 @@ async function loadProducts() {
     renderProducts(await request('/api/products'))
   } catch (error) {
     if (error.status === 401) throw error
-    productList.innerHTML = '<p class="inline-error">商品暂时无法加载</p>'
+    productList.innerHTML = `<p class="inline-error">${t('productsLoadFailed')}</p>`
   }
 }
 
@@ -198,11 +223,11 @@ async function loadHistory() {
   } catch (error) {
     if (error.status === 401) {
       sessionStorage.removeItem(SESSION_KEY)
-      setAuthMessage('登录状态已失效', '请从 Sub2API 用户中心重新进入兑换页面', true)
+      setAuthMessage(t('sessionExpiredTitle'), t('sessionExpiredDetail'), true)
       userContent.hidden = true
     } else {
       historyEmpty.hidden = false
-      historyList.innerHTML = '<p class="inline-error">兑换记录暂时无法加载</p>'
+      historyList.innerHTML = `<p class="inline-error">${t('historyLoadFailed')}</p>`
     }
   } finally {
     refreshHistory.disabled = false
@@ -237,7 +262,7 @@ async function establishSession() {
   }
 
   if (!sessionToken) {
-    throw Object.assign(new Error('请从 Sub2API 用户中心进入兑换页面'), {
+    throw Object.assign(new Error(t('enterFromSub2api')), {
       reason: 'SESSION_REQUIRED',
     })
   }
@@ -250,14 +275,14 @@ redeemForm.addEventListener('submit', async (event) => {
   redemptionResult.hidden = true
   const code = redeemCode.value.trim()
   if (!code) {
-    redeemError.textContent = '请输入兑换码'
+    redeemError.textContent = t('codeRequired')
     redeemError.hidden = false
     redeemCode.focus()
     return
   }
 
   redeemButton.disabled = true
-  redeemButton.textContent = '正在兑换'
+  redeemButton.textContent = t('redeeming')
   try {
     const redemption = await request('/api/redeem', {
       method: 'POST',
@@ -271,7 +296,7 @@ redeemForm.addEventListener('submit', async (event) => {
     redeemError.hidden = false
   } finally {
     redeemButton.disabled = false
-    redeemButton.textContent = '确认兑换'
+    redeemButton.textContent = t('redeemAction')
   }
 })
 
@@ -292,8 +317,8 @@ try {
   sessionStorage.removeItem(SESSION_KEY)
   sessionToken = ''
   setAuthMessage(
-    error.reason === 'SESSION_REQUIRED' ? '需要登录' : '无法确认账户',
-    error.message || '请从 Sub2API 用户中心重新进入',
+    error.reason === 'SESSION_REQUIRED' ? t('loginRequired') : t('accountFailed'),
+    error.message || t('reenterFromSub2api'),
     true,
   )
 }

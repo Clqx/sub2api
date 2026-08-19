@@ -6,11 +6,11 @@ The target Admin API key is a global full-privilege credential. The monitor ther
 
 | Monitor action | Target Admin API | Intended condition |
 |---|---|---|
-| `recover_state` | `POST /api/v1/admin/accounts/:id/recover-state` | Recover error, rate-limit, overload, temporary-unschedulable, and related runtime state through Sub2API's unified recovery service. |
-| `clear_error` | `POST /api/v1/admin/accounts/:id/clear-error` | Clear a persisted account error after external verification. |
+| `recover_state` | `POST /api/v1/admin/accounts/:id/recover-state` | Legacy read/audit compatibility only; new enabled rules cannot use this broad action. The conditional API clears only error and account-level rate-limit/overload state. |
+| `clear_error` | `POST /api/v1/admin/accounts/:id/clear-error` | Clear the specifically observed persisted account error after operator approval. |
 | `clear_rate_limit` | `POST /api/v1/admin/accounts/:id/clear-rate-limit` | Clear a stale rate-limit state. |
 | `clear_temp_unschedulable` | `DELETE /api/v1/admin/accounts/:id/temp-unschedulable` | Remove a stale temporary quarantine. |
-| `set_schedulable` | `POST /api/v1/admin/accounts/:id/schedulable` | Re-enable an account that was incorrectly left unschedulable. |
+| `set_schedulable` | `POST /api/v1/admin/accounts/:id/schedulable` | Legacy read/audit compatibility only; new enabled rules cannot change manual scheduling state. |
 | Cost routing priority | `PUT /api/v1/admin/accounts/:id` with a priority-only body | Reconcile OpenAI API-key scheduling order from fresh effective upstream cost and availability. |
 
 The monitor never exposes a generic method/path/body action. Account deletion, credential changes, imports/exports, proxy/routing changes, quota resets, system restart/upgrade, data management, and backup/restore APIs are outside the automation allowlist.
@@ -45,11 +45,11 @@ Recommendations are deduplicated while the desired priority remains unchanged. D
 1. An `account.unavailable` incident transition is committed with a stable transition ID.
 2. Enabled rules are matched by target and normalized availability reason. A fixed server-side action/reason map prevents broad rules from clearing unrelated state such as expiration or exhausted quota.
 3. Cooldown and unique `(rule_id, transition_id)` constraints prevent duplicate work.
-4. `recommend` rules create a reviewable execution without calling the target.
-5. An operator may approve a recommendation with explicit side-effect confirmation.
-6. `execute` rules enter the worker queue directly after the same confirmation was supplied when enabling the rule.
-7. The target request carries `Idempotency-Key: monitor-auto-<rule>-<transition>`.
-8. Success or failure, attempt count, bounded result metadata, and audit events are stored. A successful action queues an `automation_verify` collection.
+4. Every matched fault creates a reviewable recommendation without calling the target. New or re-enabled `execute` rules are rejected server-side.
+5. An operator may approve a recommendation with explicit side-effect confirmation. Approval confirms a fault-remediation attempt; it is not evidence that the account has recovered or that an active probe succeeded.
+6. Immediately before approval and execution, the monitor re-reads the incident, rule, and latest account snapshot. A resolved/changed fault is skipped, and a target without a source `updated_at` is unverifiable and cannot be mutated.
+7. The target request carries the snapshot CAS fields and `Idempotency-Key: monitor-auto-<rule>-<transition>`. Only an upstream `ACCOUNT_STATE_CHANGED` conflict is classified as stale; idempotency contention and other conflicts remain execution failures, with the target's structured error reason preserved for audit.
+8. HTTP success records `applied`, never `verified`. A successful action queues an `automation_verify` collection; only a newer inventory observation can produce `verified` or `verification_failed`. Missing/invalid verification evidence is terminated after `MONITOR_AUTOMATION_VERIFICATION_TIMEOUT_SECONDS` (default 300 seconds), rather than remaining `applied` forever.
 
 The action response body is not persisted. This avoids retaining future target fields that might contain credentials.
 
@@ -72,7 +72,7 @@ The signature is HMAC-SHA256 over the exact UTF-8 request body using determinist
 
 - New automation rules are disabled by default and use recommendation mode by default.
 - New cost-routing policies are disabled by default, use recommendation mode, and have a fixed 30-second controller interval with a 25-second hard execution budget.
-- Enabled automatic execution requires an explicit `confirm_side_effects` request.
+- Fault rules cannot be enabled in automatic execution mode. Each recommendation requires a separate, audited manual approval before it can enter the queue.
 - Cooldown is at least five minutes.
 - Target credentials, Webhook bearer tokens, and signing secrets are encrypted and write-only.
 - Notification destinations are revalidated and DNS-pinned for every attempt. Private destinations require the independent `MONITOR_ALLOW_PRIVATE_NOTIFICATION_TARGETS=true` opt-in.

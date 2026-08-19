@@ -24,6 +24,7 @@ from app.models import (
 )
 from app.security import SecretCipher
 from app.services.active_usage import collect_active_usage
+from app.services.automation import verify_applied_automations
 from app.services.monitoring import sync_channel_monitors
 from app.services.policies import (
     evaluate_account,
@@ -214,7 +215,13 @@ async def collect_run(
             if item.external_account_id not in seen_ids:
                 item.available = False
                 item.availability_reasons = ["missing_from_inventory"]
+                item.observed_at = now
                 await evaluate_account(session, target.name, item, [])
+        await verify_applied_automations(
+            session,
+            target.id,
+            timeout_seconds=settings.automation_verification_timeout_seconds,
+        )
         target.last_collected_at = now
         target.next_collection_at = now + timedelta(seconds=target.collection_interval_seconds)
         target.last_error = None
@@ -433,6 +440,7 @@ def merge_database_snapshots(
             "group_ids": api_account.group_ids,
             "priority": api_account.priority,
             "rate_multiplier": api_account.rate_multiplier,
+            "updated_at": api_account.source_updated_at,
             "extra": {
                 "upstream_billing_probe_enabled": api_account.upstream_billing_probe_enabled,
                 "upstream_billing_rate_sync_enabled": (
@@ -599,6 +607,7 @@ async def _store_account(
     current.upstream_billing_rate_sync_enabled = account.upstream_billing_rate_sync_enabled
     current.upstream_billing_probe = account.upstream_billing_probe
     current.source_observation_id = observation.id
+    current.source_updated_at = account.source_updated_at
     current.observed_at = account.observed_at
     current.last_seen_at = datetime.now(timezone.utc)
     samples: list[QuotaSample] = []
