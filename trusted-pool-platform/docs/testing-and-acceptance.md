@@ -193,7 +193,7 @@
   受支持基线到 `226` 的历史审计与混合 scope 处理；`227` 的当前候选结果必须由受控 commit 上的 CI 另行归档。
 - migration ledger、checksum 漂移和 unmanaged 历史卷的受控 baseline 演练通过。
 - 真实 PostgreSQL 门禁必须显式提供 `PHASE2H_TEST_POSTGRES_DSN`；最小权限门禁另需
-  `PHASE2H_TEST_POSTGRES_ADMIN_DSN`，Sub2API 226 门禁需在其模块提供 `SUB2API_TEST_POSTGRES_DSN`。
+  `PHASE2H_TEST_POSTGRES_ADMIN_DSN`，Sub2API 226/227 门禁需在其模块提供 `SUB2API_TEST_POSTGRES_DSN`。
   常规本地 `go test ./...` 会在变量缺失时跳过这些测试；仓库 CI 的 `postgresql-gates` job 已显式提供
   三组 DSN，并把除两个子进程 helper 外的意外 `SKIP` 视为失败，同时归档数据库版本、命令、日期和 JSON
   测试工件。该 job 首次在受控 commit 上成功运行并保存工件后，才能计作本轮发布证据。

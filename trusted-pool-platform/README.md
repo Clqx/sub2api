@@ -184,8 +184,9 @@ trusted-pool-platform/
 - Credential 采用 at-most-once 交付：Sub2API ack 明确成功后会持久化 typed snapshot，原 token 在 TTL 内可
   继续恢复领取；但平台一旦把 Claim CAS 为 `CLAIMED` 并清密，即使随后 HTTP 响应丢失也不会二次披露，
   管理员必须重新开通或完成凭据轮换。
-- 当前发布门禁仍限制单实例，禁止 rolling overlap、多副本和自动故障转移；通用 Operation、Credential
-  Claim、Credential Batch 与 Recovery plan/finalization 的真实 PostgreSQL 双连接接管和旧 fence 拒绝已通过，
+- 当前发布门禁仍限制单实例，禁止 rolling overlap、多副本和自动故障转移。以下结果是前序本地受控会话的
+  历史记录，不是当前候选 commit 的 CI 发布工件：通用 Operation、Credential Claim、Credential Batch 与
+  Recovery plan/finalization 的真实 PostgreSQL 双连接接管和旧 fence 拒绝已通过，
   同 Pool Suspend/Provision、Credential Batch retire/finalization 双向竞争，以及 provider commit durable
   写入后的真实子进程退出、不同 owner/fence 精确回放也已通过；该进程门禁使用测试专用 file-backed 幂等
   provider，不是生产 provider 或真实 Sub2API E2E。两 Seat activation 响应丢失恢复已通过确定性

@@ -109,6 +109,7 @@ Passive collection remains the default. Active quota requires global and per-tar
 - [ ] Rehearse API 401/429/5xx, database outage, notification timeout/provider outage, worker interruption, and stale/duplicate/out-of-order evidence.
 - [ ] Close durable silence, reminder, restart-recovery, timezone, audit, and multi-instance semantics; automation cooldown does not satisfy this gate.
 - [ ] Rehearse database backup/restore, schema and configuration upgrade, failed migration recovery, notification-queue recovery, and rollback with recorded RPO/RTO.
+- [ ] Add a versioned secret envelope or equivalent KMS design, then rehearse master-key rotation, escrow, loss, and restore; the current single derived Fernet key is not rotatable.
 - [ ] Pass dependency, license, SBOM, container, secret, and log scans; record the release image digest and signed compatibility report.
 - [ ] Exercise supported Sub2API versions and ntfy, Telegram, and Webhook failure/recovery paths in a production-like environment.
 

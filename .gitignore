@@ -133,6 +133,8 @@ deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*
+!docs/PROJECT_CAPABILITIES_AND_ROADMAP_CN.md
+!docs/STAGE0_RELEASE_BASELINE_CHECKLIST_CN.md
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md

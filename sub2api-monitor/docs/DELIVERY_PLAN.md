@@ -34,7 +34,7 @@ Deliverables:
 - monitor PostgreSQL model and Alembic migrations
 - local administrator authentication
 - Target CRUD and connection probe
-- fake Sub2API API and database targets
+- fake Sub2API API and ntfy targets
 - React application shell and target onboarding
 - Dockerfiles and Compose startup from an empty volume
 
@@ -67,6 +67,7 @@ Deliverables:
 - performance and collection concurrency validation
 - security review, SSRF policy, secret/log scanning
 - backup, restore, upgrade, and rollback runbooks
+- versioned secret envelope or equivalent KMS integration, key rotation/escrow, and key-loss recovery rehearsal
 - dependency/SBOM/container scans
 - release candidate and compatibility report
 - durable silence/reminder, restart compensation, timezone, audit, and multi-instance semantics

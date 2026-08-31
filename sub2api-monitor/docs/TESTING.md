@@ -62,13 +62,14 @@ a traceable representative target version and a real read-only target PostgreSQL
 
 The current repository workflow requires:
 
-- Python: Ruff format/lint, mypy, pytest with the configured coverage floor, and migration coverage exercised by tests
+- Python: Ruff format/lint, mypy, and pytest with the configured coverage floor
 - React: ESLint, TypeScript/Vitest through the test script, production build, and production-dependency `npm audit`
-- Docker: Compose validation, clean service build/start, smoke test, and Playwright against the API-only QA target
+- Docker: Compose validation, fresh service build/start with `alembic upgrade head`, smoke test, and Playwright against the API-only QA target
 
 Before production release, the workflow still must add an OpenAPI generated-client drift gate, dedicated secret/static
 security scans, SBOM and image vulnerability evidence, a version-frozen read-only target PostgreSQL/FULL job, and
-repeatable upgrade plus backup/restore gates. These are release requirements, not claims about the current PR workflow.
+dedicated migration upgrade/downgrade/model-drift coverage, repeatable upgrade, and backup/restore gates. These are release
+requirements, not claims about the current PR workflow.
 
 Core connector and policy modules target at least 90% branch coverage; overall backend and frontend target at least 80% without excluding meaningful code solely to raise the number.
 
