@@ -40,6 +40,141 @@ jobs:
         working-directory: backend
         run: make test-integration
 
+  postgresql-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PGPASSWORD: postgres
+      SUB2API_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/sub2api_gate?sslmode=disable
+      PHASE2H_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/phase2h_gate?sslmode=disable
+      PHASE2H_TEST_POSTGRES_ADMIN_DSN: postgres://postgres:postgres@localhost:5432/phase2h_gate?sslmode=disable
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: |
+            backend/go.sum
+            trusted-pool-platform/backend/go.sum
+      - name: Create isolated PostgreSQL gate databases
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: postgres
+        run: |
+          set -euo pipefail
+          psql --dbname postgres --set ON_ERROR_STOP=1 --command 'CREATE DATABASE sub2api_gate'
+          psql --dbname postgres --set ON_ERROR_STOP=1 --command 'CREATE DATABASE phase2h_gate'
+      - name: Record PostgreSQL gate environment
+        run: |
+          set -euo pipefail
+          mkdir -p postgresql-gate-evidence
+          {
+            echo "commit=$(git rev-parse HEAD)"
+            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            go version
+            psql "$SUB2API_TEST_POSTGRES_DSN" --tuples-only --no-align --command 'SELECT version()'
+            echo "backend_static_command=go test -json -tags=unit ./internal/repository -run ^TestTrustedPoolPermanentRotationEncryptedStagingStaticContract$ -count=1"
+            echo "backend_command=go test -json ./internal/repository -run ^TestTrustedPoolPermanentRotationMigrationsOnRealPostgres$ -count=1"
+            echo "phase2h_command=go test -json ./internal/persistence/postgres -count=1"
+          } | tee postgresql-gate-evidence/environment.txt
+      - name: Sub2API permanent rotation secret-storage static gate
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go test -json -tags=unit ./internal/repository -run '^TestTrustedPoolPermanentRotationEncryptedStagingStaticContract$' -count=1 | tee ../postgresql-gate-evidence/sub2api-secret-storage-static.json
+          if jq -e 'select(.Action == "skip")' ../postgresql-gate-evidence/sub2api-secret-storage-static.json >/dev/null; then
+            echo "Sub2API secret-storage static gate unexpectedly skipped" >&2
+            exit 1
+          fi
+          if ! jq -e 'select(
+            .Action == "pass" and
+            .Test == "TestTrustedPoolPermanentRotationEncryptedStagingStaticContract"
+          )' ../postgresql-gate-evidence/sub2api-secret-storage-static.json >/dev/null; then
+            echo "Sub2API secret-storage static gate did not pass its required test" >&2
+            exit 1
+          fi
+      - name: Sub2API migrations 226-227 PostgreSQL gate
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go test -json ./internal/repository \
+            -run '^TestTrustedPoolPermanentRotationMigrationsOnRealPostgres$' \
+            -count=1 | tee ../postgresql-gate-evidence/sub2api.json
+          if jq -e 'select(.Action == "skip")' ../postgresql-gate-evidence/sub2api.json >/dev/null; then
+            echo "Sub2API PostgreSQL gate unexpectedly skipped" >&2
+            exit 1
+          fi
+          required_tests=(
+            TestTrustedPoolPermanentRotationMigrationsOnRealPostgres
+            TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/EncryptedPreparedCredentialSchema
+            TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/EncryptedPreparedCredentialRow
+            TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/EncryptedPreparedCredentialReplay
+            TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/EncryptedPreparedCredentialClearedOnActivate
+          )
+          for required_test in "${required_tests[@]}"; do
+            if ! jq -e --arg test "$required_test" 'select(
+              .Action == "pass" and .Test == $test
+            )' ../postgresql-gate-evidence/sub2api.json >/dev/null; then
+              echo "Sub2API PostgreSQL gate did not pass required test: $required_test" >&2
+              exit 1
+            fi
+          done
+      - name: Trusted Pool Phase 2-H PostgreSQL gate
+        working-directory: trusted-pool-platform/backend
+        run: |
+          set -euo pipefail
+          go test -json ./internal/persistence/postgres -count=1 \
+            | tee ../../postgresql-gate-evidence/phase2h.json
+          if jq -e 'select(
+            .Action == "skip" and
+            .Test != "TestRecoveryFinalizationLeaseProcessHelper" and
+            .Test != "TestRecoveryManagerProviderCommitProcessHelper"
+          )' ../../postgresql-gate-evidence/phase2h.json >/dev/null; then
+            echo "Phase 2-H PostgreSQL gate unexpectedly skipped a required test" >&2
+            exit 1
+          fi
+          required_tests=(
+            TestPhase2HMigrationOnRealPostgres
+            TestPhase2HUpgradeFrom009PreservesLegacyEvidenceFailClosed
+            TestRuntimeRoleUsesStoreWithoutDDLOrDeletePrivileges
+            TestRecoveryPlanAndFinalizationFenceOnTwoRealPostgresConnections
+            TestRecoveryFinalizationFenceSurvivesProcessExit
+            TestRecoveryManagerProviderCommitReplaySurvivesProcessExit
+          )
+          for required_test in "${required_tests[@]}"; do
+            if ! jq -e --arg test "$required_test" 'select(
+              .Action == "pass" and .Test == $test
+            )' ../../postgresql-gate-evidence/phase2h.json >/dev/null; then
+              echo "Phase 2-H PostgreSQL gate did not pass required test: $required_test" >&2
+              exit 1
+            fi
+          done
+      - name: Upload PostgreSQL gate evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: postgresql-gate-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: postgresql-gate-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
   frontend:
     runs-on: ubuntu-latest
     steps:
