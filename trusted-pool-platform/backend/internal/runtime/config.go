@@ -22,30 +22,42 @@ const (
 )
 
 type Config struct {
-	Mode                       string
-	Database                   postgres.DBConfig
-	MigrationsDir              string
-	MigrationLimit             time.Duration
-	WorkerID                   string
-	WorkflowLease              time.Duration
-	ClaimTTL                   time.Duration
-	RecoveryBackoff            time.Duration
-	RecoveryIdleBackoff        time.Duration
-	EnvelopeMode               string
-	KMSProvider                string
-	KMSKeyRef                  string
-	AllowLocalKEK              bool
-	LocalKEK                   []byte
-	BatchClientID              string
-	BatchOnlineWrapAlgorithm   string
-	BatchOnlineDomain          string
-	BatchOnlineKeyRef          string
-	BatchRecoveryWrapAlgorithm string
-	BatchRecoveryDomain        string
-	BatchRecoveryKeyRef        string
-	BatchFingerprintKeyRef     string
-	BatchFingerprintKey        []byte
-	LocalRecoveryKEK           []byte
+	Mode                        string
+	Database                    postgres.DBConfig
+	MigrationDatabase           postgres.DBConfig
+	MigrationsDir               string
+	MigrationLimit              time.Duration
+	WorkerID                    string
+	WorkflowLease               time.Duration
+	ClaimTTL                    time.Duration
+	RecoveryBackoff             time.Duration
+	RecoveryIdleBackoff         time.Duration
+	EnvelopeMode                string
+	KMSProvider                 string
+	KMSKeyRef                   string
+	AllowLocalKEK               bool
+	LocalKEK                    []byte
+	BatchClientID               string
+	RecoveryClientID            string
+	RecoveryGovernanceEnabled   bool
+	RecoveryPortableEvidence    bool
+	RecoveryCryptoSuiteID       string
+	RecoveryEvidenceExport      bool
+	RecoveryEvidenceClientID    string
+	RecoveryEvidenceSigner      string
+	RecoveryEvidenceSignerKey   string
+	RecoveryRootProviderID      string
+	RecoveryRootTrustProfile    string
+	RecoveryReplacementClaimTTL time.Duration
+	BatchOnlineWrapAlgorithm    string
+	BatchOnlineDomain           string
+	BatchOnlineKeyRef           string
+	BatchRecoveryWrapAlgorithm  string
+	BatchRecoveryDomain         string
+	BatchRecoveryKeyRef         string
+	BatchFingerprintKeyRef      string
+	BatchFingerprintKey         []byte
+	LocalRecoveryKEK            []byte
 }
 
 func LoadConfig() (Config, error) {
@@ -83,29 +95,65 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	recoveryGovernanceEnabled, err := boolValue(lookup, "TRUSTED_POOL_RECOVERY_GOVERNANCE_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	recoveryPortableEvidence, err := boolValue(lookup, "TRUSTED_POOL_RECOVERY_PORTABLE_EVIDENCE_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	recoveryEvidenceExport, err := boolValue(lookup, "TRUSTED_POOL_RECOVERY_EVIDENCE_EXPORT_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	recoveryReplacementClaimTTL, err := durationValue(lookup,
+		"TRUSTED_POOL_RECOVERY_REPLACEMENT_CLAIM_TTL", 10*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	databaseURL := value(lookup, "TRUSTED_POOL_DATABASE_URL")
+	migrationDatabaseURL := value(lookup, "TRUSTED_POOL_MIGRATION_DATABASE_URL")
+	if migrationDatabaseURL == "" && mode == ModeDevelopment {
+		migrationDatabaseURL = databaseURL
+	}
 	config := Config{
 		Mode: mode,
 		Database: postgres.DBConfig{
-			URL: value(lookup, "TRUSTED_POOL_DATABASE_URL"), MaxOpenConns: maxOpen, MaxIdleConns: maxIdle,
+			URL: databaseURL, MaxOpenConns: maxOpen, MaxIdleConns: maxIdle,
 		},
-		MigrationsDir:              valueOrDefault(lookup, "TRUSTED_POOL_MIGRATIONS_DIR", "../migrations"),
-		MigrationLimit:             migrationLimit,
-		WorkerID:                   value(lookup, "TRUSTED_POOL_WORKER_ID"),
-		WorkflowLease:              workflowLease,
-		ClaimTTL:                   claimTTL,
-		RecoveryBackoff:            recoveryBackoff,
-		RecoveryIdleBackoff:        recoveryIdleBackoff,
-		EnvelopeMode:               envelopeMode,
-		KMSProvider:                value(lookup, "TRUSTED_POOL_KMS_PROVIDER"),
-		KMSKeyRef:                  value(lookup, "TRUSTED_POOL_KMS_KEY_REF"),
-		BatchClientID:              value(lookup, "TRUSTED_POOL_BATCH_CLIENT_ID"),
-		BatchOnlineWrapAlgorithm:   value(lookup, "TRUSTED_POOL_BATCH_KMS_WRAP_ALGORITHM"),
-		BatchOnlineDomain:          value(lookup, "TRUSTED_POOL_BATCH_KMS_DOMAIN"),
-		BatchOnlineKeyRef:          value(lookup, "TRUSTED_POOL_BATCH_KMS_KEY_REF"),
-		BatchRecoveryWrapAlgorithm: value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_WRAP_ALGORITHM"),
-		BatchRecoveryDomain:        value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_DOMAIN"),
-		BatchRecoveryKeyRef:        value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_KEY_REF"),
-		BatchFingerprintKeyRef:     value(lookup, "TRUSTED_POOL_BATCH_FINGERPRINT_KEY_REF"),
+		MigrationDatabase: postgres.DBConfig{
+			URL: migrationDatabaseURL, MaxOpenConns: 1, MaxIdleConns: 1,
+		},
+		MigrationsDir:               valueOrDefault(lookup, "TRUSTED_POOL_MIGRATIONS_DIR", "../migrations"),
+		MigrationLimit:              migrationLimit,
+		WorkerID:                    value(lookup, "TRUSTED_POOL_WORKER_ID"),
+		WorkflowLease:               workflowLease,
+		ClaimTTL:                    claimTTL,
+		RecoveryBackoff:             recoveryBackoff,
+		RecoveryIdleBackoff:         recoveryIdleBackoff,
+		EnvelopeMode:                envelopeMode,
+		KMSProvider:                 value(lookup, "TRUSTED_POOL_KMS_PROVIDER"),
+		KMSKeyRef:                   value(lookup, "TRUSTED_POOL_KMS_KEY_REF"),
+		BatchClientID:               value(lookup, "TRUSTED_POOL_BATCH_CLIENT_ID"),
+		RecoveryClientID:            value(lookup, "TRUSTED_POOL_RECOVERY_CLIENT_ID"),
+		RecoveryGovernanceEnabled:   recoveryGovernanceEnabled,
+		RecoveryPortableEvidence:    recoveryPortableEvidence,
+		RecoveryCryptoSuiteID:       value(lookup, "TRUSTED_POOL_RECOVERY_CRYPTO_SUITE_ID"),
+		RecoveryEvidenceExport:      recoveryEvidenceExport,
+		RecoveryEvidenceClientID:    value(lookup, "TRUSTED_POOL_RECOVERY_EVIDENCE_CLIENT_ID"),
+		RecoveryEvidenceSigner:      value(lookup, "TRUSTED_POOL_RECOVERY_EVIDENCE_SIGNER_PROVIDER"),
+		RecoveryEvidenceSignerKey:   value(lookup, "TRUSTED_POOL_RECOVERY_EVIDENCE_SIGNER_KEY_REF"),
+		RecoveryRootProviderID:      value(lookup, "TRUSTED_POOL_RECOVERY_ROOT_PROVIDER_ID"),
+		RecoveryRootTrustProfile:    value(lookup, "TRUSTED_POOL_RECOVERY_ROOT_TRUST_PROFILE"),
+		RecoveryReplacementClaimTTL: recoveryReplacementClaimTTL,
+		BatchOnlineWrapAlgorithm:    value(lookup, "TRUSTED_POOL_BATCH_KMS_WRAP_ALGORITHM"),
+		BatchOnlineDomain:           value(lookup, "TRUSTED_POOL_BATCH_KMS_DOMAIN"),
+		BatchOnlineKeyRef:           value(lookup, "TRUSTED_POOL_BATCH_KMS_KEY_REF"),
+		BatchRecoveryWrapAlgorithm:  value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_WRAP_ALGORITHM"),
+		BatchRecoveryDomain:         value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_DOMAIN"),
+		BatchRecoveryKeyRef:         value(lookup, "TRUSTED_POOL_BATCH_RECOVERY_KEY_REF"),
+		BatchFingerprintKeyRef:      value(lookup, "TRUSTED_POOL_BATCH_FINGERPRINT_KEY_REF"),
 	}
 	allow, err := boolValue(lookup, "TRUSTED_POOL_ALLOW_INSECURE_LOCAL_KEK", false)
 	if err != nil {
@@ -146,6 +194,9 @@ func (c Config) validate() error {
 	if c.Database.URL == "" {
 		return errors.New("TRUSTED_POOL_DATABASE_URL is required; memory fallback is forbidden")
 	}
+	if c.MigrationDatabase.URL == "" {
+		return errors.New("TRUSTED_POOL_MIGRATION_DATABASE_URL is required in production")
+	}
 	if c.MigrationsDir == "" || c.MigrationLimit <= 0 {
 		return errors.New("migration directory and positive timeout are required")
 	}
@@ -164,10 +215,26 @@ func (c Config) validate() error {
 		c.BatchRecoveryKeyRef == "" || c.BatchFingerprintKeyRef == "" || len(c.BatchFingerprintKey) != 32 {
 		return errors.New("credential batch client, dual wrapping and fingerprint configuration are required")
 	}
+	if c.RecoveryGovernanceEnabled && (c.RecoveryClientID == "" || c.RecoveryRootProviderID == "" ||
+		c.RecoveryRootTrustProfile == "" || c.WorkflowLease < 30*time.Second || c.WorkflowLease > 5*time.Minute ||
+		c.RecoveryReplacementClaimTTL <= 0 || c.RecoveryReplacementClaimTTL > 30*time.Minute) {
+		return errors.New("recovery governance client, root provider trust profile and lease up to 5m are required")
+	}
+	if c.RecoveryPortableEvidence && (!c.RecoveryGovernanceEnabled || c.RecoveryCryptoSuiteID == "") {
+		return errors.New("portable recovery evidence requires enabled governance and an explicit crypto suite")
+	}
+	if c.RecoveryEvidenceExport && (!c.RecoveryPortableEvidence || c.RecoveryEvidenceClientID == "" ||
+		c.RecoveryEvidenceSigner == "" || c.RecoveryEvidenceSignerKey == "" ||
+		c.RecoveryEvidenceClientID == c.RecoveryClientID) {
+		return errors.New("recovery evidence export requires portable governance, an independent client and external signer")
+	}
 	if c.BatchOnlineDomain == c.BatchRecoveryDomain || c.BatchOnlineKeyRef == c.BatchRecoveryKeyRef {
 		return errors.New("online and Recovery credential batch wrappers must use independent domains and keys")
 	}
 	if c.Mode == ModeProduction {
+		if c.MigrationDatabase.URL == c.Database.URL {
+			return errors.New("production migration and runtime database identities must be separate")
+		}
 		if c.EnvelopeMode != EnvelopeModeKMS {
 			return errors.New("production mode requires TRUSTED_POOL_ENVELOPE_MODE=kms")
 		}

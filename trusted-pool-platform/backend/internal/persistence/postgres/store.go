@@ -230,6 +230,11 @@ SET status = $5, response_snapshot = NULLIF($6::text, '')::jsonb,
 WHERE integration_client_id = $1 AND operation_id = $2 AND fencing_token = $3
   AND migration_state = 'CURRENT'
 	AND operation_type <> 'RESOLVE_SETTLEMENT'
+	AND operation_type NOT IN (
+	  'REGISTER_RESOURCE_ACCOUNT', 'MAP_RESOURCE_ACCOUNT_SEAT', 'VERIFY_RECOVERY_CONTROL',
+	  'BOOTSTRAP_RECOVERY_EPOCH', 'ROTATE_RECOVERY_EPOCH', 'FINALIZE_RECOVERY_BOOTSTRAP'
+  )
+  AND NOT (operation_type = 'REPLACE_PERMANENTLY' AND target_type = 'POOL')
   AND lease_owner = $4 AND lease_expires_at > CURRENT_TIMESTAMP
   AND status IN ('RUNNING', 'RETRYABLE', 'RECONCILE_REQUIRED')
   AND NOT ($5 = 'SUCCEEDED' AND operation_type IN (

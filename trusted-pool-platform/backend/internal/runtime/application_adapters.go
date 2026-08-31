@@ -83,7 +83,11 @@ func (w *PersistentRecoveryLoop) Run(ctx context.Context) error {
 			return fmt.Errorf("recover persistent settlement resolution: %w", err)
 		}
 		claimWorked, err := w.scanner.RecoverNextCredentialClaim(ctx)
-		if err != nil {
+		if errors.Is(err, application.ErrPersistentWorkflowUnsupported) {
+			// 历史/直写的 Phase2-G claim 不属于旧 provision ACK 协议。
+			// 保留其当前租约作为临时隔离，跳过且绝不解密或误发凭据。
+			claimWorked = true
+		} else if err != nil {
 			return fmt.Errorf("recover persistent credential claim: %w", err)
 		}
 		if operationWorked || settlementWorked || claimWorked {

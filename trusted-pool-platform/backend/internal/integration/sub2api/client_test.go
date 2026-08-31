@@ -2,6 +2,11 @@ package sub2api
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,7 +16,259 @@ import (
 	"time"
 
 	"trusted-pool-platform/backend/internal/application"
+	"trusted-pool-platform/backend/internal/recovery"
 )
+
+func TestRecoveryRotationClientUsesDedicatedProtocolAndVerifiesEd25519(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("X-Integration-Client-ID") != "recovery-rotation-client" ||
+			request.Header.Get("Authorization") != "Bearer recovery-rotation-secret" {
+			t.Fatal("recovery rotation request did not use its dedicated identity")
+		}
+		switch request.URL.Path {
+		case "/api/v1/integrations/trusted-pools/permanent-rotations/prepare":
+			var input permanentRotationPrepareRequest
+			if json.NewDecoder(request.Body).Decode(&input) != nil || request.Header.Get("Idempotency-Key") != input.OperationID {
+				t.Fatal("prepare request lost exact idempotency binding")
+			}
+			credential := "credential-seat-1"
+			fingerprint := sha256.Sum256([]byte(credential))
+			prepared := permanentRotationPreparedSeat{permanentRotationPrepareSeat: input.Seats[0],
+				Credential: credential, CredentialFingerprint: hex.EncodeToString(fingerprint[:]),
+				ActiveAPIKeyVersion: input.Seats[0].ToAPIKeyVersion, PreparedRotationRef: "prepared-seat-1",
+				State: "ROTATION_PREPARED", CredentialRotationComplete: true, CompletedAt: now}
+			binding := recovery.PermanentSeatActivationBinding{SeatID: input.Seats[0].ExternalSeatID,
+				TargetMemberID:          input.Seats[0].TargetMemberID,
+				ExpectedAssignmentEpoch: input.Seats[0].ExpectedAssignmentEpoch,
+				PrincipalUserID:         input.Seats[0].PrincipalUserID, SubscriptionID: input.Seats[0].SubscriptionID,
+				APIKeyID: input.Seats[0].APIKeyID, ActiveAPIKeyVersion: input.Seats[0].ToAPIKeyVersion,
+				ChildOperationID:      input.Seats[0].ChildOperationID,
+				ChildRequestHash:      mustDecodeTestHash(t, input.Seats[0].ChildRequestHash),
+				CredentialFingerprint: fingerprint, PreparedRotationRef: prepared.PreparedRotationRef}
+			preparedSet, hashErr := recovery.PermanentPreparedSeatSetHash([]recovery.PermanentSeatActivationBinding{binding})
+			if hashErr != nil {
+				t.Fatal(hashErr)
+			}
+			response := permanentRotationPrepareResponse{OperationID: input.OperationID,
+				ProtocolVersion: input.ProtocolVersion, ExternalPoolID: input.ExternalPoolID, PlanID: input.PlanID,
+				CeremonyType: input.CeremonyType, FromEpoch: input.FromEpoch, ToEpoch: input.ToEpoch,
+				RequestHash: input.RequestHash, ChildSetHash: input.ChildSetHash,
+				PreparedSetHash: hex.EncodeToString(preparedSet[:]), Status: "PREPARED",
+				CredentialsDisclosed: true, Seats: []permanentRotationPreparedSeat{prepared}}
+			response.Attestation = signPrepareAttestationForTest(t, response, privateKey)
+			writeEnvelope(t, writer, response)
+		case "/api/v1/integrations/trusted-pools/permanent-rotations/activate":
+			var input permanentRotationActivateRequest
+			if json.NewDecoder(request.Body).Decode(&input) != nil || request.Header.Get("Idempotency-Key") != input.OperationID {
+				t.Fatal("activation request lost exact idempotency binding")
+			}
+			response := permanentRotationActivationResponse{ProtocolVersion: input.ProtocolVersion,
+				OperationID: input.OperationID, RequestHash: input.RequestHash,
+				PrepareOperationID: input.PrepareOperationID, ExternalPoolID: input.ExternalPoolID,
+				PlanID: input.PlanID, CeremonyType: input.CeremonyType, FromEpoch: input.FromEpoch,
+				ToEpoch: input.ToEpoch, PreparedSetHash: input.PreparedSetHash, Status: "ACTIVATED_PENDING_COMMIT",
+				AllCredentialsEnabled: false, AllSubscriptionsEnabled: false, OldCredentialSetInvalidated: true,
+				CredentialFingerprintGateEnforced: true, ObservedAt: now,
+				Seats: []permanentRotationActivatedSeat{{permanentRotationActivateSeat: input.Seats[0],
+					AssignmentEpoch: input.Seats[0].ExpectedAssignmentEpoch + 1}}}
+			response.AuthCacheBarrier.DurableOutbox = true
+			response.AuthCacheBarrier.MinimumEvents = 2
+			response.Attestation = signActivationAttestationForTest(t, response, privateKey)
+			writeEnvelope(t, writer, response)
+		case "/api/v1/integrations/trusted-pools/permanent-rotations/commit":
+			var input permanentRotationCommitRequest
+			if json.NewDecoder(request.Body).Decode(&input) != nil || request.Header.Get("Idempotency-Key") != input.OperationID {
+				t.Fatal("commit request lost exact idempotency binding")
+			}
+			response := permanentRotationCommitResponse{ProtocolVersion: input.ProtocolVersion,
+				OperationID: input.OperationID, RequestHash: input.RequestHash,
+				PrepareOperationID: input.PrepareOperationID, ActivationOperationID: input.ActivationOperationID,
+				ActivationRequestHash: input.ActivationRequestHash, ExternalPoolID: input.ExternalPoolID,
+				PlanID: input.PlanID, CeremonyType: input.CeremonyType, FromEpoch: input.FromEpoch,
+				ToEpoch: input.ToEpoch, PreparedSetHash: input.PreparedSetHash, Status: "COMMITTED",
+				AllCredentialsEnabled: true, AllSubscriptionsEnabled: true, OldCredentialSetInvalidated: true,
+				CredentialFingerprintGateEnforced: true, ObservedAt: now,
+				Seats: []permanentRotationActivatedSeat{{permanentRotationActivateSeat: input.Seats[0],
+					AssignmentEpoch: input.Seats[0].ExpectedAssignmentEpoch + 1}}}
+			response.AuthCacheBarrier.DurableOutbox = true
+			response.AuthCacheBarrier.MinimumEvents = 1
+			response.Attestation = signCommitAttestationForTest(t, response, privateKey)
+			writeEnvelope(t, writer, response)
+		default:
+			t.Fatalf("unexpected recovery rotation path %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewRecoveryRotationClient(server.URL, "recovery-rotation-client",
+		"recovery-rotation-secret", "rotation-key-1", publicKey, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seat := recovery.PermanentSeatRotationPrepareRequest{ProtocolVersion: recovery.PermanentSeatRotationProtocolV1,
+		OperationID: "child-op-1", PlanID: "plan-1", CeremonyType: recovery.CeremonyRotate,
+		PoolID: "pool-1", FromEpoch: 7, ToEpoch: 8, SeatID: "seat-1", TargetMemberID: "member-new",
+		ExpectedAssignmentEpoch: 3, PrincipalUserID: 101, SubscriptionID: 202, APIKeyID: 303,
+		FromAPIKeyVersion: 3, ToAPIKeyVersion: 4}
+	seat.RequestHash = recovery.PermanentSeatRotationPrepareRequestHash(seat)
+	childSet, _ := recovery.PermanentRotationChildSetHash([]recovery.PermanentSeatRotationPrepareRequest{seat})
+	prepare := recovery.PermanentPoolRotationPrepareRequest{ProtocolVersion: recovery.PermanentSeatRotationProtocolV1,
+		OperationID: "prepare-pool-op", PlanID: "plan-1", CeremonyType: recovery.CeremonyRotate,
+		PoolID: "pool-1", FromEpoch: 7, ToEpoch: 8, ChildSetHash: childSet,
+		Seats: []recovery.PermanentSeatRotationPrepareRequest{seat}}
+	prepare.RequestHash = recovery.PermanentPoolRotationPrepareRequestHash(prepare)
+	prepared, err := client.PreparePoolRotation(context.Background(), prepare)
+	if err != nil || len(prepared.Seats) != 1 || string(prepared.Seats[0].Credential) != "credential-seat-1" {
+		t.Fatalf("PreparePoolRotation() = %+v, %v", prepared, err)
+	}
+	fingerprint := sha256.Sum256(prepared.Seats[0].Credential)
+	binding := recovery.PermanentSeatActivationBinding{SeatID: seat.SeatID, TargetMemberID: seat.TargetMemberID,
+		ExpectedAssignmentEpoch: seat.ExpectedAssignmentEpoch, PrincipalUserID: seat.PrincipalUserID,
+		SubscriptionID: seat.SubscriptionID, APIKeyID: seat.APIKeyID, ActiveAPIKeyVersion: seat.ToAPIKeyVersion,
+		ChildOperationID: seat.OperationID, ChildRequestHash: seat.RequestHash,
+		CredentialFingerprint: fingerprint, PreparedRotationRef: prepared.Seats[0].PreparedRotationRef}
+	preparedSet, _ := recovery.PermanentPreparedSeatSetHash([]recovery.PermanentSeatActivationBinding{binding})
+	activate := recovery.PermanentPoolRotationActivateRequest{ProtocolVersion: recovery.PermanentSeatRotationProtocolV1,
+		OperationID: "activate-pool-op", PrepareOperationID: prepare.OperationID, PlanID: "plan-1",
+		CeremonyType: recovery.CeremonyRotate, PoolID: "pool-1", FromEpoch: 7, ToEpoch: 8,
+		PreparedSetHash: preparedSet, Seats: []recovery.PermanentSeatActivationBinding{binding}}
+	activate.RequestHash = recovery.PermanentPoolRotationActivateRequestHash(activate)
+	activated, err := client.ActivatePreparedPoolRotation(context.Background(), activate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recovery.VerifyPermanentPoolRotationActivateResult(context.Background(), client, activate, activated); err != nil {
+		t.Fatalf("signed activation was rejected: %v", err)
+	}
+	commit := recovery.PermanentPoolRotationCommitRequest{ProtocolVersion: recovery.PermanentSeatRotationProtocolV1,
+		OperationID: "commit-pool-op", PrepareOperationID: prepare.OperationID,
+		ActivationOperationID: activate.OperationID, ActivationRequestHash: activate.RequestHash,
+		PlanID: activate.PlanID, CeremonyType: activate.CeremonyType, PoolID: activate.PoolID,
+		FromEpoch: activate.FromEpoch, ToEpoch: activate.ToEpoch, PreparedSetHash: preparedSet,
+		Seats: []recovery.PermanentSeatActivationBinding{binding}}
+	commit.RequestHash = recovery.PermanentPoolRotationCommitRequestHash(commit)
+	committed, err := client.CommitActivatedPoolRotation(context.Background(), commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recovery.VerifyPermanentPoolRotationCommitResult(context.Background(), client, commit, committed); err != nil {
+		t.Fatalf("signed commit was rejected: %v", err)
+	}
+	committed.Attestation[0] ^= 0xff
+	if err := recovery.VerifyPermanentPoolRotationCommitResult(context.Background(), client, commit, committed); !errors.Is(err, recovery.ErrSignatureInvalid) {
+		t.Fatalf("tampered commit signature = %v", err)
+	}
+	activated.Attestation[0] ^= 0xff
+	if err := recovery.VerifyPermanentPoolRotationActivateResult(context.Background(), client, activate, activated); !errors.Is(err, recovery.ErrSignatureInvalid) {
+		t.Fatalf("tampered activation signature = %v", err)
+	}
+}
+
+func signPrepareAttestationForTest(t *testing.T, response permanentRotationPrepareResponse,
+	privateKey ed25519.PrivateKey) *permanentRotationAttestation {
+	t.Helper()
+	digest, err := permanentPrepareAttestationDigest(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testRotationAttestation(digest, privateKey)
+}
+
+func TestPermanentPrepareAttestationBindsDisclosureAndDisabledState(t *testing.T) {
+	response := permanentRotationPrepareResponse{
+		OperationID: "prepare-op", ProtocolVersion: recovery.PermanentSeatRotationProtocolV1,
+		ExternalPoolID: "pool-1", PlanID: "plan-1", CeremonyType: string(recovery.CeremonyRotate),
+		FromEpoch: 7, ToEpoch: 8, RequestHash: strings.Repeat("1", 64),
+		ChildSetHash: strings.Repeat("2", 64), PreparedSetHash: strings.Repeat("3", 64),
+		Status: "PREPARED", CredentialsDisclosed: true,
+		Seats: []permanentRotationPreparedSeat{{
+			permanentRotationPrepareSeat: permanentRotationPrepareSeat{
+				ExternalSeatID: "seat-1", TargetMemberID: "member-1", ExpectedAssignmentEpoch: 3,
+				PrincipalUserID: 11, SubscriptionID: 12, APIKeyID: 13, ChildOperationID: "child-op",
+				ChildRequestHash: strings.Repeat("4", 64),
+			},
+			ActiveAPIKeyVersion: 4, CredentialFingerprint: strings.Repeat("5", 64),
+			PreparedRotationRef: "prepared-1", State: "ROTATION_PREPARED",
+			CredentialRotationComplete: true,
+		}},
+	}
+	want, err := permanentPrepareAttestationDigest(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := []func(*permanentRotationPrepareResponse){
+		func(value *permanentRotationPrepareResponse) { value.CredentialsDisclosed = false },
+		func(value *permanentRotationPrepareResponse) { value.Seats[0].CredentialEnabled = true },
+		func(value *permanentRotationPrepareResponse) { value.Seats[0].SubscriptionEnabled = true },
+		func(value *permanentRotationPrepareResponse) { value.Seats[0].CredentialRotationComplete = false },
+	}
+	for index, mutate := range mutations {
+		changed := response
+		changed.Seats = append([]permanentRotationPreparedSeat(nil), response.Seats...)
+		mutate(&changed)
+		got, digestErr := permanentPrepareAttestationDigest(changed)
+		if digestErr != nil {
+			t.Fatalf("mutation %d: %v", index, digestErr)
+		}
+		if got == want {
+			t.Fatalf("mutation %d was not bound by prepare attestation", index)
+		}
+	}
+}
+
+func signActivationAttestationForTest(t *testing.T, response permanentRotationActivationResponse,
+	privateKey ed25519.PrivateKey) *permanentRotationAttestation {
+	t.Helper()
+	response.Attestation = &permanentRotationAttestation{Version: "trusted-pool/permanent-rotation-attestation/v1",
+		Issuer: "sub2api", KeyID: "rotation-key-1", Reference: "temporary", Digest: strings.Repeat("0", 64),
+		Signature: base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))}
+	mapped, err := mapPermanentRotationActivationResult(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := recovery.PermanentPoolRotationActivationAttestationDigest(mapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testRotationAttestation(digest, privateKey)
+}
+
+func signCommitAttestationForTest(t *testing.T, response permanentRotationCommitResponse,
+	privateKey ed25519.PrivateKey) *permanentRotationAttestation {
+	t.Helper()
+	response.Attestation = &permanentRotationAttestation{Version: "trusted-pool/permanent-rotation-attestation/v1",
+		Issuer: "sub2api", KeyID: "rotation-key-1", Reference: "temporary", Digest: strings.Repeat("0", 64),
+		Signature: base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))}
+	mapped, err := mapPermanentRotationCommitResult(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := recovery.PermanentPoolRotationCommitAttestationDigest(mapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testRotationAttestation(digest, privateKey)
+}
+
+func testRotationAttestation(digest [sha256.Size]byte, privateKey ed25519.PrivateKey) *permanentRotationAttestation {
+	encoded := hex.EncodeToString(digest[:])
+	return &permanentRotationAttestation{Version: "trusted-pool/permanent-rotation-attestation/v1",
+		Issuer: "sub2api", KeyID: "rotation-key-1", Reference: "tpra-" + encoded[:32], Digest: encoded,
+		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, digest[:]))}
+}
+
+func mustDecodeTestHash(t *testing.T, value string) [sha256.Size]byte {
+	t.Helper()
+	decoded, err := decodePermanentRotationHash(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decoded
+}
 
 func TestClientSuspendDrainFreezeContract(t *testing.T) {
 	freezeCalls := 0

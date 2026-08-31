@@ -1,5 +1,7 @@
 # Phase 2-C 换员运行时状态
 
+> 历史阶段快照：本文保留 Phase 2-C 当时的范围和证据，不代表当前完整能力。当前状态与发布门禁以 [Phase 2-H 状态](phase2h-offline-verification-status.md) 和[全仓路线图](../../docs/PROJECT_CAPABILITIES_AND_ROADMAP_CN.md)为准。
+
 ## 已接线能力
 
 Phase 2-C 在已持久化的 Provision 与 Suspend/Drain/Freeze 之上，开放 `ASSIGN_TEMPORARY` 和 `RESTORE`：

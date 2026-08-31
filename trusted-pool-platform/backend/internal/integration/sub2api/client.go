@@ -3,6 +3,11 @@ package sub2api
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +22,7 @@ import (
 
 	"trusted-pool-platform/backend/internal/application"
 	"trusted-pool-platform/backend/internal/domain"
+	"trusted-pool-platform/backend/internal/recovery"
 )
 
 const maxResponseBytes = 1 << 20
@@ -45,6 +51,583 @@ type SettlementReadClient struct{ client *Client }
 type SettlementResolveClient struct {
 	client  *Client
 	actorID string
+}
+
+// RecoveryRotationClient 只能使用 permanent-rotation 独立 scope 和独立 Ed25519 公钥。
+// 它不暴露普通 Seat 控制、settlement read/resolve 等能力。
+type RecoveryRotationClient struct {
+	client           *Client
+	attestationKeyID string
+	attestationKey   ed25519.PublicKey
+}
+
+func NewRecoveryRotationClient(baseURL, clientID, secret, attestationKeyID string,
+	attestationKey ed25519.PublicKey, httpClient *http.Client) (*RecoveryRotationClient, error) {
+	client, err := NewClient(baseURL, clientID, secret, httpClient)
+	if err != nil {
+		return nil, err
+	}
+	attestationKeyID = strings.TrimSpace(attestationKeyID)
+	if attestationKeyID == "" || len(attestationKey) != ed25519.PublicKeySize {
+		return nil, errors.New("Sub2API recovery rotation Ed25519 trust anchor is invalid")
+	}
+	return &RecoveryRotationClient{client: client, attestationKeyID: attestationKeyID,
+		attestationKey: append(ed25519.PublicKey(nil), attestationKey...)}, nil
+}
+
+func (c *RecoveryRotationClient) Ready(context.Context) error {
+	if c == nil || c.client == nil || c.attestationKeyID == "" || len(c.attestationKey) != ed25519.PublicKeySize {
+		return errors.New("Sub2API recovery rotation client is unavailable")
+	}
+	return nil
+}
+
+func (c *RecoveryRotationClient) PreparePoolRotation(ctx context.Context,
+	request recovery.PermanentPoolRotationPrepareRequest) (recovery.PermanentPoolRotationPrepareResult, error) {
+	wireRequest := permanentRotationPrepareRequest{ProtocolVersion: request.ProtocolVersion,
+		OperationID: request.OperationID, ExternalPoolID: request.PoolID, PlanID: request.PlanID,
+		CeremonyType: string(request.CeremonyType), FromEpoch: request.FromEpoch, ToEpoch: request.ToEpoch,
+		ChildSetHash: hex.EncodeToString(request.ChildSetHash[:]), RequestHash: hex.EncodeToString(request.RequestHash[:]),
+		Seats: make([]permanentRotationPrepareSeat, len(request.Seats))}
+	for index, seat := range request.Seats {
+		wireRequest.Seats[index] = permanentRotationPrepareSeat{ExternalSeatID: seat.SeatID,
+			TargetMemberID: seat.TargetMemberID, ExpectedAssignmentEpoch: seat.ExpectedAssignmentEpoch,
+			PrincipalUserID: seat.PrincipalUserID, SubscriptionID: seat.SubscriptionID, APIKeyID: seat.APIKeyID,
+			FromAPIKeyVersion: seat.FromAPIKeyVersion, ToAPIKeyVersion: seat.ToAPIKeyVersion,
+			ChildOperationID: seat.OperationID, ChildRequestHash: hex.EncodeToString(seat.RequestHash[:])}
+	}
+	var wireResult permanentRotationPrepareResponse
+	if err := c.client.do(ctx, http.MethodPost,
+		"/api/v1/integrations/trusted-pools/permanent-rotations/prepare", request.OperationID,
+		wireRequest, &wireResult); err != nil {
+		return recovery.PermanentPoolRotationPrepareResult{}, err
+	}
+	digest, err := permanentPrepareAttestationDigest(wireResult)
+	if err != nil {
+		return recovery.PermanentPoolRotationPrepareResult{}, err
+	}
+	if err := c.verifyPermanentAttestation(wireResult.Attestation, digest); err != nil {
+		return recovery.PermanentPoolRotationPrepareResult{}, err
+	}
+	return mapPermanentRotationPrepareResult(wireResult)
+}
+
+func (c *RecoveryRotationClient) ActivatePreparedPoolRotation(ctx context.Context,
+	request recovery.PermanentPoolRotationActivateRequest) (recovery.PermanentPoolRotationActivateResult, error) {
+	wireRequest := permanentRotationActivateRequest{ProtocolVersion: request.ProtocolVersion,
+		OperationID: request.OperationID, PrepareOperationID: request.PrepareOperationID,
+		ExternalPoolID: request.PoolID, PlanID: request.PlanID, CeremonyType: string(request.CeremonyType),
+		FromEpoch: request.FromEpoch, ToEpoch: request.ToEpoch,
+		PreparedSetHash: hex.EncodeToString(request.PreparedSetHash[:]),
+		RequestHash:     hex.EncodeToString(request.RequestHash[:]),
+		Seats:           make([]permanentRotationActivateSeat, len(request.Seats))}
+	for index, seat := range request.Seats {
+		wireRequest.Seats[index] = permanentRotationActivateSeat{ExternalSeatID: seat.SeatID,
+			TargetMemberID: seat.TargetMemberID, ExpectedAssignmentEpoch: seat.ExpectedAssignmentEpoch,
+			PrincipalUserID: seat.PrincipalUserID, SubscriptionID: seat.SubscriptionID, APIKeyID: seat.APIKeyID,
+			ActiveAPIKeyVersion: seat.ActiveAPIKeyVersion, ChildOperationID: seat.ChildOperationID,
+			ChildRequestHash:      hex.EncodeToString(seat.ChildRequestHash[:]),
+			CredentialFingerprint: hex.EncodeToString(seat.CredentialFingerprint[:]),
+			PreparedRotationRef:   seat.PreparedRotationRef}
+	}
+	var wireResult permanentRotationActivationResponse
+	if err := c.client.do(ctx, http.MethodPost,
+		"/api/v1/integrations/trusted-pools/permanent-rotations/activate", request.OperationID,
+		wireRequest, &wireResult); err != nil {
+		return recovery.PermanentPoolRotationActivateResult{}, err
+	}
+	return mapPermanentRotationActivationResult(wireResult)
+}
+
+func (c *RecoveryRotationClient) CommitActivatedPoolRotation(ctx context.Context,
+	request recovery.PermanentPoolRotationCommitRequest) (recovery.PermanentPoolRotationCommitResult, error) {
+	wireRequest := permanentRotationCommitRequest{ProtocolVersion: request.ProtocolVersion,
+		OperationID: request.OperationID, PrepareOperationID: request.PrepareOperationID,
+		ActivationOperationID: request.ActivationOperationID,
+		ActivationRequestHash: hex.EncodeToString(request.ActivationRequestHash[:]),
+		ExternalPoolID:        request.PoolID, PlanID: request.PlanID, CeremonyType: string(request.CeremonyType),
+		FromEpoch: request.FromEpoch, ToEpoch: request.ToEpoch,
+		PreparedSetHash: hex.EncodeToString(request.PreparedSetHash[:]),
+		RequestHash:     hex.EncodeToString(request.RequestHash[:]),
+		Seats:           make([]permanentRotationActivateSeat, len(request.Seats))}
+	for index, seat := range request.Seats {
+		wireRequest.Seats[index] = permanentRotationActivateSeat{ExternalSeatID: seat.SeatID,
+			TargetMemberID: seat.TargetMemberID, ExpectedAssignmentEpoch: seat.ExpectedAssignmentEpoch,
+			PrincipalUserID: seat.PrincipalUserID, SubscriptionID: seat.SubscriptionID, APIKeyID: seat.APIKeyID,
+			ActiveAPIKeyVersion: seat.ActiveAPIKeyVersion, ChildOperationID: seat.ChildOperationID,
+			ChildRequestHash:      hex.EncodeToString(seat.ChildRequestHash[:]),
+			CredentialFingerprint: hex.EncodeToString(seat.CredentialFingerprint[:]),
+			PreparedRotationRef:   seat.PreparedRotationRef}
+	}
+	var wireResult permanentRotationCommitResponse
+	if err := c.client.do(ctx, http.MethodPost,
+		"/api/v1/integrations/trusted-pools/permanent-rotations/commit", request.OperationID,
+		wireRequest, &wireResult); err != nil {
+		return recovery.PermanentPoolRotationCommitResult{}, err
+	}
+	return mapPermanentRotationCommitResult(wireResult)
+}
+
+func (c *RecoveryRotationClient) VerifyPoolActivation(_ context.Context,
+	request recovery.PermanentPoolActivationVerifyRequest) error {
+	result := request.Result
+	if result.AttestationAlgorithm != "Ed25519" || result.AttestationIssuer != "sub2api" ||
+		result.AttestationKeyID != c.attestationKeyID || result.AttestationVersion != 1 ||
+		len(result.Attestation) != ed25519.SignatureSize {
+		return errors.New("Sub2API permanent rotation attestation identity is invalid")
+	}
+	digest, err := recovery.PermanentPoolRotationActivationAttestationDigest(result)
+	if err != nil || digest != result.AttestationDigest || !ed25519.Verify(c.attestationKey, digest[:], result.Attestation) {
+		return errors.New("Sub2API permanent rotation attestation signature is invalid")
+	}
+	return nil
+}
+
+func (c *RecoveryRotationClient) VerifyPoolCommit(_ context.Context,
+	request recovery.PermanentPoolCommitVerifyRequest) error {
+	result := request.Result
+	if result.AttestationAlgorithm != "Ed25519" || result.AttestationIssuer != "sub2api" ||
+		result.AttestationKeyID != c.attestationKeyID || result.AttestationVersion != 1 ||
+		len(result.Attestation) != ed25519.SignatureSize {
+		return errors.New("Sub2API permanent rotation commit attestation identity is invalid")
+	}
+	digest, err := recovery.PermanentPoolRotationCommitAttestationDigest(result)
+	if err != nil || digest != result.AttestationDigest || !ed25519.Verify(c.attestationKey, digest[:], result.Attestation) {
+		return errors.New("Sub2API permanent rotation commit attestation signature is invalid")
+	}
+	return nil
+}
+
+type permanentRotationPrepareSeat struct {
+	ExternalSeatID          string `json:"external_seat_id"`
+	TargetMemberID          string `json:"target_member_id"`
+	ExpectedAssignmentEpoch uint64 `json:"expected_assignment_epoch"`
+	PrincipalUserID         int64  `json:"principal_user_id"`
+	SubscriptionID          int64  `json:"subscription_id"`
+	APIKeyID                int64  `json:"api_key_id"`
+	FromAPIKeyVersion       uint64 `json:"from_api_key_version"`
+	ToAPIKeyVersion         uint64 `json:"to_api_key_version"`
+	ChildOperationID        string `json:"child_operation_id"`
+	ChildRequestHash        string `json:"child_request_hash"`
+}
+
+type permanentRotationPrepareRequest struct {
+	ProtocolVersion string                         `json:"protocol_version"`
+	OperationID     string                         `json:"operation_id"`
+	ExternalPoolID  string                         `json:"external_pool_id"`
+	PlanID          string                         `json:"plan_id"`
+	CeremonyType    string                         `json:"ceremony_type"`
+	FromEpoch       uint64                         `json:"from_epoch"`
+	ToEpoch         uint64                         `json:"to_epoch"`
+	ChildSetHash    string                         `json:"child_set_hash"`
+	Seats           []permanentRotationPrepareSeat `json:"seats"`
+	RequestHash     string                         `json:"request_hash"`
+}
+
+type permanentRotationPreparedSeat struct {
+	permanentRotationPrepareSeat
+	Credential                 string    `json:"credential"`
+	CredentialFingerprint      string    `json:"credential_fingerprint"`
+	ActiveAPIKeyVersion        uint64    `json:"active_api_key_version"`
+	PreparedRotationRef        string    `json:"prepared_rotation_ref"`
+	State                      string    `json:"state"`
+	CredentialEnabled          bool      `json:"credential_enabled"`
+	SubscriptionEnabled        bool      `json:"subscription_enabled"`
+	CredentialRotationComplete bool      `json:"credential_rotation_complete"`
+	CompletedAt                time.Time `json:"completed_at"`
+}
+
+type permanentRotationAttestation struct {
+	Version   string `json:"version"`
+	Issuer    string `json:"issuer"`
+	KeyID     string `json:"key_id"`
+	Reference string `json:"reference"`
+	Digest    string `json:"digest"`
+	Signature string `json:"signature"`
+}
+
+type permanentRotationPrepareResponse struct {
+	OperationID          string                          `json:"operation_id"`
+	ProtocolVersion      string                          `json:"protocol_version"`
+	ExternalPoolID       string                          `json:"external_pool_id"`
+	PlanID               string                          `json:"plan_id"`
+	CeremonyType         string                          `json:"ceremony_type"`
+	FromEpoch            uint64                          `json:"from_epoch"`
+	ToEpoch              uint64                          `json:"to_epoch"`
+	RequestHash          string                          `json:"request_hash"`
+	ChildSetHash         string                          `json:"child_set_hash"`
+	PreparedSetHash      string                          `json:"prepared_set_hash"`
+	Status               string                          `json:"status"`
+	CredentialsDisclosed bool                            `json:"credentials_disclosed"`
+	Seats                []permanentRotationPreparedSeat `json:"seats"`
+	Attestation          *permanentRotationAttestation   `json:"attestation"`
+}
+
+type permanentRotationActivateSeat struct {
+	ExternalSeatID          string `json:"external_seat_id"`
+	TargetMemberID          string `json:"target_member_id"`
+	ExpectedAssignmentEpoch uint64 `json:"expected_assignment_epoch"`
+	PrincipalUserID         int64  `json:"principal_user_id"`
+	SubscriptionID          int64  `json:"subscription_id"`
+	APIKeyID                int64  `json:"api_key_id"`
+	ActiveAPIKeyVersion     uint64 `json:"active_api_key_version"`
+	ChildOperationID        string `json:"child_operation_id"`
+	ChildRequestHash        string `json:"child_request_hash"`
+	CredentialFingerprint   string `json:"credential_fingerprint"`
+	PreparedRotationRef     string `json:"prepared_rotation_ref"`
+}
+
+type permanentRotationActivateRequest struct {
+	ProtocolVersion    string                          `json:"protocol_version"`
+	OperationID        string                          `json:"operation_id"`
+	PrepareOperationID string                          `json:"prepare_operation_id"`
+	ExternalPoolID     string                          `json:"external_pool_id"`
+	PlanID             string                          `json:"plan_id"`
+	CeremonyType       string                          `json:"ceremony_type"`
+	FromEpoch          uint64                          `json:"from_epoch"`
+	ToEpoch            uint64                          `json:"to_epoch"`
+	PreparedSetHash    string                          `json:"prepared_set_hash"`
+	Seats              []permanentRotationActivateSeat `json:"seats"`
+	RequestHash        string                          `json:"request_hash"`
+}
+
+type permanentRotationActivatedSeat struct {
+	permanentRotationActivateSeat
+	AssignmentEpoch    uint64 `json:"assignment_epoch"`
+	CurrentConcurrency uint64 `json:"current_concurrency"`
+	PendingSettlements uint64 `json:"pending_settlements"`
+}
+
+type permanentRotationActivationResponse struct {
+	ProtocolVersion                   string                           `json:"protocol_version"`
+	OperationID                       string                           `json:"operation_id"`
+	RequestHash                       string                           `json:"request_hash"`
+	PrepareOperationID                string                           `json:"prepare_operation_id"`
+	ExternalPoolID                    string                           `json:"external_pool_id"`
+	PlanID                            string                           `json:"plan_id"`
+	CeremonyType                      string                           `json:"ceremony_type"`
+	FromEpoch                         uint64                           `json:"from_epoch"`
+	ToEpoch                           uint64                           `json:"to_epoch"`
+	PreparedSetHash                   string                           `json:"prepared_set_hash"`
+	Status                            string                           `json:"status"`
+	AllCredentialsEnabled             bool                             `json:"all_credentials_enabled"`
+	AllSubscriptionsEnabled           bool                             `json:"all_subscriptions_enabled"`
+	OldCredentialSetInvalidated       bool                             `json:"old_credential_set_invalidated"`
+	AuthorizationCacheInvalidated     bool                             `json:"authorization_cache_invalidated"`
+	CredentialFingerprintGateEnforced bool                             `json:"credential_fingerprint_gate_enforced"`
+	ObservedAt                        time.Time                        `json:"observed_at"`
+	Attestation                       *permanentRotationAttestation    `json:"attestation"`
+	Seats                             []permanentRotationActivatedSeat `json:"seats"`
+	AuthCacheBarrier                  struct {
+		DurableOutbox bool `json:"durable_outbox"`
+		MinimumEvents int  `json:"minimum_events"`
+	} `json:"auth_cache_barrier"`
+}
+
+type permanentRotationCommitRequest struct {
+	ProtocolVersion       string                          `json:"protocol_version"`
+	OperationID           string                          `json:"operation_id"`
+	PrepareOperationID    string                          `json:"prepare_operation_id"`
+	ActivationOperationID string                          `json:"activation_operation_id"`
+	ActivationRequestHash string                          `json:"activation_request_hash"`
+	ExternalPoolID        string                          `json:"external_pool_id"`
+	PlanID                string                          `json:"plan_id"`
+	CeremonyType          string                          `json:"ceremony_type"`
+	FromEpoch             uint64                          `json:"from_epoch"`
+	ToEpoch               uint64                          `json:"to_epoch"`
+	PreparedSetHash       string                          `json:"prepared_set_hash"`
+	Seats                 []permanentRotationActivateSeat `json:"seats"`
+	RequestHash           string                          `json:"request_hash"`
+}
+
+type permanentRotationCommitResponse struct {
+	ProtocolVersion                   string                           `json:"protocol_version"`
+	OperationID                       string                           `json:"operation_id"`
+	RequestHash                       string                           `json:"request_hash"`
+	PrepareOperationID                string                           `json:"prepare_operation_id"`
+	ActivationOperationID             string                           `json:"activation_operation_id"`
+	ActivationRequestHash             string                           `json:"activation_request_hash"`
+	ExternalPoolID                    string                           `json:"external_pool_id"`
+	PlanID                            string                           `json:"plan_id"`
+	CeremonyType                      string                           `json:"ceremony_type"`
+	FromEpoch                         uint64                           `json:"from_epoch"`
+	ToEpoch                           uint64                           `json:"to_epoch"`
+	PreparedSetHash                   string                           `json:"prepared_set_hash"`
+	Status                            string                           `json:"status"`
+	AllCredentialsEnabled             bool                             `json:"all_credentials_enabled"`
+	AllSubscriptionsEnabled           bool                             `json:"all_subscriptions_enabled"`
+	OldCredentialSetInvalidated       bool                             `json:"old_credential_set_invalidated"`
+	AuthorizationCacheInvalidated     bool                             `json:"authorization_cache_invalidated"`
+	CredentialFingerprintGateEnforced bool                             `json:"credential_fingerprint_gate_enforced"`
+	ObservedAt                        time.Time                        `json:"observed_at"`
+	Attestation                       *permanentRotationAttestation    `json:"attestation"`
+	Seats                             []permanentRotationActivatedSeat `json:"seats"`
+	AuthCacheBarrier                  struct {
+		DurableOutbox bool `json:"durable_outbox"`
+		MinimumEvents int  `json:"minimum_events"`
+	} `json:"auth_cache_barrier"`
+}
+
+func mapPermanentRotationPrepareResult(wire permanentRotationPrepareResponse) (recovery.PermanentPoolRotationPrepareResult, error) {
+	requestHash, err := decodePermanentRotationHash(wire.RequestHash)
+	if err != nil {
+		return recovery.PermanentPoolRotationPrepareResult{}, err
+	}
+	childSetHash, err := decodePermanentRotationHash(wire.ChildSetHash)
+	if err != nil || len(wire.Seats) == 0 {
+		return recovery.PermanentPoolRotationPrepareResult{}, invalidPermanentRotationResponse()
+	}
+	result := recovery.PermanentPoolRotationPrepareResult{ProtocolVersion: wire.ProtocolVersion,
+		OperationID: wire.OperationID, RequestHash: requestHash, PlanID: wire.PlanID,
+		CeremonyType: recovery.CeremonyType(wire.CeremonyType), PoolID: wire.ExternalPoolID,
+		FromEpoch: wire.FromEpoch, ToEpoch: wire.ToEpoch, ChildSetHash: childSetHash,
+		Seats: make([]recovery.PermanentSeatRotationPrepareResult, len(wire.Seats))}
+	for index, seat := range wire.Seats {
+		childHash, decodeErr := decodePermanentRotationHash(seat.ChildRequestHash)
+		fingerprint, fingerprintErr := decodePermanentRotationHash(seat.CredentialFingerprint)
+		credential := []byte(seat.Credential)
+		if decodeErr != nil || fingerprintErr != nil || len(credential) == 0 ||
+			sha256.Sum256(credential) != fingerprint {
+			clear(credential)
+			return recovery.PermanentPoolRotationPrepareResult{}, invalidPermanentRotationResponse()
+		}
+		result.Seats[index] = recovery.PermanentSeatRotationPrepareResult{
+			ProtocolVersion: wire.ProtocolVersion, OperationID: seat.ChildOperationID, RequestHash: childHash,
+			PlanID: wire.PlanID, CeremonyType: recovery.CeremonyType(wire.CeremonyType), PoolID: wire.ExternalPoolID,
+			FromEpoch: wire.FromEpoch, ToEpoch: wire.ToEpoch, SeatID: seat.ExternalSeatID,
+			TargetMemberID: seat.TargetMemberID, AssignmentEpoch: seat.ExpectedAssignmentEpoch + 1,
+			PrincipalUserID: seat.PrincipalUserID, SubscriptionID: seat.SubscriptionID, APIKeyID: seat.APIKeyID,
+			ActiveAPIKeyVersion: seat.ActiveAPIKeyVersion, State: seat.State,
+			CredentialEnabled: seat.CredentialEnabled, SubscriptionEnabled: seat.SubscriptionEnabled,
+			CredentialRotationComplete: seat.CredentialRotationComplete, Credential: credential,
+			PreparedRotationRef: seat.PreparedRotationRef, CompletedAt: seat.CompletedAt}
+	}
+	return result, nil
+}
+
+func mapPermanentRotationActivationResult(wire permanentRotationActivationResponse) (recovery.PermanentPoolRotationActivateResult, error) {
+	requestHash, err := decodePermanentRotationHash(wire.RequestHash)
+	if err != nil {
+		return recovery.PermanentPoolRotationActivateResult{}, err
+	}
+	preparedSetHash, err := decodePermanentRotationHash(wire.PreparedSetHash)
+	if err != nil || wire.Attestation == nil || len(wire.Seats) == 0 {
+		return recovery.PermanentPoolRotationActivateResult{}, invalidPermanentRotationResponse()
+	}
+	digest, err := decodePermanentRotationHash(wire.Attestation.Digest)
+	if err != nil {
+		return recovery.PermanentPoolRotationActivateResult{}, err
+	}
+	signature, err := base64.StdEncoding.DecodeString(wire.Attestation.Signature)
+	if err != nil || len(signature) != ed25519.SignatureSize ||
+		wire.Attestation.Version != "trusted-pool/permanent-rotation-attestation/v1" {
+		return recovery.PermanentPoolRotationActivateResult{}, invalidPermanentRotationResponse()
+	}
+	result := recovery.PermanentPoolRotationActivateResult{ProtocolVersion: wire.ProtocolVersion,
+		OperationID: wire.OperationID, PrepareOperationID: wire.PrepareOperationID, RequestHash: requestHash,
+		PlanID: wire.PlanID, CeremonyType: recovery.CeremonyType(wire.CeremonyType), PoolID: wire.ExternalPoolID,
+		FromEpoch: wire.FromEpoch, ToEpoch: wire.ToEpoch, PreparedSetHash: preparedSetHash, State: wire.Status,
+		AllCredentialsEnabled: wire.AllCredentialsEnabled, AllSubscriptionsEnabled: wire.AllSubscriptionsEnabled,
+		OldCredentialSetInvalidated:       wire.OldCredentialSetInvalidated,
+		CredentialFingerprintGateEnforced: wire.CredentialFingerprintGateEnforced,
+		AuthorizationCacheInvalidated:     wire.AuthorizationCacheInvalidated,
+		AuthCacheDurableOutbox:            wire.AuthCacheBarrier.DurableOutbox,
+		AuthCacheMinimumEvents:            wire.AuthCacheBarrier.MinimumEvents,
+		AttestationAlgorithm:              "Ed25519", AttestationIssuer: wire.Attestation.Issuer,
+		AttestationRef: wire.Attestation.Reference, AttestationKeyID: wire.Attestation.KeyID,
+		AttestationVersion: 1, AttestationDigest: digest, Attestation: signature,
+		ActivatedAt: wire.ObservedAt, Seats: make([]recovery.PermanentSeatActivationResult, len(wire.Seats))}
+	for index, seat := range wire.Seats {
+		childHash, childErr := decodePermanentRotationHash(seat.ChildRequestHash)
+		fingerprint, fingerprintErr := decodePermanentRotationHash(seat.CredentialFingerprint)
+		if childErr != nil || fingerprintErr != nil {
+			return recovery.PermanentPoolRotationActivateResult{}, invalidPermanentRotationResponse()
+		}
+		result.Seats[index] = recovery.PermanentSeatActivationResult{
+			PermanentSeatActivationBinding: recovery.PermanentSeatActivationBinding{
+				SeatID: seat.ExternalSeatID, TargetMemberID: seat.TargetMemberID,
+				ExpectedAssignmentEpoch: seat.ExpectedAssignmentEpoch, PrincipalUserID: seat.PrincipalUserID,
+				SubscriptionID: seat.SubscriptionID, APIKeyID: seat.APIKeyID,
+				ActiveAPIKeyVersion: seat.ActiveAPIKeyVersion, ChildOperationID: seat.ChildOperationID,
+				ChildRequestHash: childHash, CredentialFingerprint: fingerprint,
+				PreparedRotationRef: seat.PreparedRotationRef},
+			AssignmentEpoch: seat.AssignmentEpoch, State: "ROTATION_ACTIVATED_PENDING_COMMIT",
+			CurrentConcurrency: seat.CurrentConcurrency, PendingSettlements: seat.PendingSettlements}
+	}
+	return result, nil
+}
+
+func mapPermanentRotationCommitResult(wire permanentRotationCommitResponse) (recovery.PermanentPoolRotationCommitResult, error) {
+	requestHash, err := decodePermanentRotationHash(wire.RequestHash)
+	if err != nil {
+		return recovery.PermanentPoolRotationCommitResult{}, err
+	}
+	activationHash, err := decodePermanentRotationHash(wire.ActivationRequestHash)
+	if err != nil {
+		return recovery.PermanentPoolRotationCommitResult{}, err
+	}
+	preparedSetHash, err := decodePermanentRotationHash(wire.PreparedSetHash)
+	if err != nil || wire.Attestation == nil || len(wire.Seats) == 0 {
+		return recovery.PermanentPoolRotationCommitResult{}, invalidPermanentRotationResponse()
+	}
+	digest, err := decodePermanentRotationHash(wire.Attestation.Digest)
+	if err != nil {
+		return recovery.PermanentPoolRotationCommitResult{}, err
+	}
+	signature, err := base64.StdEncoding.DecodeString(wire.Attestation.Signature)
+	if err != nil || len(signature) != ed25519.SignatureSize ||
+		wire.Attestation.Version != "trusted-pool/permanent-rotation-attestation/v1" {
+		return recovery.PermanentPoolRotationCommitResult{}, invalidPermanentRotationResponse()
+	}
+	result := recovery.PermanentPoolRotationCommitResult{ProtocolVersion: wire.ProtocolVersion,
+		OperationID: wire.OperationID, PrepareOperationID: wire.PrepareOperationID,
+		ActivationOperationID: wire.ActivationOperationID, ActivationRequestHash: activationHash,
+		RequestHash: requestHash, PlanID: wire.PlanID, CeremonyType: recovery.CeremonyType(wire.CeremonyType),
+		PoolID: wire.ExternalPoolID, FromEpoch: wire.FromEpoch, ToEpoch: wire.ToEpoch,
+		PreparedSetHash: preparedSetHash, State: wire.Status,
+		AllCredentialsEnabled: wire.AllCredentialsEnabled, AllSubscriptionsEnabled: wire.AllSubscriptionsEnabled,
+		OldCredentialSetInvalidated:       wire.OldCredentialSetInvalidated,
+		CredentialFingerprintGateEnforced: wire.CredentialFingerprintGateEnforced,
+		AuthorizationCacheInvalidated:     wire.AuthorizationCacheInvalidated,
+		AuthCacheDurableOutbox:            wire.AuthCacheBarrier.DurableOutbox,
+		AuthCacheMinimumEvents:            wire.AuthCacheBarrier.MinimumEvents,
+		AttestationAlgorithm:              "Ed25519", AttestationIssuer: wire.Attestation.Issuer,
+		AttestationRef: wire.Attestation.Reference, AttestationKeyID: wire.Attestation.KeyID,
+		AttestationVersion: 1, AttestationDigest: digest, Attestation: signature,
+		CommittedAt: wire.ObservedAt, Seats: make([]recovery.PermanentSeatActivationResult, len(wire.Seats))}
+	for index, seat := range wire.Seats {
+		childHash, childErr := decodePermanentRotationHash(seat.ChildRequestHash)
+		fingerprint, fingerprintErr := decodePermanentRotationHash(seat.CredentialFingerprint)
+		if childErr != nil || fingerprintErr != nil {
+			return recovery.PermanentPoolRotationCommitResult{}, invalidPermanentRotationResponse()
+		}
+		result.Seats[index] = recovery.PermanentSeatActivationResult{
+			PermanentSeatActivationBinding: recovery.PermanentSeatActivationBinding{
+				SeatID: seat.ExternalSeatID, TargetMemberID: seat.TargetMemberID,
+				ExpectedAssignmentEpoch: seat.ExpectedAssignmentEpoch, PrincipalUserID: seat.PrincipalUserID,
+				SubscriptionID: seat.SubscriptionID, APIKeyID: seat.APIKeyID,
+				ActiveAPIKeyVersion: seat.ActiveAPIKeyVersion, ChildOperationID: seat.ChildOperationID,
+				ChildRequestHash: childHash, CredentialFingerprint: fingerprint,
+				PreparedRotationRef: seat.PreparedRotationRef},
+			AssignmentEpoch: seat.AssignmentEpoch, State: "ACTIVE",
+			CurrentConcurrency: seat.CurrentConcurrency, PendingSettlements: seat.PendingSettlements}
+	}
+	return result, nil
+}
+
+func (c *RecoveryRotationClient) verifyPermanentAttestation(attestation *permanentRotationAttestation,
+	digest [sha256.Size]byte) error {
+	if c == nil || attestation == nil || attestation.Version != "trusted-pool/permanent-rotation-attestation/v1" ||
+		attestation.Issuer != "sub2api" || attestation.KeyID != c.attestationKeyID {
+		return invalidPermanentRotationResponse()
+	}
+	wantDigest, err := decodePermanentRotationHash(attestation.Digest)
+	signature, signatureErr := base64.StdEncoding.DecodeString(attestation.Signature)
+	if err != nil || signatureErr != nil || wantDigest != digest || len(signature) != ed25519.SignatureSize ||
+		!ed25519.Verify(c.attestationKey, digest[:], signature) {
+		return invalidPermanentRotationResponse()
+	}
+	return nil
+}
+
+func permanentPrepareAttestationDigest(wire permanentRotationPrepareResponse) ([sha256.Size]byte, error) {
+	requestHash, err := hex.DecodeString(wire.RequestHash)
+	if err != nil || len(requestHash) != sha256.Size {
+		return [sha256.Size]byte{}, invalidPermanentRotationResponse()
+	}
+	childSetHash, err := hex.DecodeString(wire.ChildSetHash)
+	if err != nil || len(childSetHash) != sha256.Size {
+		return [sha256.Size]byte{}, invalidPermanentRotationResponse()
+	}
+	var encoded bytes.Buffer
+	writePermanentRotationString(&encoded, "trusted-pool/permanent-pool-rotation-prepare-attestation/v1")
+	writePermanentRotationString(&encoded, wire.ProtocolVersion)
+	writePermanentRotationString(&encoded, wire.OperationID)
+	encoded.Write(requestHash)
+	writePermanentRotationString(&encoded, wire.PlanID)
+	writePermanentRotationString(&encoded, wire.CeremonyType)
+	writePermanentRotationString(&encoded, wire.ExternalPoolID)
+	writePermanentRotationUint64(&encoded, wire.FromEpoch)
+	writePermanentRotationUint64(&encoded, wire.ToEpoch)
+	encoded.Write(childSetHash)
+	// PreparedSetHash 当前不是响应 JSON 的必需消费字段；签名仍要求其存在且合法。
+	preparedSetHash := wirePreparedSetHash(wire)
+	if len(preparedSetHash) != sha256.Size {
+		return [sha256.Size]byte{}, invalidPermanentRotationResponse()
+	}
+	encoded.Write(preparedSetHash)
+	writePermanentRotationString(&encoded, wire.Status)
+	writePermanentRotationBool(&encoded, wire.CredentialsDisclosed)
+	writePermanentRotationUint32(&encoded, uint32(len(wire.Seats)))
+	for _, seat := range wire.Seats {
+		fingerprint, fingerprintErr := hex.DecodeString(seat.CredentialFingerprint)
+		childHash, childErr := hex.DecodeString(seat.ChildRequestHash)
+		if fingerprintErr != nil || childErr != nil || len(fingerprint) != sha256.Size || len(childHash) != sha256.Size {
+			return [sha256.Size]byte{}, invalidPermanentRotationResponse()
+		}
+		writePermanentRotationString(&encoded, seat.ExternalSeatID)
+		writePermanentRotationString(&encoded, seat.TargetMemberID)
+		writePermanentRotationUint64(&encoded, seat.ExpectedAssignmentEpoch)
+		writePermanentRotationUint64(&encoded, uint64(seat.PrincipalUserID))
+		writePermanentRotationUint64(&encoded, uint64(seat.SubscriptionID))
+		writePermanentRotationUint64(&encoded, uint64(seat.APIKeyID))
+		writePermanentRotationUint64(&encoded, seat.ActiveAPIKeyVersion)
+		encoded.Write(fingerprint)
+		writePermanentRotationString(&encoded, seat.PreparedRotationRef)
+		writePermanentRotationString(&encoded, seat.ChildOperationID)
+		encoded.Write(childHash)
+		writePermanentRotationString(&encoded, seat.State)
+		writePermanentRotationBool(&encoded, seat.CredentialEnabled)
+		writePermanentRotationBool(&encoded, seat.SubscriptionEnabled)
+		writePermanentRotationBool(&encoded, seat.CredentialRotationComplete)
+	}
+	return sha256.Sum256(encoded.Bytes()), nil
+}
+
+func wirePreparedSetHash(wire permanentRotationPrepareResponse) []byte {
+	// PreparedSetHash is deliberately kept out of the platform domain model until activation.
+	decoded, _ := hex.DecodeString(wire.PreparedSetHash)
+	return decoded
+}
+
+func decodePermanentRotationHash(value string) ([sha256.Size]byte, error) {
+	var result [sha256.Size]byte
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size || value != strings.ToLower(value) {
+		return result, invalidPermanentRotationResponse()
+	}
+	copy(result[:], decoded)
+	return result, nil
+}
+
+func invalidPermanentRotationResponse() error {
+	return &application.GatewayError{Reason: "Sub2API permanent rotation response is invalid",
+		Retryable: true, Ambiguous: true, StatusCode: http.StatusOK}
+}
+
+func writePermanentRotationString(target *bytes.Buffer, value string) {
+	writePermanentRotationUint32(target, uint32(len(value)))
+	target.WriteString(value)
+}
+
+func writePermanentRotationUint32(target *bytes.Buffer, value uint32) {
+	var framed [4]byte
+	binary.BigEndian.PutUint32(framed[:], value)
+	target.Write(framed[:])
+}
+
+func writePermanentRotationBool(target *bytes.Buffer, value bool) {
+	if value {
+		target.WriteByte(1)
+		return
+	}
+	target.WriteByte(0)
+}
+
+func writePermanentRotationUint64(target *bytes.Buffer, value uint64) {
+	var framed [8]byte
+	binary.BigEndian.PutUint64(framed[:], value)
+	target.Write(framed[:])
 }
 
 func NewClient(baseURL, clientID, integrationSecret string, httpClient *http.Client) (*Client, error) {

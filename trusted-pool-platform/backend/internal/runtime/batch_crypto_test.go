@@ -37,10 +37,11 @@ func TestBuildBatchSealerDevelopmentUsesIndependentRecoveryKey(t *testing.T) {
 
 func TestBuildBatchSealerProductionRequiresNativeContextAwareWrappers(t *testing.T) {
 	values := map[string]string{
-		"TRUSTED_POOL_DATABASE_URL": "postgres://db/platform",
-		"TRUSTED_POOL_KMS_KEY_REF":  "kms/key/claims",
-		"TRUSTED_POOL_KMS_PROVIDER": "example-kms",
-		"TRUSTED_POOL_WORKER_ID":    "worker-1",
+		"TRUSTED_POOL_DATABASE_URL":           "postgres://runtime@db/platform",
+		"TRUSTED_POOL_MIGRATION_DATABASE_URL": "postgres://migrator@db/platform",
+		"TRUSTED_POOL_KMS_KEY_REF":            "kms/key/claims",
+		"TRUSTED_POOL_KMS_PROVIDER":           "example-kms",
+		"TRUSTED_POOL_WORKER_ID":              "worker-1",
 	}
 	addBatchConfig(values, false)
 	config, err := loadConfig(envLookup(values))

@@ -99,7 +99,7 @@ func TestMigrateRejectsChecksumDrift(t *testing.T) {
 	raw := []byte("BEGIN; SELECT 1; COMMIT;")
 	mock.ExpectExec("SELECT pg_advisory_lock").WithArgs(migrationAdvisoryLockKey).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("SELECT to_regclass\\('public.trusted_pool_schema_migrations'\\) IS NOT NULL").
+	mock.ExpectQuery("SELECT to_regclass\\(format\\('%I.%I', current_schema\\(\\), 'trusted_pool_schema_migrations'\\)\\) IS NOT NULL").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	expectAppliedPrefix(mock, "001_sample.sql")
 	mock.ExpectQuery("SELECT checksum FROM trusted_pool_schema_migrations").WithArgs("001_sample.sql").
@@ -144,9 +144,9 @@ func TestMigrateRejectsUnmanagedDomainSchema(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectExec("SELECT pg_advisory_lock").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("SELECT to_regclass\\('public.trusted_pool_schema_migrations'\\) IS NOT NULL").
+	mock.ExpectQuery("SELECT to_regclass\\(format\\('%I.%I', current_schema\\(\\), 'trusted_pool_schema_migrations'\\)\\) IS NOT NULL").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-	mock.ExpectQuery("to_regclass\\('public.members'\\)").
+	mock.ExpectQuery("to_regclass\\(format\\('%I.%I', current_schema\\(\\), 'members'\\)\\)").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectExec("SELECT pg_advisory_unlock").WillReturnResult(sqlmock.NewResult(0, 1))
 	err = Migrate(context.Background(), db,
@@ -160,9 +160,9 @@ func TestMigrateRejectsUnmanagedDomainSchema(t *testing.T) {
 }
 
 func expectEmptySchema(mock sqlmock.Sqlmock) {
-	mock.ExpectQuery("SELECT to_regclass\\('public.trusted_pool_schema_migrations'\\) IS NOT NULL").
+	mock.ExpectQuery("SELECT to_regclass\\(format\\('%I.%I', current_schema\\(\\), 'trusted_pool_schema_migrations'\\)\\) IS NOT NULL").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-	mock.ExpectQuery("to_regclass\\('public.members'\\)").
+	mock.ExpectQuery("to_regclass\\(format\\('%I.%I', current_schema\\(\\), 'members'\\)\\)").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectExec("CREATE TABLE trusted_pool_schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))

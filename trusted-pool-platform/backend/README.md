@@ -6,7 +6,8 @@
 - 临时分配、恢复和永久替换都不能绕过冻结；所有 Assignment 都要求 Sub2API 明确确认 Seat 访问
   凭据已轮换；永久替换还必须提交本平台在四类旧批次全部退休、相邻新批次全部激活后签发的
   控制凭据轮换证据。证据还绑定运营或外部系统已预先核验的供应商变更证明引用，Coordinator 会按
-  Pool 和相邻 Membership Epoch 复核引用及八个批次状态；Phase 1 不校验供应商签名或证明真实性。
+  Pool 和相邻 Membership Epoch 复核引用及八个批次状态；这是 legacy Phase 1 evidence，Phase 1 不校验
+  供应商签名或证明真实性，不能替代 Phase 2-F/G 的 typed provider proof 与 Ed25519 门禁。
 - 永久替换成功后提交 Pool 最小 Membership Epoch；旧 Epoch 的批次不能再 Seal 或 Activate。
 - Seat 状态变更调用使用稳定 `Idempotency-Key`，结果未知时进入对账而不是直接重试。
 - Seat 开通是例外的显式幂等恢复流程：`POST /api/v1/seats` 要求 `operation_id`、既有 Group 和订阅到期时间；
@@ -30,8 +31,11 @@ Suspend/Drain/Freeze、临时换员和正式成员恢复已接入数据库 lease
 只读 Sub2API 凭据；resolve 先持久化 intent/lease，再使用另一组 `settlement:resolve` 凭据调用上游，
 结果不明时由同一 operation ID 和原始快照恢复。平台只持久化调用审计，Sub2API append-only resolution
 是账本真相。Credential Batch 的 Seal/Get/Activate/Retire 已接入 PostgreSQL，旧内存 Manager 不再用于持久模式；
-永久替换和 control rotation evidence 仍返回 503。风险窗口仍是可丢失观察面。真实 PostgreSQL 双连接、崩溃注入、生产 KMS 和多实例
-竞争测试尚未完成，因此当前版本仍不可作为生产数据平面部署。
+旧单 Seat 永久替换和旧 control rotation evidence 入口仍返回 503；Pool 级 finalize 已接入持久三阶段流程，
+但 Recovery governance 默认关闭且缺少生产 provider。真实 PostgreSQL 已覆盖双连接 lease/fence、同 Pool
+跨工作流竞争、`010 -> 011` 停机迁移路径、legacy/typed snapshot 接管和真实 OS 子进程恢复。进程门禁使用
+测试专用 file-backed 幂等 provider，不代表真实 Sub2API/provider 或生产签名验证端到端已完成；多实例和生产
+KMS/HSM/provider 门禁仍未完成，因此当前版本仍不可作为生产数据平面部署。
 
 ## 运行
 
@@ -40,12 +44,18 @@ TRUSTED_POOL_HTTP_ADDR=:8092
 TRUSTED_POOL_API_KEY=<至少 32 字符>
 TRUSTED_POOL_SETTLEMENT_API_KEY=<独立的至少 32 字符人工对账密钥>
 TRUSTED_POOL_BATCH_API_KEY=<独立的至少 32 字符批次管理密钥>
+TRUSTED_POOL_RECOVERY_API_KEY=<治理启用时使用的独立至少 32 字符密钥>
 TRUSTED_POOL_FINGERPRINT_HMAC_KEY=<至少 32 字符>
 TRUSTED_POOL_CLAIM_TTL=10m
 TRUSTED_POOL_KEK_HEX=<64 位十六进制密钥>
 TRUSTED_POOL_BATCH_CLIENT_ID=trusted-pool-batch-api
 TRUSTED_POOL_BATCH_FINGERPRINT_HMAC_KEY_HEX=<独立 64 位十六进制 HMAC Key>
 TRUSTED_POOL_RECOVERY_KEK_HEX=<仅开发模式的独立 64 位十六进制 Recovery KEK>
+TRUSTED_POOL_DATABASE_URL=<运行时最小权限 PostgreSQL DSN>
+TRUSTED_POOL_MIGRATION_DATABASE_URL=<生产必填的独立 migration owner DSN>
+TRUSTED_POOL_RECOVERY_GOVERNANCE_ENABLED=false
+TRUSTED_POOL_RECOVERY_PORTABLE_EVIDENCE_ENABLED=false
+TRUSTED_POOL_RECOVERY_EVIDENCE_EXPORT_ENABLED=false
 SUB2API_BASE_URL=https://sub2api.example.com
 SUB2API_INTEGRATION_CLIENT_ID=trusted-pool-platform
 SUB2API_INTEGRATION_SECRET=<至少 16 字符>
@@ -53,6 +63,10 @@ SUB2API_SETTLEMENT_READ_CLIENT_ID=trusted-pool-settlement-read
 SUB2API_SETTLEMENT_READ_SECRET=<独立只读密钥>
 SUB2API_SETTLEMENT_RESOLVE_CLIENT_ID=trusted-pool-settlement-resolve
 SUB2API_SETTLEMENT_RESOLVE_SECRET=<独立 settlement:resolve 密钥>
+SUB2API_RECOVERY_ROTATION_CLIENT_ID=trusted-pool-permanent-rotation
+SUB2API_RECOVERY_ROTATION_SECRET=<独立 seat:permanent-rotate 密钥>
+SUB2API_RECOVERY_ROTATION_ATTESTATION_KEY_ID=<Sub2API 签名 key ID>
+SUB2API_RECOVERY_ROTATION_ATTESTATION_PUBLIC_KEY_BASE64=<Ed25519 public key>
 ```
 
 `production` 模式强制 `SUB2API_BASE_URL` 使用 HTTPS。集成客户端不会跟随 HTTP
@@ -91,3 +105,13 @@ go test ./...
 go test -race ./...
 go vet ./...
 ```
+
+上面的普通命令在未配置 DSN 时会跳过真实 PostgreSQL 门禁，不能单独作为发布证据。一次性测试库必须显式运行：
+
+```bash
+PHASE2H_TEST_POSTGRES_DSN='postgres://...' go test ./internal/persistence/postgres -count=1
+PHASE2H_TEST_POSTGRES_ADMIN_DSN='postgres://...' go test ./internal/persistence/postgres -run '^TestRuntimeRoleUsesStoreWithoutDDLOrDeletePrivileges$' -count=1
+```
+
+验收流水线必须把意外 `SKIP` 视为失败，并记录 PostgreSQL 版本、命令、日期和测试工件。Sub2API migration
+226 的真实库门禁在仓库上层 `backend` 模块使用 `SUB2API_TEST_POSTGRES_DSN` 单独执行。

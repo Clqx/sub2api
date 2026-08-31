@@ -16,6 +16,8 @@ import (
 	"trusted-pool-platform/backend/internal/application"
 	"trusted-pool-platform/backend/internal/credentials"
 	"trusted-pool-platform/backend/internal/domain"
+	"trusted-pool-platform/backend/internal/recovery"
+	"trusted-pool-platform/backend/internal/recovery/exporter"
 	"trusted-pool-platform/backend/internal/risk"
 )
 
@@ -25,9 +27,12 @@ type Server struct {
 	coordinator          Coordinator
 	risk                 *risk.Aggregator
 	credentialBatches    CredentialBatchService
+	recoveryGovernance   RecoveryGovernanceService
+	recoveryExports      VerificationExportService
 	apiKeyHash           [32]byte
 	settlementAPIKeyHash [32]byte
 	batchAPIKeyHash      [32]byte
+	recoveryAPIKeyHash   [32]byte
 	handler              http.Handler
 }
 
@@ -36,6 +41,24 @@ type CredentialBatchService interface {
 	Get(context.Context, string) (*credentials.StoredCredentialBatch, error)
 	Activate(context.Context, credentials.PersistentBatchTransitionRequest) (*credentials.StoredCredentialBatch, error)
 	Retire(context.Context, credentials.PersistentBatchTransitionRequest) (*credentials.StoredCredentialBatch, error)
+}
+
+type RecoveryGovernanceService interface {
+	Ready(context.Context) error
+	Prepare(context.Context, recovery.PlanRequest) (*recovery.PlanProgress, error)
+	CommitMemberSignatures(context.Context, recovery.PlanRequest, []recovery.SubmittedMemberSignature) (*recovery.PlanProgress, error)
+	CommitShareAcknowledgements(context.Context, recovery.PlanRequest, []recovery.SubmittedShareAcknowledgement) (*recovery.PlanProgress, error)
+	StageCredentialBatches(context.Context, recovery.PlanRequest, []recovery.StagedBatchPayload) (*recovery.PlanProgress, error)
+	VerifyEvidenceAndMarkReady(context.Context, recovery.PlanRequest) (*recovery.PlanProgress, error)
+	Get(context.Context, string) (*recovery.PlanProgress, error)
+	Finalize(context.Context, recovery.FinalizeRequest) (*recovery.FinalizationProgress, error)
+	ClaimReplacementCredential(context.Context, recovery.ReplacementCredentialClaimRequest) (*recovery.ReplacementCredentialDelivery, error)
+}
+
+type VerificationExportService interface {
+	Ready(context.Context) error
+	Export(context.Context, exporter.Command) (*exporter.Result, error)
+	Download(context.Context, string, string) (*exporter.Result, error)
 }
 
 type Coordinator interface {
@@ -55,6 +78,27 @@ type Coordinator interface {
 
 func NewServer(coordinator Coordinator, riskAggregator *risk.Aggregator, credentialBatches CredentialBatchService,
 	apiKey, settlementAPIKey, batchAPIKey string) (*Server, error) {
+	return newServer(coordinator, riskAggregator, credentialBatches, nil,
+		nil, apiKey, settlementAPIKey, batchAPIKey, "")
+}
+
+func NewServerWithRecovery(coordinator Coordinator, riskAggregator *risk.Aggregator, credentialBatches CredentialBatchService,
+	recoveryGovernance RecoveryGovernanceService, apiKey, settlementAPIKey, batchAPIKey, recoveryAPIKey string) (*Server, error) {
+	return newServer(coordinator, riskAggregator, credentialBatches, recoveryGovernance,
+		nil, apiKey, settlementAPIKey, batchAPIKey, recoveryAPIKey)
+}
+
+func NewServerWithRecoveryEvidence(coordinator Coordinator, riskAggregator *risk.Aggregator,
+	credentialBatches CredentialBatchService, recoveryGovernance RecoveryGovernanceService,
+	recoveryExports VerificationExportService, apiKey, settlementAPIKey, batchAPIKey,
+	recoveryAPIKey string) (*Server, error) {
+	return newServer(coordinator, riskAggregator, credentialBatches, recoveryGovernance,
+		recoveryExports, apiKey, settlementAPIKey, batchAPIKey, recoveryAPIKey)
+}
+
+func newServer(coordinator Coordinator, riskAggregator *risk.Aggregator, credentialBatches CredentialBatchService,
+	recoveryGovernance RecoveryGovernanceService, recoveryExports VerificationExportService,
+	apiKey, settlementAPIKey, batchAPIKey, recoveryAPIKey string) (*Server, error) {
 	if coordinator == nil || riskAggregator == nil || credentialBatches == nil {
 		return nil, errors.New("coordinator, risk aggregator and credential batch service are required")
 	}
@@ -67,21 +111,31 @@ func NewServer(coordinator Coordinator, riskAggregator *risk.Aggregator, credent
 	if len(batchAPIKey) < 32 {
 		return nil, errors.New("credential batch API key must contain at least 32 characters")
 	}
+	if (recoveryGovernance != nil || recoveryExports != nil) && len(recoveryAPIKey) < 32 {
+		return nil, errors.New("recovery governance API key must contain at least 32 characters")
+	}
 	apiKeyHash := sha256.Sum256([]byte(apiKey))
 	settlementAPIKeyHash := sha256.Sum256([]byte(settlementAPIKey))
 	batchAPIKeyHash := sha256.Sum256([]byte(batchAPIKey))
+	recoveryAPIKeyHash := sha256.Sum256([]byte(recoveryAPIKey))
 	if subtle.ConstantTimeCompare(apiKeyHash[:], settlementAPIKeyHash[:]) == 1 ||
 		subtle.ConstantTimeCompare(apiKeyHash[:], batchAPIKeyHash[:]) == 1 ||
-		subtle.ConstantTimeCompare(settlementAPIKeyHash[:], batchAPIKeyHash[:]) == 1 {
+		subtle.ConstantTimeCompare(settlementAPIKeyHash[:], batchAPIKeyHash[:]) == 1 ||
+		(recoveryGovernance != nil || recoveryExports != nil) && (subtle.ConstantTimeCompare(apiKeyHash[:], recoveryAPIKeyHash[:]) == 1 ||
+			subtle.ConstantTimeCompare(settlementAPIKeyHash[:], recoveryAPIKeyHash[:]) == 1 ||
+			subtle.ConstantTimeCompare(batchAPIKeyHash[:], recoveryAPIKeyHash[:]) == 1) {
 		return nil, errors.New("regular, settlement and credential batch API keys must be distinct")
 	}
 	server := &Server{
 		coordinator:          coordinator,
 		risk:                 riskAggregator,
 		credentialBatches:    credentialBatches,
+		recoveryGovernance:   recoveryGovernance,
+		recoveryExports:      recoveryExports,
 		apiKeyHash:           apiKeyHash,
 		settlementAPIKeyHash: settlementAPIKeyHash,
 		batchAPIKeyHash:      batchAPIKeyHash,
+		recoveryAPIKeyHash:   recoveryAPIKeyHash,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
@@ -104,6 +158,16 @@ func NewServer(coordinator Coordinator, riskAggregator *risk.Aggregator, credent
 	mux.HandleFunc("POST /api/v1/credential-batches/{id}/activate", server.activateBatch)
 	mux.HandleFunc("POST /api/v1/credential-batches/{id}/retire", server.retireBatch)
 	mux.HandleFunc("POST /api/v1/control-rotation-evidence", server.issueControlRotationEvidence)
+	mux.HandleFunc("POST /api/v1/recovery-plans", server.prepareRecoveryPlan)
+	mux.HandleFunc("GET /api/v1/recovery-plans/{id}", server.getRecoveryPlan)
+	mux.HandleFunc("POST /api/v1/recovery-plans/{id}/manifest-signatures", server.commitRecoveryManifestSignatures)
+	mux.HandleFunc("POST /api/v1/recovery-plans/{id}/share-acknowledgements", server.commitRecoveryShareAcknowledgements)
+	mux.HandleFunc("POST /api/v1/recovery-plans/{id}/staged-batches", server.stageRecoveryCredentialBatches)
+	mux.HandleFunc("POST /api/v1/recovery-plans/{id}/evidence-ready", server.markRecoveryPlanReady)
+	mux.HandleFunc("POST /api/v1/recovery-plans/{id}/finalize", server.finalizeRecoveryPlan)
+	mux.HandleFunc("POST /api/v1/recovery-plans/{id}/credential-claims/{operation_id}", server.claimRecoveryCredential)
+	mux.HandleFunc("POST /api/v1/recovery-plans/{id}/verification-exports", server.createRecoveryVerificationExport)
+	mux.HandleFunc("GET /api/v1/recovery-plans/{id}/verification-exports/{export_id}", server.downloadRecoveryVerificationExport)
 	server.handler = server.authenticate(mux)
 	return server, nil
 }
@@ -129,6 +193,10 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		} else if isCredentialBatchRequest(request) {
 			// 账号控制凭据是独立高权限面，不能复用普通工作流或结算密钥。
 			expected = s.batchAPIKeyHash
+		} else if isRecoveryGovernanceRequest(request) {
+			if s.recoveryGovernance != nil || s.recoveryExports != nil {
+				expected = s.recoveryAPIKeyHash
+			}
 		}
 		if subtle.ConstantTimeCompare(provided[:], expected[:]) != 1 {
 			writeError(writer, http.StatusUnauthorized, "UNAUTHORIZED", "服务访问凭据无效")
@@ -136,6 +204,25 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(writer, request)
 	})
+}
+
+func isRecoveryGovernanceRequest(request *http.Request) bool {
+	if request == nil {
+		return false
+	}
+	rawParts := strings.Split(strings.Trim(request.URL.EscapedPath(), "/"), "/")
+	if len(rawParts) < 3 {
+		return false
+	}
+	parts := make([]string, 3)
+	for i := range parts {
+		decoded, err := url.PathUnescape(rawParts[i])
+		if err != nil {
+			return false
+		}
+		parts[i] = decoded
+	}
+	return parts[0] == "api" && parts[1] == "v1" && parts[2] == "recovery-plans"
 }
 
 func isCredentialBatchRequest(request *http.Request) bool {
@@ -290,17 +377,9 @@ func (s *Server) restore(writer http.ResponseWriter, request *http.Request) {
 	})
 }
 
-func (s *Server) replace(writer http.ResponseWriter, request *http.Request) {
-	var body struct {
-		TargetUserID               string `json:"target_user_id"`
-		ControlRotationEvidenceRef string `json:"control_rotation_evidence_ref"`
-	}
-	if !decodeJSON(writer, request, &body) {
-		return
-	}
-	s.runOperation(writer, request, func(operationID string) (*application.Operation, error) {
-		return s.coordinator.ReplacePermanently(request.Context(), operationID, request.PathValue("id"), body.TargetUserID, body.ControlRotationEvidenceRef)
-	})
+func (s *Server) replace(writer http.ResponseWriter, _ *http.Request) {
+	// 永久换员只能由 Pool 级、全 Seat 冻结后的 recovery finalize saga 执行。
+	writeDomainError(writer, application.ErrPersistentWorkflowUnsupported)
 }
 
 func (s *Server) runOperation(writer http.ResponseWriter, request *http.Request, run func(string) (*application.Operation, error)) {
@@ -564,6 +643,17 @@ func writeDomainError(writer http.ResponseWriter, err error) {
 		status, reason, message = http.StatusConflict, "CREDENTIAL_BATCH_STATE_CONFLICT", "凭据批次状态不允许当前操作"
 	case errors.Is(err, credentials.ErrRecoveryRootUnavailable):
 		status, reason, message = http.StatusServiceUnavailable, "RECOVERY_ROOT_UNAVAILABLE", "独立 Recovery 包装服务不可用"
+	case errors.Is(err, recovery.ErrNotFound):
+		status, reason, message = http.StatusNotFound, "RECOVERY_PLAN_NOT_FOUND", "恢复治理计划不存在"
+	case errors.Is(err, recovery.ErrInvalidData), errors.Is(err, recovery.ErrCanonicalization):
+		status, reason, message = http.StatusBadRequest, "RECOVERY_INVALID_DATA", "恢复治理请求无效"
+	case errors.Is(err, recovery.ErrHashDrift), errors.Is(err, recovery.ErrLeaseHeld),
+		errors.Is(err, recovery.ErrStaleFence), errors.Is(err, recovery.ErrInvalidState),
+		errors.Is(err, recovery.ErrBindingMismatch), errors.Is(err, recovery.ErrDuplicate),
+		errors.Is(err, recovery.ErrLegacy), errors.Is(err, recovery.ErrSignatureInvalid):
+		status, reason, message = http.StatusConflict, "RECOVERY_STATE_CONFLICT", "恢复治理状态或密码学绑定冲突"
+	case errors.Is(err, recovery.ErrProviderUnavailable):
+		status, reason, message = http.StatusServiceUnavailable, "RECOVERY_PROVIDER_UNAVAILABLE", "恢复治理密码学服务不可用"
 	case errors.Is(err, application.ErrSettlementGatewayUnavailable):
 		status, reason = http.StatusServiceUnavailable, "SETTLEMENT_GATEWAY_UNAVAILABLE"
 	case errors.Is(err, application.ErrInvalidSettlementRequest):

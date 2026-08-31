@@ -1,5 +1,7 @@
 # Phase 2-A PostgreSQL 持久化底座状态
 
+> 历史阶段快照：本文保留 Phase 2-A 当时的持久化范围和证据，不代表当前完整能力。当前状态与发布门禁以 [Phase 2-H 状态](phase2h-offline-verification-status.md) 和[全仓路线图](../../docs/PROJECT_CAPABILITIES_AND_ROADMAP_CN.md)为准。
+
 更新时间：2026-08-18
 
 ## 本阶段目标

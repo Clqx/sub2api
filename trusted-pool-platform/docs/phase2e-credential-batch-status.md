@@ -1,5 +1,8 @@
 # Phase 2-E 凭据批次持久化状态
 
+> 本文保留 Phase 2-E 当时边界；当前能力与发布门禁见
+> [Phase 2-F Recovery 治理准备闭环状态](phase2f-recovery-governance-status.md)。
+
 ## 已接线能力
 
 - `POST /api/v1/credential-batches`：以独立 Batch API Key 和幂等 operation 创建 PREPARED intent，
@@ -28,13 +31,14 @@ Payload、DEK、原始 AAD、密文、wrapped DEK、key ref、AAD hash 与内容
 
 ## 运维边界
 
-- 普通、settlement、batch 三类入站 API Key 必须两两不同。
+- Phase 2-E 当时要求普通、settlement、batch 三类入站 API Key 两两不同；Phase 2-F 新增的 recovery key
+  也必须与三者全部不同。
 - Batch operation client ID 必须与控制、settlement read、settlement resolve client ID 不同。
 - 开发模式允许两把显式且不同的本地 KEK，仅用于联调。
 - 生产模式禁止环境 KEK；必须由组合根注入原生支持 encryption context 的在线 KMS adapter，以及
   独立 Recovery wrap-only adapter。仓库当前未链接具体云 KMS/HSM 或 Recovery provider，因此生产模式
   仍会失败关闭。
-- 当前仍固定单副本。解除前必须完成 PostgreSQL 16 的 001→007/006→007 迁移、双连接 CAS/fence、
+- 当前仍固定单副本。总门禁已推进为 PostgreSQL 16 的 001→008/007→008 迁移、双连接 CAS/fence、
   epoch floor 竞态、崩溃注入和敏感 canary 扫描。
 
 ## 明确未完成

@@ -1,12 +1,13 @@
 openapi: 3.1.0
 info:
   title: Sub2API Trusted Pools 资源执行接口
-  version: 0.1.0
+  version: 0.2.0
   description: |
     与 Sub2API 当前 trusted-pools 路由一致的受限集成契约。Bearer 模式必须同时发送 Client ID；
     HMAC 模式必须使用与 Bearer 凭据独立的密钥，对 method、RequestURI、timestamp、nonce 和
     SHA-256 body hash 的规范串签名。
     这些接口不接受通用 Admin API Key。
+    Pool 永久换员使用独立、精确单一 `seat:permanent-rotate` scope 的客户端；通配符和混合 scope 被拒绝。
 x-implementation-status: implemented-in-sub2api
 servers:
   - url: http://localhost:8080/api/v1/integrations/trusted-pools
@@ -253,6 +254,89 @@ paths:
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
+  /permanent-rotations/prepare:
+    post:
+      operationId: preparePermanentPoolRotation
+      summary: 为规范排序的 Pool 全 Seat 集合准备禁用的新 credential
+      x-required-scope: seat:permanent-rotate
+      description: |
+        客户端 scope 必须精确为单元素 `seat:permanent-rotate`；`*`、普通或混合 scope 均拒绝。
+        Idempotency-Key 必须等于 body.operation_id。所有 Seat 必须 frozen、严格并发和 pending settlement
+        为零。响应可包含 credential，平台必须立即 KMS 包络且禁止日志；API Key 保持 disabled、Subscription
+        suspended、Seat 为 rotation_prepared。响应使用专用 Ed25519 key 签名。
+      parameters:
+        - $ref: '#/components/parameters/PermanentRotationIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PermanentRotationPrepareRequest'}
+      responses:
+        '201':
+          description: 全集 prepared；精确幂等重放可恢复同一 prepared credential
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PermanentRotationPrepareEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /permanent-rotations/activate:
+    post:
+      operationId: activatePermanentPoolRotationHeld
+      summary: 安装完整 prepared credential 集合但继续保持禁用
+      x-required-scope: seat:permanent-rotate
+      description: |
+        在一个 Pool 级事务中把新 credential 安装到稳定 API Key，并推进到
+        rotation_activated_pending_commit。响应必须证明 all_credentials_enabled=false、
+        all_subscriptions_enabled=false、旧 credential 集合失效、fingerprint gate 启用、持久 auth-cache
+        outbox 存在且 minimum_events >= 2 * Seat 数。此阶段不会返回 credential，也不得开放网关。
+      parameters:
+        - $ref: '#/components/parameters/PermanentRotationIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PermanentRotationActivateRequest'}
+      responses:
+        '200':
+          description: 完整集合已安装并 held
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PermanentRotationActivationEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /permanent-rotations/commit:
+    post:
+      operationId: commitPermanentPoolRotation
+      summary: 平台结构切换后释放完整 held 集合
+      x-required-scope: seat:permanent-rotate
+      description: |
+        只接受精确绑定 prepare/activate operation/hash 的完整 held 集合。再次核对 fingerprint、严格并发和
+        settlement 屏障后，原子启用 API Key/Subscription 并把 Seat 恢复 active。响应不含 credential，使用
+        专用 Ed25519 key 签名并携带 fingerprint gate 与 durable outbox 证明。
+      parameters:
+        - $ref: '#/components/parameters/PermanentRotationIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PermanentRotationCommitRequest'}
+      responses:
+        '200':
+          description: 完整 Pool 集合已 committed 并启用
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PermanentRotationCommitEnvelope'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     integrationClientID:
@@ -293,7 +377,231 @@ components:
       in: path
       required: true
       schema: {type: string, minLength: 1, maxLength: 128}
+    PermanentRotationIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 必须与 body.operation_id 完全相同
+      schema: {type: string, minLength: 1, maxLength: 128}
   schemas:
+    SHA256Hex:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+    PermanentRotationAttestation:
+      type: object
+      additionalProperties: false
+      required: [version, issuer, key_id, reference, digest, signature]
+      properties:
+        version: {type: string, const: '1'}
+        issuer: {type: string, description: Sub2API permanent rotation attestation issuer}
+        key_id: {type: string, description: TRUSTED_POOL_PERMANENT_ROTATION_SIGNING_KEY_ID}
+        reference: {type: string}
+        digest: {$ref: '#/components/schemas/SHA256Hex'}
+        signature: {type: string, contentEncoding: base64, description: Ed25519 signature}
+    PermanentRotationSeatBinding:
+      type: object
+      required: [external_seat_id, target_member_id, expected_assignment_epoch, principal_user_id,
+        subscription_id, api_key_id, from_api_key_version, to_api_key_version, child_operation_id, child_request_hash]
+      properties:
+        external_seat_id: {type: string, minLength: 1, maxLength: 128}
+        target_member_id: {type: string, minLength: 1, maxLength: 128}
+        expected_assignment_epoch: {type: integer, format: int64, minimum: 1}
+        principal_user_id: {type: integer, format: int64, minimum: 1}
+        subscription_id: {type: integer, format: int64, minimum: 1}
+        api_key_id: {type: integer, format: int64, minimum: 1}
+        from_api_key_version: {type: integer, format: int64, minimum: 1}
+        to_api_key_version: {type: integer, format: int64, minimum: 2, description: from_api_key_version + 1}
+        child_operation_id: {type: string, minLength: 1, maxLength: 128}
+        child_request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+    PermanentRotationPrepareRequest:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, operation_id, external_pool_id, plan_id, ceremony_type, from_epoch, to_epoch,
+        child_set_hash, seats, request_hash]
+      properties:
+        protocol_version: {type: string, const: trusted-pool/permanent-seat-rotation/v1}
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        external_pool_id: {type: string, minLength: 1, maxLength: 128}
+        plan_id: {type: string, minLength: 1, maxLength: 128}
+        ceremony_type: {type: string, enum: [BOOTSTRAP, ROTATE]}
+        from_epoch: {type: integer, format: int64, minimum: 1}
+        to_epoch: {type: integer, format: int64, minimum: 2, description: from_epoch + 1}
+        child_set_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        seats:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          description: external_seat_id 严格升序的 Pool 完整集合
+          items: {$ref: '#/components/schemas/PermanentRotationSeatBinding'}
+        request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+    PermanentRotationPreparedSeat:
+      allOf:
+        - $ref: '#/components/schemas/PermanentRotationSeatBinding'
+        - type: object
+          required: [credential, credential_fingerprint, active_api_key_version, group_id, prepared_rotation_ref, state,
+            credential_enabled, subscription_enabled, credential_rotation_complete, completed_at]
+          properties:
+            credential: {type: string, x-sensitive: true, description: 仅 prepare 受限响应披露}
+            credential_fingerprint: {$ref: '#/components/schemas/SHA256Hex'}
+            active_api_key_version: {type: integer, format: int64, minimum: 2}
+            group_id: {type: integer, format: int64, minimum: 1}
+            prepared_rotation_ref: {type: string}
+            state: {type: string, const: rotation_prepared}
+            credential_enabled: {type: boolean, const: false}
+            subscription_enabled: {type: boolean, const: false}
+            credential_rotation_complete: {type: boolean, const: false}
+            completed_at: {type: string, format: date-time}
+    PermanentRotationPrepareResult:
+      type: object
+      additionalProperties: false
+      required: [operation_id, protocol_version, external_pool_id, plan_id, ceremony_type, from_epoch, to_epoch,
+        request_hash, child_set_hash, prepared_set_hash, status, credentials_disclosed, seats, attestation]
+      properties:
+        operation_id: {type: string}
+        protocol_version: {type: string, const: trusted-pool/permanent-seat-rotation/v1}
+        external_pool_id: {type: string}
+        plan_id: {type: string}
+        ceremony_type: {type: string, enum: [BOOTSTRAP, ROTATE]}
+        from_epoch: {type: integer, format: int64}
+        to_epoch: {type: integer, format: int64}
+        request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        child_set_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        prepared_set_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        status: {type: string, const: prepared}
+        credentials_disclosed: {type: boolean, const: true}
+        seats: {type: array, minItems: 1, items: {$ref: '#/components/schemas/PermanentRotationPreparedSeat'}}
+        attestation: {$ref: '#/components/schemas/PermanentRotationAttestation'}
+    PermanentRotationActiveSeatBinding:
+      type: object
+      required: [external_seat_id, target_member_id, expected_assignment_epoch, principal_user_id, subscription_id,
+        api_key_id, active_api_key_version, child_operation_id, child_request_hash, credential_fingerprint,
+        prepared_rotation_ref]
+      properties:
+        external_seat_id: {type: string, minLength: 1, maxLength: 128}
+        target_member_id: {type: string, minLength: 1, maxLength: 128}
+        expected_assignment_epoch: {type: integer, format: int64, minimum: 1}
+        principal_user_id: {type: integer, format: int64, minimum: 1}
+        subscription_id: {type: integer, format: int64, minimum: 1}
+        api_key_id: {type: integer, format: int64, minimum: 1}
+        active_api_key_version: {type: integer, format: int64, minimum: 2}
+        child_operation_id: {type: string, minLength: 1, maxLength: 128}
+        child_request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        credential_fingerprint: {$ref: '#/components/schemas/SHA256Hex'}
+        prepared_rotation_ref: {type: string, minLength: 1, maxLength: 128}
+    PermanentRotationActivateRequest:
+      type: object
+      required: [protocol_version, operation_id, prepare_operation_id, external_pool_id, plan_id, ceremony_type,
+        from_epoch, to_epoch, prepared_set_hash, seats, request_hash]
+      properties:
+        protocol_version: {type: string, const: trusted-pool/permanent-seat-rotation/v1}
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        prepare_operation_id: {type: string, minLength: 1, maxLength: 128}
+        external_pool_id: {type: string, minLength: 1, maxLength: 128}
+        plan_id: {type: string, minLength: 1, maxLength: 128}
+        ceremony_type: {type: string, enum: [BOOTSTRAP, ROTATE]}
+        from_epoch: {type: integer, format: int64, minimum: 1}
+        to_epoch: {type: integer, format: int64, minimum: 2}
+        prepared_set_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        seats: {type: array, minItems: 1, maxItems: 1000, items: {$ref: '#/components/schemas/PermanentRotationActiveSeatBinding'}}
+        request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+    PermanentRotationCommitRequest:
+      allOf:
+        - $ref: '#/components/schemas/PermanentRotationActivateRequest'
+        - type: object
+          required: [activation_operation_id, activation_request_hash]
+          properties:
+            activation_operation_id: {type: string, minLength: 1, maxLength: 128}
+            activation_request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+    PermanentRotationObservedSeat:
+      allOf:
+        - $ref: '#/components/schemas/PermanentRotationActiveSeatBinding'
+        - type: object
+          required: [assignment_epoch, group_id, current_concurrency, pending_settlements]
+          properties:
+            assignment_epoch: {type: integer, format: int64, minimum: 2}
+            group_id: {type: integer, format: int64, minimum: 1}
+            current_concurrency: {type: integer, minimum: 0, maximum: 0}
+            pending_settlements: {type: integer, minimum: 0, maximum: 0}
+    PermanentRotationAuthCacheBarrier:
+      type: object
+      additionalProperties: false
+      required: [durable_outbox, minimum_events]
+      properties:
+        durable_outbox: {type: boolean, const: true}
+        minimum_events: {type: integer, minimum: 2, description: 必须不少于 2 * Seat 数}
+    PermanentRotationActivationResult:
+      type: object
+      required: [protocol_version, operation_id, request_hash, prepare_operation_id, external_pool_id, plan_id,
+        ceremony_type, from_epoch, to_epoch, prepared_set_hash, status, all_credentials_enabled,
+        all_subscriptions_enabled, old_credential_set_invalidated, authorization_cache_invalidated,
+        credential_fingerprint_gate_enforced, observed_at, attestation, seats, auth_cache_barrier]
+      properties:
+        protocol_version: {type: string, const: trusted-pool/permanent-seat-rotation/v1}
+        operation_id: {type: string}
+        request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        prepare_operation_id: {type: string}
+        external_pool_id: {type: string}
+        plan_id: {type: string}
+        ceremony_type: {type: string, enum: [BOOTSTRAP, ROTATE]}
+        from_epoch: {type: integer, format: int64}
+        to_epoch: {type: integer, format: int64}
+        prepared_set_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        status: {type: string, const: activated_pending_commit}
+        all_credentials_enabled: {type: boolean, const: false}
+        all_subscriptions_enabled: {type: boolean, const: false}
+        old_credential_set_invalidated: {type: boolean, const: true}
+        authorization_cache_invalidated: {type: boolean, description: 同步缓存优化结果；false 不替代 fingerprint gate}
+        credential_fingerprint_gate_enforced: {type: boolean, const: true}
+        observed_at: {type: string, format: date-time}
+        attestation: {$ref: '#/components/schemas/PermanentRotationAttestation'}
+        seats: {type: array, minItems: 1, items: {$ref: '#/components/schemas/PermanentRotationObservedSeat'}}
+        auth_cache_barrier: {$ref: '#/components/schemas/PermanentRotationAuthCacheBarrier'}
+    PermanentRotationCommitResult:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, operation_id, request_hash, prepare_operation_id, activation_operation_id,
+        activation_request_hash, external_pool_id, plan_id, ceremony_type, from_epoch, to_epoch, prepared_set_hash,
+        status, all_credentials_enabled, all_subscriptions_enabled, old_credential_set_invalidated,
+        authorization_cache_invalidated, credential_fingerprint_gate_enforced, observed_at, attestation, seats,
+        auth_cache_barrier]
+      properties:
+        protocol_version: {type: string, const: trusted-pool/permanent-seat-rotation/v1}
+        operation_id: {type: string}
+        request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        prepare_operation_id: {type: string}
+        activation_operation_id: {type: string}
+        activation_request_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        external_pool_id: {type: string}
+        plan_id: {type: string}
+        ceremony_type: {type: string, enum: [BOOTSTRAP, ROTATE]}
+        from_epoch: {type: integer, format: int64}
+        to_epoch: {type: integer, format: int64}
+        prepared_set_hash: {$ref: '#/components/schemas/SHA256Hex'}
+        status: {type: string, const: committed}
+        all_credentials_enabled: {type: boolean, const: true}
+        all_subscriptions_enabled: {type: boolean, const: true}
+        old_credential_set_invalidated: {type: boolean, const: true}
+        authorization_cache_invalidated: {type: boolean}
+        credential_fingerprint_gate_enforced: {type: boolean, const: true}
+        observed_at: {type: string, format: date-time}
+        attestation: {$ref: '#/components/schemas/PermanentRotationAttestation'}
+        seats: {type: array, minItems: 1, items: {$ref: '#/components/schemas/PermanentRotationObservedSeat'}}
+        auth_cache_barrier: {$ref: '#/components/schemas/PermanentRotationAuthCacheBarrier'}
+    PermanentRotationPrepareEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties: {data: {$ref: '#/components/schemas/PermanentRotationPrepareResult'}}
+    PermanentRotationActivationEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties: {data: {$ref: '#/components/schemas/PermanentRotationActivationResult'}}
+    PermanentRotationCommitEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/BaseEnvelope'
+        - type: object
+          properties: {data: {$ref: '#/components/schemas/PermanentRotationCommitResult'}}
     ProvisionSeatRequest:
       type: object
       additionalProperties: false

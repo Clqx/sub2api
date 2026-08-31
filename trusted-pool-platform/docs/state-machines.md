@@ -105,9 +105,69 @@ token SHA-256 摘要和短 TTL。Provision 领取状态按
 Phase 2-C 已持久化 Provision 与临时换员/恢复产生的 Seat 访问凭据领取。Provision 使用
 `READY -> ACK_PENDING -> CLAIMED`；临时换员/恢复的 Sub2API rotate 已在 Operation 成功前确认，Claim 可从
 `READY` 经本地 lease/KMS 解密/fenced CAS 直接进入 `CLAIMED`。Credential Batch 的持久生命周期已接入，
-但不提供 Open/领取；永久换员、control rotation evidence 和 Share 领取继续失败关闭。
+但不提供 Open/领取；旧 control rotation evidence 和 Share 明文领取继续失败关闭。Phase 2-G replacement
+claim 另走 `ISSUANCE_PENDING -> READY -> CLAIMED|EXPIRED`，其中 worker 不得推进到 `READY`。
 
-## 4. 风险等级
+## 4. Recovery Epoch Plan
+
+```text
+PLANNED
+  -> ROOT_COMMITTED
+  -> SHARES_COMMITTED
+  -> MANIFEST_DRAFT
+  -> MANIFEST_SIGNED
+  -> ACKNOWLEDGED
+  -> BATCHES_STAGED
+  -> READY
+  -> FINALIZED
+```
+
+- 这是 Pool 全量准备状态机。所有 Seat 必须先 `FROZEN`，每个权威账号必须映射至少一个计划内 Seat。
+- `BOOTSTRAP` 从 `LEGACY_UNVERIFIED` 活跃 Epoch 建立第一条可信链且不能包含 Owner replacement；`ROTATE`
+  只能从 CURRENT 活跃 Epoch 开始，只允许声明的 Owner replacement 改变成员快照。
+- Root、Share、Manifest、安全字段和阶段提交后不可替换；重放必须保持完整 plan intent，写入使用 lease/fence。
+- 每个账号的 FROM/TO 集合必须各有且只有 LOGIN/MFA/RECOVERY/OWNERSHIP 四类；TO 批次先为 plan-scoped `STAGED`。
+- `READY` 是治理准备终点，不是永久换员终态；此时尚未切换 Epoch、Owner、活动批次或 credential floor。
+- Plan `FINALIZED` 在平台结构事务提交时写入；它不单独证明远端 release 或 claim token 签发完成。必须同时
+  检查 finalization case 和总 operation。
+
+Finalization case：
+
+```text
+READY -> ROTATING -> READY_TO_COMMIT -> PROVIDER_COMMIT_PENDING -> READY_TO_ISSUE -> FINALIZED
+```
+
+- Sub2API prepare 后为 `rotation_prepared`；activate 后为 `rotation_activated_pending_commit` 且 API Key、
+  Subscription 仍禁用。平台结构事务提交后 case 为 `PROVIDER_COMMIT_PENDING`。
+- Sub2API commit 证明持久后 case 为 `READY_TO_ISSUE`；worker 在此停止。首次同步 finalize 原子签发全部
+  claim token 后 case 和总 operation 才完成，GET、worker 和幂等重放不披露 token。
+- 旧单 Seat replace 固定 503；结果未知时不得人工把 plan、Seat 或 claim 改为成功。
+
+## 5. Phase 2-H 离线验证与 Reveal transcript
+
+离线验证 verdict：
+
+```text
+INPUT -> VERIFIED
+      -> INCOMPLETE
+      -> REJECTED
+```
+
+`INCOMPLETE` 包括历史签名 domain 不可移植或 typed provider proof 不完整；它不是弱验证成功。`REJECTED`
+表示规范编码、schema、checkpoint、散列链、集合、阈值、信任 key 或签名至少一项失败。
+
+离线 Reveal 授权报告：
+
+```text
+VERIFIED bundle + intent + approvals -> POLICY_UNAPPROVED
+                                      -> AUTHORIZED_NOT_EXECUTABLE
+                                      -> REJECTED
+```
+
+这是纯函数输出，不是已接线的 HTTP/数据库运行状态机。Migration 010 中的 Reveal 状态与 append-only 事件链
+只是未来编排基础；H1 没有 executor，不能从任何授权状态进入 Share 解密、重建、unwrap 或明文输出。
+
+## 6. 风险等级
 
 ```text
 NORMAL -> WATCH -> LIMITED -> SUSPEND

@@ -1,5 +1,7 @@
 # Phase 2-D 结算解除运行时状态
 
+> 历史阶段快照：本文保留 Phase 2-D 当时的范围和证据，不代表当前完整能力。当前状态与发布门禁以 [Phase 2-H 状态](phase2h-offline-verification-status.md) 和[全仓路线图](../../docs/PROJECT_CAPABILITIES_AND_ROADMAP_CN.md)为准。
+
 ## 已接线能力
 
 Phase 2-D 在持久暂停和换员工作流之上，接入 Sub2API pending settlement 的查询、受控解除与重启恢复：
@@ -51,7 +53,7 @@ resolve 不是补账引擎，也不验证 evidence 的外部真实性；真实�
 开发验证包含 Go 全包测试、vet、Store/Coordinator/Client/HTTP 契约和 OpenAPI 静态校验。生产或封闭试点前
 仍必须完成：
 
-- 当前总发布门禁以 Phase 2-E 为准：PostgreSQL 16 空库 `001 -> 007` 与现有 `006 -> 007` 升级；
+- 当前总发布门禁已推进到 Phase 2-F：PostgreSQL 16 空库 `001 -> 008` 与现有 `007 -> 008` 升级；
   本阶段单独仍要求验证 `005 -> 006` 的历史数据、所有 deferred trigger 和 scope 隔离迁移。
 - 双连接验证同 operation 重放、hash 漂移、lease 接管、旧 fence 拒绝、同 settlement 不同 operation，
   以及 resolve 与 Suspend/Assignment 交错。

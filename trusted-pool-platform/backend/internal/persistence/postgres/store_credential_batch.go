@@ -354,7 +354,7 @@ WHERE id = $1 AND migration_state = 'CURRENT' AND status = $3 AND version = $4`,
 	_, err = tx.ExecContext(ctx, `INSERT INTO credential_batch_transitions (
 integration_operation_id, credential_batch_id, transition_type, from_status, to_status,
 expected_batch_version, resulting_batch_version, occurred_at
-) VALUES ($1, $2, $3, $4, $5, $6, $6 + 1, CURRENT_TIMESTAMP)`,
+) VALUES ($1, $2, $3, $4, $5, $6::bigint, $6::bigint + 1, CURRENT_TIMESTAMP)`,
 		op.AggregateID, batch.ID, action, string(fromState), string(toState), input.ExpectedVersion)
 	if err != nil {
 		return nil, false, translateBatchError("record credential batch transition", err)

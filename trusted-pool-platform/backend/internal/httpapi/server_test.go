@@ -14,12 +14,14 @@ import (
 	"trusted-pool-platform/backend/internal/application"
 	"trusted-pool-platform/backend/internal/credentials"
 	"trusted-pool-platform/backend/internal/domain"
+	"trusted-pool-platform/backend/internal/recovery"
 	"trusted-pool-platform/backend/internal/risk"
 )
 
 const testAPIKey = "test-platform-api-key-0123456789abcdef"
 const testSettlementAPIKey = "test-settlement-api-key-0123456789abcdef"
 const testBatchAPIKey = "test-batch-api-key-0123456789abcdef"
+const testRecoveryAPIKey = "test-recovery-api-key-0123456789abcdef"
 
 func testTime(value time.Time) *time.Time { return &value }
 
@@ -119,6 +121,62 @@ func (postgresModeCoordinator) StorageStatus() string { return "postgres" }
 type batchServiceStub struct {
 	batch *credentials.StoredCredentialBatch
 	err   error
+}
+
+type recoveryServiceStub struct {
+	readyErr  error
+	plan      *recovery.StoredEpochPlan
+	finalized bool
+}
+
+func (s *recoveryServiceStub) Ready(context.Context) error { return s.readyErr }
+func (s *recoveryServiceStub) Prepare(_ context.Context, request recovery.PlanRequest) (*recovery.PlanProgress, error) {
+	if s.readyErr != nil {
+		return nil, s.readyErr
+	}
+	now := time.Now().UTC()
+	s.plan = &recovery.StoredEpochPlan{ExternalID: request.PlanExternalID, PoolExternalID: request.PoolID,
+		CeremonyType: request.CeremonyType, FromEpoch: request.FromEpoch, ToEpoch: request.ToEpoch,
+		Status: "MANIFEST_DRAFT", CreatedAt: now, UpdatedAt: now}
+	return &recovery.PlanProgress{Plan: s.plan, FencingToken: 3, LeaseExpiresAt: now.Add(time.Minute)}, nil
+}
+func (s *recoveryServiceStub) CommitMemberSignatures(context.Context, recovery.PlanRequest, []recovery.SubmittedMemberSignature) (*recovery.PlanProgress, error) {
+	return nil, recovery.ErrInvalidState
+}
+func (s *recoveryServiceStub) CommitShareAcknowledgements(context.Context, recovery.PlanRequest, []recovery.SubmittedShareAcknowledgement) (*recovery.PlanProgress, error) {
+	return nil, recovery.ErrInvalidState
+}
+func (s *recoveryServiceStub) StageCredentialBatches(context.Context, recovery.PlanRequest, []recovery.StagedBatchPayload) (*recovery.PlanProgress, error) {
+	return nil, recovery.ErrInvalidState
+}
+func (s *recoveryServiceStub) VerifyEvidenceAndMarkReady(context.Context, recovery.PlanRequest) (*recovery.PlanProgress, error) {
+	return nil, recovery.ErrInvalidState
+}
+func (s *recoveryServiceStub) Get(context.Context, string) (*recovery.PlanProgress, error) {
+	if s.plan == nil {
+		return nil, recovery.ErrNotFound
+	}
+	now := time.Now().UTC()
+	return &recovery.PlanProgress{Plan: s.plan, FencingToken: 3, LeaseExpiresAt: now.Add(time.Minute)}, nil
+}
+func (s *recoveryServiceStub) Finalize(_ context.Context, request recovery.FinalizeRequest) (*recovery.FinalizationProgress, error) {
+	progress := &recovery.FinalizationProgress{PlanID: request.PlanExternalID, CeremonyType: recovery.CeremonyRotate,
+		PoolID: "pool-1", FromEpoch: 1, ToEpoch: 2, Status: "FINALIZED"}
+	if !s.finalized {
+		s.finalized = true
+		progress.Claims = []recovery.ReplacementClaimToken{{OperationID: "seat-child-op-1", SeatID: "seat-1",
+			TargetMemberID: "member-new", ClaimToken: "one-time-claim-token", ExpiresAt: time.Now().UTC().Add(time.Minute)}}
+	}
+	return progress, nil
+}
+func (*recoveryServiceStub) ClaimReplacementCredential(_ context.Context,
+	request recovery.ReplacementCredentialClaimRequest) (*recovery.ReplacementCredentialDelivery, error) {
+	if request.PlanExternalID != "plan-1" || request.OperationID != "seat-child-op-1" || request.SeatID != "seat-1" ||
+		request.TargetMemberID != "member-new" || request.ClaimToken != "one-time-claim-token" {
+		return nil, recovery.ErrInvalidData
+	}
+	return &recovery.ReplacementCredentialDelivery{OperationID: request.OperationID, SeatID: "seat-1",
+		TargetMemberID: request.TargetMemberID, Credential: "rotated-credential"}, nil
 }
 
 func (s *batchServiceStub) Seal(_ context.Context, request credentials.PersistentSealRequest) (*credentials.StoredCredentialBatch, error) {
@@ -257,6 +315,96 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	return server
+}
+
+func newTestRecoveryServer(t *testing.T, service RecoveryGovernanceService) *Server {
+	t.Helper()
+	aggregator, err := risk.NewAggregator([]byte(strings.Repeat("f", 32)), risk.DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper, err := credentials.NewLocalKeyWrapper([]byte(strings.Repeat("k", 32)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := credentials.NewManager(wrapper, nil, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServerWithRecovery(application.NewCoordinator(apiGateway{}, time.Now, manager), aggregator,
+		&batchServiceStub{}, service, testAPIKey, testSettlementAPIKey, testBatchAPIKey, testRecoveryAPIKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+func TestRecoveryGovernanceUsesIndependentKeyAndSafeResponses(t *testing.T) {
+	service := &recoveryServiceStub{}
+	server := newTestRecoveryServer(t, service)
+	body := map[string]any{"operation_id": "recovery-op-1", "plan_id": "plan-1", "pool_id": "pool-1",
+		"ceremony_type": "ROTATE", "from_epoch": 1, "to_epoch": 2,
+		"provider_attestation_envelope": "c2Vuc2l0aXZlLWF0dGVzdGF0aW9uLWNhbmFyeQ=="}
+	ordinary := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/recovery-plans", body,
+		"recovery-op-1", testAPIKey)
+	if ordinary.Code != http.StatusUnauthorized {
+		t.Fatalf("ordinary key status = %d", ordinary.Code)
+	}
+	encoded := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/%72ecovery-plans", body,
+		"recovery-op-1", testAPIKey)
+	if encoded.Code != http.StatusUnauthorized {
+		t.Fatalf("encoded recovery prefix status = %d", encoded.Code)
+	}
+	prepared := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/recovery-plans", body,
+		"recovery-op-1", testRecoveryAPIKey)
+	if prepared.Code != http.StatusAccepted || strings.Contains(prepared.Body.String(), "sensitive-attestation-canary") ||
+		!strings.Contains(prepared.Body.String(), `"fencing_token":3`) {
+		t.Fatalf("unsafe recovery response: status=%d body=%s", prepared.Code, prepared.Body.String())
+	}
+	ordinaryGet := requestJSONWithKey(t, server.Handler(), http.MethodGet, "/api/v1/recovery-plans/plan-1", nil,
+		"", testAPIKey)
+	if ordinaryGet.Code != http.StatusUnauthorized {
+		t.Fatalf("ordinary key recovery GET status = %d", ordinaryGet.Code)
+	}
+	progress := requestJSONWithKey(t, server.Handler(), http.MethodGet, "/api/v1/recovery-plans/plan-1", nil,
+		"", testRecoveryAPIKey)
+	if progress.Code != http.StatusOK || !strings.Contains(progress.Body.String(), `"fencing_token":3`) ||
+		!strings.Contains(progress.Body.String(), `"lease_expires_at"`) || strings.Contains(progress.Body.String(), "sensitive") {
+		t.Fatalf("unsafe recovery GET: status=%d body=%s", progress.Code, progress.Body.String())
+	}
+	finalize := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/recovery-plans/plan-1/finalize",
+		map[string]any{"operation_id": "finalize-op-1", "plan_id": "plan-1", "case_id": "case-1",
+			"evidence_ids": []string{"evidence-1"}}, "finalize-op-1", testRecoveryAPIKey)
+	if finalize.Code != http.StatusOK || !strings.Contains(finalize.Body.String(), "one-time-claim-token") {
+		t.Fatalf("finalize status = %d body=%s", finalize.Code, finalize.Body.String())
+	}
+	replay := requestJSONWithKey(t, server.Handler(), http.MethodPost, "/api/v1/recovery-plans/plan-1/finalize",
+		map[string]any{"operation_id": "finalize-op-1", "plan_id": "plan-1", "case_id": "case-1",
+			"evidence_ids": []string{"evidence-1"}}, "finalize-op-1", testRecoveryAPIKey)
+	if replay.Code != http.StatusOK || strings.Contains(replay.Body.String(), "one-time-claim-token") ||
+		strings.Contains(replay.Body.String(), `"claims"`) {
+		t.Fatalf("finalize replay leaked claim token: status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	progress = requestJSONWithKey(t, server.Handler(), http.MethodGet, "/api/v1/recovery-plans/plan-1", nil,
+		"", testRecoveryAPIKey)
+	if strings.Contains(progress.Body.String(), "one-time-claim-token") {
+		t.Fatalf("GET leaked claim token: %s", progress.Body.String())
+	}
+	claim := requestJSONWithKey(t, server.Handler(), http.MethodPost,
+		"/api/v1/recovery-plans/plan-1/credential-claims/seat-child-op-1",
+		map[string]any{"seat_id": "seat-1", "target_member_id": "member-new", "claim_token": "one-time-claim-token"},
+		"seat-child-op-1", testRecoveryAPIKey)
+	if claim.Code != http.StatusOK || !strings.Contains(claim.Body.String(), "rotated-credential") {
+		t.Fatalf("claim status=%d body=%s", claim.Code, claim.Body.String())
+	}
+}
+
+func TestDisabledRecoveryGovernanceFailsClosedWithoutBreakingRegularReadiness(t *testing.T) {
+	server := newTestServer(t)
+	response := requestJSON(t, server.Handler(), http.MethodGet, "/api/v1/recovery-plans/plan-1", nil, "")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "RECOVERY_PROVIDER_UNAVAILABLE") {
+		t.Fatalf("disabled recovery status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func requestJSON(t *testing.T, handler http.Handler, method, path string, body any, operationID string) *httptest.ResponseRecorder {

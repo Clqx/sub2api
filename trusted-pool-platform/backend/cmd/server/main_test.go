@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"testing"
+)
 
 func TestValidateIndependentSettlementCredentials(t *testing.T) {
 	valid := []string{"control", "control-secret-123", "read", "read-secret-123", "resolve", "resolve-secret-123"}
@@ -35,6 +39,54 @@ func TestValidateIndependentBatchClient(t *testing.T) {
 		if err := validateIndependentBatchClient(value, "control", "read", "resolve"); err == nil {
 			t.Fatalf("unsafe batch client %q was accepted", value)
 		}
+	}
+}
+
+func TestValidateIndependentRecoveryClient(t *testing.T) {
+	if err := validateIndependentRecoveryClient("recovery", "batch", "control", "read", "resolve"); err != nil {
+		t.Fatalf("independent recovery client rejected: %v", err)
+	}
+	for _, value := range []string{"", "batch", "control", "read", "resolve"} {
+		if err := validateIndependentRecoveryClient(value, "batch", "control", "read", "resolve"); err == nil {
+			t.Fatalf("unsafe recovery client %q was accepted", value)
+		}
+	}
+}
+
+func TestValidateIndependentEvidenceExportClient(t *testing.T) {
+	others := []string{"recovery", "batch", "control", "read", "resolve"}
+	if err := validateIndependentEvidenceExportClient("evidence-export", others...); err != nil {
+		t.Fatalf("independent evidence export client rejected: %v", err)
+	}
+	for _, value := range append([]string{""}, others...) {
+		if err := validateIndependentEvidenceExportClient(value, others...); err == nil {
+			t.Fatalf("unsafe evidence export client %q was accepted", value)
+		}
+	}
+}
+
+func TestRecoveryRotationCredentialsAndTrustAnchorAreIndependent(t *testing.T) {
+	ids := []string{"control", "settlement-read", "settlement-resolve"}
+	secrets := []string{"control-secret", "read-secret", "resolve-secret"}
+	if err := validateIndependentRecoveryRotationCredentials("recovery-rotation", "rotation-secret", ids, secrets); err != nil {
+		t.Fatalf("independent recovery rotation credentials rejected: %v", err)
+	}
+	for _, reusedID := range ids {
+		if err := validateIndependentRecoveryRotationCredentials(reusedID, "rotation-secret", ids, secrets); err == nil {
+			t.Fatalf("reused recovery rotation id %q was accepted", reusedID)
+		}
+	}
+	for _, reusedSecret := range secrets {
+		if err := validateIndependentRecoveryRotationCredentials("recovery-rotation", reusedSecret, ids, secrets); err == nil {
+			t.Fatal("reused recovery rotation secret was accepted")
+		}
+	}
+	encoded := base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))
+	if key, err := decodeEd25519PublicKey(encoded); err != nil || len(key) != ed25519.PublicKeySize {
+		t.Fatalf("valid Ed25519 public key rejected: %v", err)
+	}
+	if _, err := decodeEd25519PublicKey(base64.StdEncoding.EncodeToString(make([]byte, 31))); err == nil {
+		t.Fatal("wrong-sized Ed25519 public key was accepted")
 	}
 }
 

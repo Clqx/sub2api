@@ -88,7 +88,8 @@ func validateMigrationLedgerPrefix(ctx context.Context, conn *sql.Conn, items []
 func ensureMigrationLedger(ctx context.Context, conn *sql.Conn) error {
 	var ledgerExists bool
 	if err := conn.QueryRowContext(ctx,
-		`SELECT to_regclass('public.trusted_pool_schema_migrations') IS NOT NULL`).Scan(&ledgerExists); err != nil {
+		`SELECT to_regclass(format('%I.%I', current_schema(),
+'trusted_pool_schema_migrations')) IS NOT NULL`).Scan(&ledgerExists); err != nil {
 		return fmt.Errorf("inspect migration ledger: %w", err)
 	}
 	if ledgerExists {
@@ -96,11 +97,12 @@ func ensureMigrationLedger(ctx context.Context, conn *sql.Conn) error {
 	}
 	var domainSchemaExists bool
 	if err := conn.QueryRowContext(ctx, `SELECT
-to_regclass('public.members') IS NOT NULL OR
-to_regclass('public.pools') IS NOT NULL OR
-to_regclass('public.seats') IS NOT NULL OR
-to_regclass('public.integration_operations') IS NOT NULL OR
-to_regclass('public.credential_claims') IS NOT NULL`).Scan(&domainSchemaExists); err != nil {
+to_regclass(format('%I.%I', current_schema(), 'members')) IS NOT NULL OR
+to_regclass(format('%I.%I', current_schema(), 'pools')) IS NOT NULL OR
+to_regclass(format('%I.%I', current_schema(), 'seats')) IS NOT NULL OR
+to_regclass(format('%I.%I', current_schema(), 'integration_operations')) IS NOT NULL OR
+to_regclass(format('%I.%I', current_schema(), 'credential_claims')) IS NOT NULL`).
+		Scan(&domainSchemaExists); err != nil {
 		return fmt.Errorf("inspect unmanaged domain schema: %w", err)
 	}
 	if domainSchemaExists {

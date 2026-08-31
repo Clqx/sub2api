@@ -15,9 +15,16 @@
 - Phase 2-B（已完成开发接线）：持久化暂停、排空、冻结与重启对账。
 - Phase 2-C（已完成开发接线）：持久化临时换员、正式成员恢复、加密 Claim 与重启对账。
 - Phase 2-D（已完成开发接线）：持久化 pending settlement 查询、解除 intent、审计和重启恢复。
-- Phase 2-E（当前）：持久化 Credential Batch Seal/Get/Activate/Retire；同一 DEK 使用在线 KMS 与独立
-  Recovery wrap-only adapter 双包装。永久换员、control rotation evidence、Recovery Root、Share、
-  Manifest、生产 KMS/HSM、outbox 和用户会话/RBAC 继续失败关闭。
+- Phase 2-E（已完成开发接线）：持久化 Credential Batch Seal/Get/Activate/Retire；同一 DEK 使用在线 KMS
+  与独立 Recovery wrap-only adapter 双包装。
+- Phase 2-F（已完成开发接线）：Pool 全 Seat Recovery 治理准备闭环 foundation，覆盖 BOOTSTRAP/ROTATE、外部
+  Root/VSS、加密 Share、JCS Manifest、签名/ACK、STAGED batch、逐账号 evidence 和 READY。生产 providers、
+  Pool finalize 和用户会话/RBAC 继续失败关闭。
+- Phase 2-G（已完成开发接线）：Pool 全 Seat prepare/activate-held/commit-release、平台结构切换、恢复 worker、一次性
+  replacement claim 和 Sub2API 网关 credential fingerprint gate。生产 providers 和最终用户/RBAC 仍失败关闭。
+- Phase 2-H H1（当前）：公开无秘密的 JCS Evidence Bundle、纯离线 verifier、受 recovery key 保护的
+  持久导出/下载路由和 Reveal 授权 transcript 基础。生产导出 signer、Reveal API 与所有
+  decrypt/reconstruct/unwrap/plaintext executor 均未接线。
 - Phase 3（范围外）：公开交易、支付结算、多供应商与跨地域高可用。
 
 以下逻辑架构描述 Phase 2 完成后的目标；各阶段真实能力以阶段状态文档为准。
@@ -101,15 +108,13 @@ Sub2API 通过幂等记录恢复同一 credential；平台只在首次成功响�
 成员获得的是 Seat 当前版本的调用凭据或短期能力，不获得 Seat Principal 的登录能力。暂停时禁用旧
 API Key；冻结确认后生成新版本并交给新成员。旧凭据即使仍被持有，也会因禁用和 epoch 不匹配而失败。
 
-Sub2API `access_credential_rotated=true` 只证明 Seat 访问 Key 已轮换。平台只有在同一 Pool/账号的旧
-Epoch `LOGIN`、`MFA`、`RECOVERY`、`OWNERSHIP` 批次全部 `RETIRED`，相邻新 Epoch 对应批次
-全部 `ACTIVE`，且请求携带运营或外部系统已预先核验的 `provider_attestation_ref` 后，才签发
-`control_rotation_evidence_ref`。该证据绑定供应商证明引用和新旧八个批次 ID；Coordinator 在永久
-换员前按 Seat Pool、当前 Epoch 和 `current + 1` 复核引用与批次实时状态。Phase 1 只保存引用，不获取
-供应商证明，也不校验供应商签名或证明的密码学真实性，不得据此宣称平台验证了供应商动作。
+Sub2API `access_credential_rotated=true` 只证明 Seat 访问 Key 已轮换。Phase 2-F Recovery plan 要求每个
+权威账号在旧、新相邻 Epoch 各精确绑定 `LOGIN`、`MFA`、`RECOVERY`、`OWNERSHIP` 四类批次，并由
+外部 attestation verifier 验证账号控制权轮换证明。该证据、Root/Share/Manifest 和全 Seat 冻结材料共同
+绑定在 plan 中；旧独立 `control-rotation-evidence` 入口不能绕过 ceremony。
 
-永久换员完成后，Manager 将 Pool 的最小 Membership Epoch 提升到新 Epoch。该写屏障使旧 Epoch
-不能再 Seal 或 Activate 控制凭据批次，避免已完成换员后回写旧成员集合的材料。
+Phase 2-G finalize 在 Sub2API 仍保持 held 时，以 Serializable 事务提升 Pool 最小 Membership Epoch、切换
+Owner、激活新批次并退休旧批次；远端 commit 证明持久后才允许签发 replacement claim token。
 
 该设计是 MVP 的稳定性基线。不得在业务层把额度重新实现为第二套账本。
 
@@ -157,7 +162,7 @@ Provision credential 的领取使用独立 `credential:ack` scope。平台以确
 
 ## 8. 范围控制
 
-### 8.1 Phase 2-E Runtime 边界
+### 8.1 Phase 2-G Runtime 边界
 
 当前组合根只使用 PostgreSQL `WorkflowStore`，不再回退内存 Coordinator。已接线的纵向链路是
 Provision、持久 Seat/Owner Assignment、Operation 查询、Provision credential claim、Suspend/Drain/Freeze、
@@ -169,12 +174,53 @@ Credential Batch 使用独立 API Key 和 operation client namespace。Seal 先�
 执行双包装，最终以 lease/fence 和 Pool 当前 ACTIVE Epoch 二次核验提交 SEALED；Activate/Retire 使用数据库
 CAS 和不可变转换审计。公开元数据不包含任何密文、wrapped DEK、key ref、AAD hash 或内容指纹。
 
-尚未持久化的 Replace 和 control rotation evidence 不与内存实现混用，HTTP 统一返回
+Recovery plan 准备链与 Pool finalize 已有持久 Store 和条件路由，但当前组合根未链接生产 providers，默认
+关闭。旧单 Seat Replace 和旧 control rotation evidence 不与持久流程混用，HTTP 返回
 `PERSISTENT_WORKFLOW_UNSUPPORTED`。风险聚合保留为非持久观察面，不参与状态转换。完整边界和迁移策略见
 [Phase 2-B 暂停运行时状态](phase2b-suspend-status.md)和
 [Phase 2-C 换员运行时状态](phase2c-assignment-status.md)。
 [Phase 2-D 结算解除运行时状态](phase2d-settlement-status.md)和
-[Phase 2-E 凭据批次状态](phase2e-credential-batch-status.md)。
+[Phase 2-E 凭据批次状态](phase2e-credential-batch-status.md)和
+[Phase 2-F Recovery 治理准备闭环状态](phase2f-recovery-governance-status.md)和
+[Phase 2-G Pool 级永久换员最终化状态](phase2g-permanent-finalization-status.md)和
+[Phase 2-H 离线验证与 Reveal 授权记录基础状态](phase2h-offline-verification-status.md)。
+
+## Phase 2-F Recovery 治理准备边界
+
+Phase 2-F 将恢复治理建模为 Pool 级 ceremony，而不是单 Seat 操作。权威资源账号注册表及账号到 Seat 的显式
+多对多映射定义轮换范围；全部 Seat 必须先 `FROZEN`。`BOOTSTRAP` 从迁移后的 `LEGACY_UNVERIFIED`
+Epoch 建立第一条可信 Manifest 链，后续 `ROTATE` 只能从完整 CURRENT Epoch 开始。
+
+外部 Root/VSS provider、RFC 8785/JCS canonicalizer、HSM signer、provider attestation verifier、member
+signature verifier、governance batch provider 和 `MemberArtifact` gateway 位于 Trust Plane 边界之外。
+平台只持久化 public handle、commitment、散列、签名、加密 Share 和去敏状态；Root 私钥、Share 明文、
+DEK 和账号凭据明文不得跨入持久层或 HTTP 响应。
+
+Phase 2-F 的历史闭环终点是 plan `READY`；Phase 2-G 已在其后接入 Pool 级 finalize。当前二进制仍未链接
+生产 providers，所以默认 `TRUSTED_POOL_RECOVERY_GOVERNANCE_ENABLED=false`，启用会在启动阶段失败。
+
+## Phase 2-G 永久换员一致性边界
+
+Sub2API prepare 生成新 credential 但保持禁用；activate 将其安装到稳定 API Key 后仍保持
+`rotation_activated_pending_commit`；平台只在该 held 证明通过后执行本地结构事务，随后 commit 才释放
+API Key 和 Subscription。平台持久化 Ed25519 attestation、旧 credential 失效、逐请求 fingerprint gate 和
+durable outbox 证据，不能以异步缓存失效冒充准入安全边界。
+
+本地结构提交后进入 `PROVIDER_COMMIT_PENDING`，远端 release 后进入 `READY_TO_ISSUE`。恢复 worker 只重放
+provider commit，不能生成 token。同步 finalize 首次提交全部 claim 时才返回 raw token；状态 GET、operation
+GET 和幂等重放不披露。领取端点使用 recovery service key，它代表管理员代交付服务，不代表目标成员身份。
+
+## Phase 2-H 离线验证与 Reveal 边界
+
+H1 的 Evidence Bundle 是公开、无秘密的单份严格 JCS JSON。它包含 Manifest 规范字节/散列、平台签名、
+成员审批、Share ACK 和 typed provider proof，但不包含 Share ciphertext、批次 ciphertext/nonce、wrapped
+DEK、Root/Share 私密材料或 credential。信任策略作为独立输入提供；Bundle 内的 key 不能自我建立信任。
+
+纯离线 verifier 不依赖 HTTP、数据库、KMS 或 provider。旧平台签名没有
+`trusted-pool/platform-manifest-signature/v2` domain、或缺 typed proof 时稳定为 `INCOMPLETE`；只有完整
+JCS、checkpoint、散列链、集合、动态阈值和 Ed25519 证据通过才为 `VERIFIED`。Reveal transcript 校验即使
+达到治理阈值，也只产生 `AUTHORIZED_NOT_EXECUTABLE`。Migration 010、`EvidenceStore` 与 recovery-key
+导出路由只发布公开证据；生产 signer 未注入时启动失败，且代码没有任何 decrypt/reconstruct/unwrap executor。
 
 进入 MVP 的需求必须至少直接服务于以下一项：
 

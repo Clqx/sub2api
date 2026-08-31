@@ -65,7 +65,9 @@ type recoveryScannerStub struct {
 	operationWork   bool
 	operationErr    error
 	claimErr        error
+	claimErrors     []error
 	firstRound      chan struct{}
+	secondRound     chan struct{}
 }
 
 func (s *recoveryScannerStub) RecoverNextSettlementResolution(context.Context) (bool, error) {
@@ -88,6 +90,12 @@ func (s *recoveryScannerStub) RecoverNextCredentialClaim(context.Context) (bool,
 	s.claimCalls++
 	if s.firstRound != nil && s.claimCalls == 1 {
 		close(s.firstRound)
+	}
+	if s.secondRound != nil && s.claimCalls == 2 {
+		close(s.secondRound)
+	}
+	if s.claimCalls <= len(s.claimErrors) {
+		return false, s.claimErrors[s.claimCalls-1]
 	}
 	return false, s.claimErr
 }
@@ -127,6 +135,39 @@ func TestPersistentRecoveryLoopPropagatesScannerFailure(t *testing.T) {
 	err = loop.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "credential claim") {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestPersistentRecoveryLoopIsolatesUnsupportedHistoricalClaim(t *testing.T) {
+	stub := &recoveryScannerStub{claimErrors: []error{application.ErrPersistentWorkflowUnsupported, nil},
+		secondRound: make(chan struct{})}
+	loop, err := NewPersistentRecoveryLoop(stub, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.Run(ctx) }()
+	select {
+	case <-stub.secondRound:
+		cancel()
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("unsupported historical claim stopped the recovery loop")
+	}
+	select {
+	case runErr := <-done:
+		if !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("Run() error = %v", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery loop did not stop after cancellation")
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.claimCalls < 2 || stub.operationCalls < 2 || stub.settlementCalls < 2 {
+		t.Fatalf("historical claim was not isolated: operation=%d settlement=%d claim=%d",
+			stub.operationCalls, stub.settlementCalls, stub.claimCalls)
 	}
 }
 

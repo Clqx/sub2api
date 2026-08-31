@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"log"
 	"net/http"
@@ -17,6 +19,8 @@ import (
 	"trusted-pool-platform/backend/internal/httpapi"
 	"trusted-pool-platform/backend/internal/integration/sub2api"
 	"trusted-pool-platform/backend/internal/persistence/postgres"
+	"trusted-pool-platform/backend/internal/recovery"
+	"trusted-pool-platform/backend/internal/recovery/exporter"
 	"trusted-pool-platform/backend/internal/risk"
 	appRuntime "trusted-pool-platform/backend/internal/runtime"
 )
@@ -32,6 +36,22 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	migrationConnectContext, cancelMigrationConnect := context.WithTimeout(context.Background(), 10*time.Second)
+	migrationDB, err := postgres.OpenDB(migrationConnectContext, runtimeConfig.MigrationDatabase)
+	cancelMigrationConnect()
+	if err != nil {
+		return err
+	}
+	migrationContext, cancelMigration := context.WithTimeout(context.Background(), runtimeConfig.MigrationLimit)
+	err = postgres.Migrate(migrationContext, migrationDB, os.DirFS(runtimeConfig.MigrationsDir))
+	cancelMigration()
+	closeMigrationErr := migrationDB.Close()
+	if err != nil {
+		return err
+	}
+	if closeMigrationErr != nil {
+		return closeMigrationErr
+	}
 	connectContext, cancelConnect := context.WithTimeout(context.Background(), 10*time.Second)
 	db, err := postgres.OpenDB(connectContext, runtimeConfig.Database)
 	cancelConnect()
@@ -39,12 +59,6 @@ func run() error {
 		return err
 	}
 	defer db.Close()
-	migrationContext, cancelMigration := context.WithTimeout(context.Background(), runtimeConfig.MigrationLimit)
-	err = postgres.Migrate(migrationContext, db, os.DirFS(runtimeConfig.MigrationsDir))
-	cancelMigration()
-	if err != nil {
-		return err
-	}
 	workflowStore, err := postgres.NewStore(db)
 	if err != nil {
 		return err
@@ -69,6 +83,13 @@ func run() error {
 	batchAPIKey, err := requiredSecret("TRUSTED_POOL_BATCH_API_KEY", 32)
 	if err != nil {
 		return err
+	}
+	var recoveryAPIKey string
+	if runtimeConfig.RecoveryGovernanceEnabled {
+		recoveryAPIKey, err = requiredSecret("TRUSTED_POOL_RECOVERY_API_KEY", 32)
+		if err != nil {
+			return err
+		}
 	}
 	fingerprintKey, err := requiredSecret("TRUSTED_POOL_FINGERPRINT_HMAC_KEY", 32)
 	if err != nil {
@@ -120,6 +141,50 @@ func run() error {
 		integrationClientID, settlementReadClientID, settlementResolveClientID); err != nil {
 		return err
 	}
+	if runtimeConfig.RecoveryGovernanceEnabled {
+		if err := validateIndependentRecoveryClient(runtimeConfig.RecoveryClientID,
+			runtimeConfig.BatchClientID, integrationClientID, settlementReadClientID, settlementResolveClientID); err != nil {
+			return err
+		}
+	}
+	if runtimeConfig.RecoveryEvidenceExport {
+		if err := validateIndependentEvidenceExportClient(runtimeConfig.RecoveryEvidenceClientID,
+			runtimeConfig.RecoveryClientID, runtimeConfig.BatchClientID, integrationClientID,
+			settlementReadClientID, settlementResolveClientID); err != nil {
+			return err
+		}
+	}
+	var recoveryRotation *sub2api.RecoveryRotationClient
+	if runtimeConfig.RecoveryGovernanceEnabled {
+		rotationClientID, rotationErr := requiredSecret("SUB2API_RECOVERY_ROTATION_CLIENT_ID", 1)
+		if rotationErr != nil {
+			return rotationErr
+		}
+		rotationClientID = strings.TrimSpace(rotationClientID)
+		rotationSecret, rotationErr := requiredSecret("SUB2API_RECOVERY_ROTATION_SECRET", 16)
+		if rotationErr != nil {
+			return rotationErr
+		}
+		if rotationErr = validateIndependentRecoveryRotationCredentials(rotationClientID, rotationSecret,
+			[]string{integrationClientID, settlementReadClientID, settlementResolveClientID},
+			[]string{integrationSecret, settlementReadSecret, settlementResolveSecret}); rotationErr != nil {
+			return rotationErr
+		}
+		attestationKeyID, rotationErr := requiredSecret("SUB2API_RECOVERY_ROTATION_ATTESTATION_KEY_ID", 1)
+		if rotationErr != nil {
+			return rotationErr
+		}
+		publicKey, rotationErr := decodeEd25519PublicKey(
+			os.Getenv("SUB2API_RECOVERY_ROTATION_ATTESTATION_PUBLIC_KEY_BASE64"))
+		if rotationErr != nil {
+			return rotationErr
+		}
+		recoveryRotation, rotationErr = sub2api.NewRecoveryRotationClient(baseURL, rotationClientID,
+			rotationSecret, strings.TrimSpace(attestationKeyID), publicKey, nil)
+		if rotationErr != nil {
+			return rotationErr
+		}
+	}
 	settlementRead, err := sub2api.NewSettlementReadClient(baseURL, settlementReadClientID, settlementReadSecret, nil)
 	if err != nil {
 		return err
@@ -159,14 +224,60 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	readiness, err := appRuntime.NewReadiness(2*time.Second,
-		postgres.DBProbe{DB: db}, appRuntime.EnvelopeProbe{Cipher: cryptoRuntime.Cipher},
-		appRuntime.BatchProbe{Manager: credentialBatchManager})
+	var recoveryManager *recovery.Manager
+	if runtimeConfig.RecoveryGovernanceEnabled {
+		// 启用开关只允许完整生产适配器；当前二进制尚未链接这些适配器，因此必须拒绝启动。
+		recoveryProviders := appRuntime.BuildRecoveryProviders(nil, nil, nil, nil, nil, nil, nil,
+			recoveryRotation, recoveryRotation,
+			cryptoRuntime.Cipher)
+		if err := recoveryProviders.Ready(context.Background()); err != nil {
+			return errors.New("recovery governance is enabled but production providers are not configured")
+		}
+		recoveryManager, err = recovery.NewManager(workflowStore, recoveryProviders, recovery.ManagerConfig{
+			ClientID: runtimeConfig.RecoveryClientID, LeaseOwner: runtimeConfig.WorkerID,
+			LeaseDuration: runtimeConfig.WorkflowLease, ExpectedRootProviderID: runtimeConfig.RecoveryRootProviderID,
+			RootTrustProfile:      runtimeConfig.RecoveryRootTrustProfile,
+			PortableEvidence:      runtimeConfig.RecoveryPortableEvidence,
+			RecoveryCryptoSuiteID: runtimeConfig.RecoveryCryptoSuiteID,
+			ReplacementClaimTTL:   runtimeConfig.RecoveryReplacementClaimTTL,
+			FinalizationBackoff:   runtimeConfig.RecoveryBackoff,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	var verificationExporter *exporter.Manager
+	if runtimeConfig.RecoveryEvidenceExport {
+		// The binary intentionally has no fallback signer. A production HSM/KMS signer adapter must be
+		// injected by the composition root before this feature can listen on HTTP.
+		verificationExporter, err = appRuntime.BuildVerificationExporter(workflowStore, nil,
+			appRuntime.VerificationExportConfig{ClientID: runtimeConfig.RecoveryEvidenceClientID,
+				LeaseOwner: runtimeConfig.WorkerID, LeaseDuration: runtimeConfig.WorkflowLease})
+		if err != nil {
+			return errors.New("recovery evidence export is enabled but the external signer adapter is not configured")
+		}
+	}
+	probes := []appRuntime.Probe{postgres.DBProbe{DB: db}, appRuntime.EnvelopeProbe{Cipher: cryptoRuntime.Cipher},
+		appRuntime.BatchProbe{Manager: credentialBatchManager}}
+	if recoveryManager != nil {
+		probes = append(probes, appRuntime.RecoveryProbe{Manager: recoveryManager})
+	}
+	if verificationExporter != nil {
+		probes = append(probes, appRuntime.VerificationExportProbe{Manager: verificationExporter})
+	}
+	readiness, err := appRuntime.NewReadiness(2*time.Second, probes...)
 	if err != nil {
 		return err
 	}
-	api, err := httpapi.NewServer(coordinator, riskAggregator, credentialBatchManager,
-		apiKey, settlementAPIKey, batchAPIKey)
+	var api *httpapi.Server
+	if recoveryManager == nil {
+		api, err = httpapi.NewServer(coordinator, riskAggregator, credentialBatchManager,
+			apiKey, settlementAPIKey, batchAPIKey)
+	} else {
+		api, err = httpapi.NewServerWithRecoveryEvidence(coordinator, riskAggregator, credentialBatchManager,
+			recoveryManager, verificationExporter,
+			apiKey, settlementAPIKey, batchAPIKey, recoveryAPIKey)
+	}
 	if err != nil {
 		return err
 	}
@@ -191,7 +302,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	workers, err := appRuntime.NewWorkerGroup(recoveryLoop)
+	runtimeWorkers := []appRuntime.Worker{recoveryLoop}
+	if recoveryManager != nil {
+		finalizationLoop, loopErr := appRuntime.NewRecoveryFinalizationLoop(recoveryManager,
+			runtimeConfig.RecoveryIdleBackoff)
+		if loopErr != nil {
+			return loopErr
+		}
+		runtimeWorkers = append(runtimeWorkers, finalizationLoop)
+	}
+	workers, err := appRuntime.NewWorkerGroup(runtimeWorkers...)
 	if err != nil {
 		return err
 	}
@@ -245,6 +365,57 @@ func validateIndependentBatchClient(batchID string, otherIDs ...string) error {
 		}
 	}
 	return nil
+}
+
+func validateIndependentRecoveryClient(recoveryID string, otherIDs ...string) error {
+	recoveryID = strings.TrimSpace(recoveryID)
+	if recoveryID == "" {
+		return errors.New("recovery governance client id must not be empty")
+	}
+	for _, otherID := range otherIDs {
+		if recoveryID == strings.TrimSpace(otherID) {
+			return errors.New("recovery governance client id must use an independent idempotency namespace")
+		}
+	}
+	return nil
+}
+
+func validateIndependentEvidenceExportClient(exportID string, otherIDs ...string) error {
+	exportID = strings.TrimSpace(exportID)
+	if exportID == "" {
+		return errors.New("recovery evidence export client id must not be empty")
+	}
+	for _, otherID := range otherIDs {
+		if exportID == strings.TrimSpace(otherID) {
+			return errors.New("recovery evidence export client id must use an independent idempotency namespace")
+		}
+	}
+	return nil
+}
+
+func validateIndependentRecoveryRotationCredentials(rotationID, rotationSecret string,
+	otherIDs, otherSecrets []string) error {
+	rotationID = strings.TrimSpace(rotationID)
+	if rotationID == "" || strings.TrimSpace(rotationSecret) == "" || len(otherIDs) != len(otherSecrets) {
+		return errors.New("Sub2API recovery rotation credentials are invalid")
+	}
+	for index := range otherIDs {
+		if rotationID == strings.TrimSpace(otherIDs[index]) {
+			return errors.New("Sub2API recovery rotation client id must be independently scoped")
+		}
+		if rotationSecret == otherSecrets[index] {
+			return errors.New("Sub2API recovery rotation secret must be independent")
+		}
+	}
+	return nil
+}
+
+func decodeEd25519PublicKey(value string) (ed25519.PublicKey, error) {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil || len(decoded) != ed25519.PublicKeySize {
+		return nil, errors.New("SUB2API_RECOVERY_ROTATION_ATTESTATION_PUBLIC_KEY_BASE64 must encode an Ed25519 public key")
+	}
+	return ed25519.PublicKey(decoded), nil
 }
 
 func validateSub2APITransport(runtimeMode, rawURL string) error {

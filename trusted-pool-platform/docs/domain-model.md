@@ -76,9 +76,9 @@ Seat 与成员的历史关系。同一 Seat 只能存在一个 `ACTIVE` Assignme
 只保存不透明引用，不获取证明，也不校验供应商签名或证明的密码学真实性。Coordinator 按 Seat Pool
 和相邻 Epoch 复核平台证据，不能接受任意外部引用代替它。
 
-永久换员成功后，Manager 将 Pool 最小 Membership Epoch 提升到新 Epoch；批次 Manager 拒绝对更旧
-Epoch 执行 Seal 或 Activate。`002_phase2a_persistence.sql` 已建立证据、八批次引用和 Epoch floor 的
-数据库约束，但当前 PersistentCoordinator 尚未接入这些表，相关 HTTP 端点失败关闭，不能宣称永久换员已持久化。
+`002_phase2a_persistence.sql` 的旧 `control_rotation_evidence` 不再作为最终化事实来源，旧单 Seat 永久换员入口
+继续失败关闭。Phase 2-F/G 使用 `recovery_epoch_plans`、typed control evidence、四类 FROM/TO 批次、Pool 级
+provider release 和 permanent finalization ledger；只有该流程达到 `FINALIZED` 才提升 Epoch floor。
 
 ### `manifests` 与 `manifest_signatures`
 

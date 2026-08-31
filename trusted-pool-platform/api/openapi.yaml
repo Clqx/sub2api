@@ -1,15 +1,21 @@
 openapi: 3.1.0
 info:
-  title: 可信有限成员订阅共享平台 Phase 2-E API
-  version: 0.6.0
+  title: 可信有限成员订阅共享平台 Phase 2-H API
+  version: 0.9.0
   description: |
-    与当前 Go HTTP 实现一致的 Phase 2-E 持久运行时接口。Provision、Seat/Assignment、Operation、
+    与当前 Go HTTP 实现一致的 Phase 2-H 持久运行时接口。Provision、Seat/Assignment、Operation、
     credential claim、Suspend/Drain/Freeze、临时换员、正式恢复，以及 pending settlement 查询和受控解除
     使用 PostgreSQL；分阶段 credential batch 使用在线 KMS 与独立 Recovery wrap-only 服务双包装。
-    数据库、KMS 或 Recovery wrapper 不可用时失败关闭。永久换员、control rotation evidence、
-    Recovery Root/Share/Manifest 仍未接入持久工作流，当前统一返回 503。
+    Recovery 治理准备端点覆盖 Pool 全 Seat 冻结后的 BOOTSTRAP/ROTATE、Root/Share/Manifest、签名、
+    ACK、STAGED batch、逐账号 evidence 和 READY。默认治理开关为 false；当前二进制没有链接生产
+    Root/JCS/HSM/VSS/attestation/member/batch/MemberArtifact providers，开启会失败启动。Pool finalize 已接入
+    prepare/activate-held/commit-release 和一次性 replacement claim；旧单 Seat replace 仍固定返回 503。
+    Phase 2-H H1 另提供公开无秘密 JCS Evidence Bundle 的离线 verifier、受 recoveryBearer 保护的
+    bundle 导出/下载路由与 Reveal 授权 transcript 持久化基础；导出功能仍需显式 portable profile 和
+    外部签名器，当前组合根缺少生产签名器时会在监听前失败。系统不提供 Share 解密、VSS/Share 重建、
+    Root/DEK unwrap 或批次明文 Reveal。
     风险窗口仍是可丢失的内存观察信号，不自动暂停。普通接口使用服务 Bearer API Key。
-x-implementation-status: phase2e-persistent-credential-batches
+x-implementation-status: phase2h-offline-verification-and-reveal-transcript-foundation
 servers:
   - url: http://localhost:8092
 security:
@@ -32,7 +38,7 @@ paths:
       security: []
       responses:
         '200':
-          description: PostgreSQL 与包络密钥服务均就绪
+          description: PostgreSQL 与包络密钥服务均就绪；治理启用时还要求全部 Recovery providers 就绪
         '503':
           description: PostgreSQL 或包络密钥服务不可用
   /api/v1/seats:
@@ -213,7 +219,7 @@ paths:
       operationId: replacePermanently
       summary: 冻结后永久换员
       description: |
-        Phase 2-D PostgreSQL Runtime 尚未接线，当前返回 503。以下是后续阶段必须保留的安全门禁。
+        旧单 Seat permanent replace 固定返回 503。永久换员只能由后续 Pool 级 rotation/finalize saga 完成。
 
         必须提交本平台 control-rotation-evidence 接口签发的证据。Coordinator 会按 Seat Pool、当前
         Membership Epoch 和相邻新 Epoch 重新验证该证据所绑定的供应商变更证明引用及八个批次状态。
@@ -441,7 +447,8 @@ paths:
       operationId: issueControlRotationEvidence
       summary: 签发供应商账号控制凭据轮换证据
       description: |
-        Phase 2-E 仍未接线，当前返回 503。批次持久化不等于完成 Recovery Root/Share/Manifest 治理。
+        旧独立证据入口固定返回 503。Phase 2-F 证据由 Pool recovery plan 的逐账号验证阶段生成，不能脱离
+        Root/Share/Manifest 和 plan-scoped STAGED 批次单独签发。
 
         仅当指定 Pool/账号在旧 Membership Epoch 的 LOGIN、MFA、RECOVERY、OWNERSHIP 四类批次
         均已 RETIRED，且相邻新 Epoch 的对应四类批次均为 ACTIVE 时签发。请求还必须携带已由运营
@@ -456,6 +463,278 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans:
+    post:
+      operationId: prepareRecoveryPlan
+      summary: 创建或继续 Pool 级 Recovery 治理准备计划
+      description: |
+        仅在治理显式启用且全部生产 providers ready 时可用；当前发布构建开启治理会失败启动，默认因此返回 503。
+        请求必须包含 Pool 全部 Seat 的 FROZEN 证据和权威账号集合。Manager 在数据库事务外调用 Root/VSS、
+        JCS、HSM、attestation 与 MemberArtifact providers，并以 lease/fence 分阶段提交至 MANIFEST_DRAFT。
+        响应不包含 Root、Share、Manifest 字节、签名载荷、DEK、批次密文或 key ref。
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecoveryPlanRequest'}
+      responses:
+        '202': {$ref: '#/components/responses/RecoveryPlanProgressResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}:
+    get:
+      operationId: getRecoveryPlan
+      summary: 读取 Recovery plan 去敏进度
+      description: |
+        默认关闭时返回 503。返回去敏状态、计数、记录版本，以及调用方在进程崩溃或响应丢失后继续阶段
+        CAS 所需的 fencing_token 和 lease_expires_at；不返回 Root、Share、Manifest 字节、签名载荷、
+        DEK、批次密文、key ref 或其他安全 artifact/秘密。
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: 去敏计划状态及用于恢复阶段推进的 CAS fence/lease
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecoveryPlanProgressEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}/manifest-signatures:
+    post:
+      operationId: commitRecoveryManifestSignatures
+      summary: 验证并提交正式成员 Manifest 签名
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan, signatures]
+              properties:
+                plan: {$ref: '#/components/schemas/RecoveryPlanRequest'}
+                signatures:
+                  type: array
+                  minItems: 1
+                  items: {$ref: '#/components/schemas/RecoveryMemberSignature'}
+      responses:
+        '202': {$ref: '#/components/responses/RecoveryPlanProgressResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}/share-acknowledgements:
+    post:
+      operationId: commitRecoveryShareAcknowledgements
+      summary: 验证并提交成员加密 Share ACK
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan, acknowledgements]
+              properties:
+                plan: {$ref: '#/components/schemas/RecoveryPlanRequest'}
+                acknowledgements:
+                  type: array
+                  minItems: 1
+                  items: {$ref: '#/components/schemas/RecoveryShareAcknowledgement'}
+      responses:
+        '202': {$ref: '#/components/responses/RecoveryPlanProgressResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}/staged-batches:
+    post:
+      operationId: stageRecoveryCredentialBatches
+      summary: 生成并绑定新 Epoch 的治理专用 STAGED 批次
+      description: 普通 Phase 2-E Batch API 不能写入 STAGED；每个权威账号必须精确提交四类控制批次 payload。
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan, batches]
+              properties:
+                plan: {$ref: '#/components/schemas/RecoveryPlanRequest'}
+                batches:
+                  type: array
+                  minItems: 4
+                  items: {$ref: '#/components/schemas/RecoveryStagedBatch'}
+      responses:
+        '202': {$ref: '#/components/responses/RecoveryPlanProgressResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}/evidence-ready:
+    post:
+      operationId: markRecoveryPlanReady
+      summary: 验证逐账号 evidence 并将准备计划推进到 READY
+      description: READY 只表示治理材料完整；不会执行 Seat rotation、Epoch/Owner/批次切换或 credential claim。
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties:
+                plan: {$ref: '#/components/schemas/RecoveryPlanRequest'}
+      responses:
+        '202': {$ref: '#/components/responses/RecoveryPlanProgressResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}/finalize:
+    post:
+      operationId: finalizeRecoveryPlan
+      summary: 推进 Pool 级永久换员最终切换
+      description: |
+        以 Pool 全 Seat prepare、activate-held、平台结构事务、Sub2API commit-release 推进 READY plan。
+        处理中返回 202；达到 FINALIZED 返回 200。只有第一次把 READY_TO_ISSUE 原子提交为 FINALIZED 的
+        成功响应包含 claims[].claim_token；幂等重放、GET、worker 和响应丢失恢复均不重新披露 raw token。
+        旧单 Seat replace 不可作为替代入口。
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecoveryFinalizeRequest'}
+      responses:
+        '200':
+          description: 已 FINALIZED；仅首次 token 签发响应可能包含 claims
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecoveryFinalizationEnvelope'}
+        '202':
+          description: 已持久化进度，需以完全相同意图继续重放；不披露 token
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecoveryFinalizationEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}/credential-claims/{operation_id}:
+    post:
+      operationId: claimRecoveryReplacementCredential
+      summary: 恢复管理员代目标成员领取永久换员 credential
+      description: |
+        recoveryBearer 代表管理员或受控交付服务，不是目标成员身份。Idempotency-Key 必须等于路径中的
+        child operation_id；请求还须精确匹配 plan、Seat、target member 和一次性 token。服务端 KMS Open
+        后先以 fenced CAS 消费并清除 claim，只有 CAS 成功的当前请求披露 credential。响应丢失后不二次披露。
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: operation_id
+          in: path
+          required: true
+          description: finalize 返回的 claim_operation_id；同时也是本请求 Idempotency-Key
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecoveryReplacementClaimRequest'}
+      responses:
+        '200':
+          description: 当前请求成功消费 claim 后的一次性 credential 交付
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecoveryReplacementDeliveryEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}/verification-exports:
+    post:
+      operationId: createRecoveryVerificationExport
+      summary: 创建或精确重放公开 Recovery Evidence Bundle 导出
+      description: |
+        仅接受 recoveryBearer。先持久化导出 intent，再以公开、无秘密快照构建严格 JCS bundle，
+        并对独立 verification-export statement 请求外部签名。Idempotency-Key 必须等于 body.operation_id。
+        201 表示本次首次提交可用导出；200 表示按持久摘要重建的终态重放。响应不包含 Share ciphertext、
+        Root/Share 私密材料、wrapped DEK、批次密文、credential 或 claim token，且始终 no-store。
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecoveryVerificationExportRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/RecoveryVerificationBundleResponse'}
+        '201': {$ref: '#/components/responses/RecoveryVerificationBundleResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/recovery-plans/{id}/verification-exports/{export_id}:
+    get:
+      operationId: downloadRecoveryVerificationExport
+      summary: 下载已提交的公开 Recovery Evidence Bundle
+      description: |
+        从持久 generated_at、inventory digest 和 bundle digest 重建完全相同的 canonical JSON，
+        不重新调用 signer。该路由只接受 recoveryBearer，返回 no-store 和以 bundle digest 构成的 ETag。
+      security:
+        - recoveryBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: export_id
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+      responses:
+        '200': {$ref: '#/components/responses/RecoveryVerificationBundleResponse'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
 components:
   securitySchemes:
     serviceBearer:
@@ -469,7 +748,11 @@ components:
     batchBearer:
       type: http
       scheme: bearer
-      description: TRUSTED_POOL_BATCH_API_KEY；仅用于 credential batch 管理，必须与另外两类密钥分离
+      description: TRUSTED_POOL_BATCH_API_KEY；仅用于 credential batch 管理，必须与普通、settlement、recovery 密钥分离
+    recoveryBearer:
+      type: http
+      scheme: bearer
+      description: TRUSTED_POOL_RECOVERY_API_KEY；治理和管理员代交付路由的服务凭据，不是成员身份；必须与普通、settlement、batch 密钥分离
   parameters:
     ResourceId:
       name: id
@@ -513,6 +796,357 @@ components:
                 minLength: 1
                 description: 本平台 control-rotation-evidence 接口签发、可按 Pool 和相邻 Epoch 复核的证据 ID
   schemas:
+    RecoveryVerificationExportRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, export_id]
+      properties:
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        export_id: {type: string, minLength: 1, maxLength: 128}
+    RecoveryVerificationBundle:
+      type: object
+      additionalProperties: false
+      description: 严格 JCS public evidence；byte 字段按 Go JSON base64 编码，不含恢复秘密或密文 payload
+      required: [protocol_version, bundle_id, exported_at, manifests]
+      properties:
+        protocol_version: {type: string, const: trusted-pool/offline-evidence-bundle/v1}
+        bundle_id: {type: string, minLength: 1, maxLength: 128}
+        exported_at: {type: string, format: date-time}
+        manifests:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [canonical_manifest, manifest_hash, platform_signature, member_approvals,
+              share_acknowledgements, provider_proofs]
+            properties:
+              canonical_manifest: {type: string, contentEncoding: base64}
+              manifest_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+              platform_signature: {type: object}
+              member_approvals: {type: array, items: {type: object}}
+              share_acknowledgements: {type: array, items: {type: object}}
+              provider_proofs: {type: array, items: {type: object}}
+    Hash32Bytes:
+      type: array
+      minItems: 32
+      maxItems: 32
+      items: {type: integer, minimum: 0, maximum: 255}
+      description: 当前 Go JSON 契约中的固定 32-byte 值；与以小写十六进制传输的 hash 字段不同
+    RecoveryEpochMember:
+      type: object
+      description: 嵌套类型当前按 Go 导出字段名编码；签名 key 与 Recovery encryption key 必须独立且分别通过 PoP
+      required: [SeatExternalID, MemberExternalID, Role, ShareIndex, SigningAlgorithm, SigningKeyID, SigningPublicKey,
+        SigningKeyFingerprint, SigningProofAlgorithm, SigningProof, RecoveryKeyAlgorithm, RecoveryKeyID,
+        RecoveryEncryptionPublicKey, RecoveryKeyFingerprint, RecoveryKeyProofAlgorithm, RecoveryKeyProof]
+      properties:
+        SeatExternalID: {type: string}
+        MemberExternalID: {type: string}
+        Role: {type: string}
+        ShareIndex: {type: integer, minimum: 1}
+        SigningAlgorithm: {type: string}
+        SigningKeyID: {type: string}
+        SigningPublicKey: {type: string, contentEncoding: base64}
+        SigningKeyFingerprint: {$ref: '#/components/schemas/Hash32Bytes'}
+        SigningProofAlgorithm: {type: string}
+        SigningProof: {type: string, contentEncoding: base64}
+        RecoveryKeyAlgorithm: {type: string}
+        RecoveryKeyID: {type: string}
+        RecoveryEncryptionPublicKey: {type: string, contentEncoding: base64}
+        RecoveryKeyFingerprint: {$ref: '#/components/schemas/Hash32Bytes'}
+        RecoveryKeyProofAlgorithm: {type: string}
+        RecoveryKeyProof: {type: string, contentEncoding: base64}
+    RecoverySeatFreeze:
+      type: object
+      description: Pool 每个 Seat 必须出现一次；字段名与当前 Go JSON 契约一致
+      required: [SeatExternalID, ExpectedAssignmentEpoch, FreezeOperationID, FreezeSnapshotHash]
+      properties:
+        SeatExternalID: {type: string}
+        ExpectedAssignmentEpoch: {type: integer, format: int64, minimum: 1}
+        FreezeOperationID: {type: string}
+        FreezeSnapshotHash: {$ref: '#/components/schemas/Hash32Bytes'}
+    RecoverySeatReplacement:
+      type: object
+      description: 仅列出 Owner 实际变化的 Seat；BOOTSTRAP 必须为空
+      required: [SeatExternalID, FromMemberExternalID, ToMemberExternalID, ExpectedAssignmentEpoch,
+        FreezeOperationID, FreezeSnapshotHash]
+      properties:
+        SeatExternalID: {type: string}
+        FromMemberExternalID: {type: string}
+        ToMemberExternalID: {type: string}
+        ExpectedAssignmentEpoch: {type: integer, format: int64, minimum: 1}
+        FreezeOperationID: {type: string}
+        FreezeSnapshotHash: {$ref: '#/components/schemas/Hash32Bytes'}
+    RecoverySeatPlan:
+      type: object
+      required: [seat_id, member_id, principal_user_id, subscription_id, api_key_id, expected_assignment_epoch,
+        freeze_operation_id, freeze_snapshot_hash]
+      properties:
+        seat_id: {type: string}
+        member_id: {type: string}
+        principal_user_id: {type: integer, format: int64, minimum: 1}
+        subscription_id: {type: integer, format: int64, minimum: 1}
+        api_key_id: {type: integer, format: int64, minimum: 1}
+        expected_assignment_epoch: {type: integer, format: int64, minimum: 1}
+        freeze_operation_id: {type: string}
+        freeze_snapshot_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+    RecoveryControlBatchPlan:
+      type: object
+      required: [batch_type, from_batch_id, from_batch_version, from_ciphertext_hash, to_batch_id,
+        to_batch_version, to_ciphertext_hash, to_recovery_wrap_hash]
+      properties:
+        batch_type: {type: string, enum: [LOGIN, MFA, RECOVERY, OWNERSHIP]}
+        from_batch_id: {type: string}
+        from_batch_version: {type: integer, format: int64, minimum: 1}
+        from_ciphertext_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        to_batch_id: {type: string}
+        to_batch_version: {type: integer, format: int64, minimum: 1}
+        to_ciphertext_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        to_recovery_wrap_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+    RecoveryResourceAccountPlan:
+      type: object
+      required: [account_id, seat_ids, account_ref, provider_binding, control_evidence_id,
+        provider_attestation_digest, provider_attestation_issuer, provider_attestation_key_id,
+        provider_attestation_version, provider_attestation_algorithm, provider_attestation_signature,
+        provider_attestation_protocol_version, batches]
+      properties:
+        account_id: {type: string}
+        seat_ids:
+          type: array
+          minItems: 1
+          items: {type: string}
+        account_ref: {type: string}
+        provider_binding: {type: string}
+        control_evidence_id: {type: string}
+        provider_attestation_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+        provider_attestation_issuer: {type: string}
+        provider_attestation_key_id: {type: string}
+        provider_attestation_version: {type: integer, format: int64, minimum: 1}
+        provider_attestation_algorithm:
+          type: string
+          description: 经 ceremony attestation verifier 验证并回显的 detached proof 算法；当前 portable profile 为 Ed25519
+        provider_attestation_signature:
+          type: string
+          contentEncoding: base64
+          description: 对固定 provider statement 的公开 detached signature，不是账号凭据或其他秘密
+        provider_attestation_protocol_version:
+          type: string
+          description: 固定 provider statement wire/profile 版本；未知版本失败关闭
+        batches:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: {$ref: '#/components/schemas/RecoveryControlBatchPlan'}
+    RecoveryPlanRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, plan_id, root_request_id, root_artifact_id, manifest_id, ceremony_type, pool_id,
+        from_epoch, to_epoch, governance_threshold, recovery_threshold, previous_manifest_hash, members,
+        seat_freezes, replacements, seats, accounts, provider_attestation_envelope]
+      properties:
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        plan_id: {type: string, minLength: 1, maxLength: 128}
+        root_request_id: {type: string, minLength: 1, maxLength: 128}
+        root_artifact_id: {type: string, minLength: 1, maxLength: 128}
+        manifest_id: {type: string, minLength: 1, maxLength: 128}
+        ceremony_type: {type: string, enum: [BOOTSTRAP, ROTATE]}
+        pool_id: {type: string, minLength: 1, maxLength: 128}
+        from_epoch: {type: integer, format: int64, minimum: 1}
+        to_epoch: {type: integer, format: int64, minimum: 2, description: 必须等于 from_epoch + 1}
+        governance_threshold: {type: integer, minimum: 1}
+        recovery_threshold: {type: integer, minimum: 1}
+        previous_manifest_hash:
+          type: string
+          description: BOOTSTRAP 为空；ROTATE 为 64 位小写十六进制 CURRENT Manifest hash
+        members:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/RecoveryEpochMember'}
+        seat_freezes:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/RecoverySeatFreeze'}
+        replacements:
+          type: array
+          items: {$ref: '#/components/schemas/RecoverySeatReplacement'}
+        seats:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/RecoverySeatPlan'}
+        accounts:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/RecoveryResourceAccountPlan'}
+        provider_attestation_envelope: {type: string, contentEncoding: base64, x-sensitive: true}
+        expected_fencing_token:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 首次创建为 0；既有计划先 GET 当前 fence 后重试，活跃异 owner 租约仍拒绝接管；不属于不可变 ceremony intent
+    RecoveryMemberSignature:
+      type: object
+      required: [member_id, algorithm, key_id, signature]
+      properties:
+        member_id: {type: string}
+        algorithm: {type: string}
+        key_id: {type: string}
+        signature: {type: string, contentEncoding: base64, x-sensitive: true}
+    RecoveryShareAcknowledgement:
+      type: object
+      required: [delivery_id, member_id, algorithm, key_id, verified_commitment, signature]
+      properties:
+        delivery_id: {type: string}
+        member_id: {type: string}
+        algorithm: {type: string}
+        key_id: {type: string}
+        verified_commitment: {type: boolean, const: true}
+        signature: {type: string, contentEncoding: base64, x-sensitive: true}
+    RecoveryStagedBatch:
+      type: object
+      required: [batch_id, resource_account_id, account_ref, batch_type, batch_version, payload]
+      properties:
+        batch_id: {type: string}
+        resource_account_id: {type: string}
+        account_ref: {type: string}
+        batch_type: {type: string, enum: [LOGIN, MFA, RECOVERY, OWNERSHIP]}
+        batch_version: {type: integer, format: int64, minimum: 1}
+        payload: {description: 凭据 JSON；只传给治理 batch provider，不写入计划快照或响应, x-sensitive: true}
+    RecoveryPlan:
+      type: object
+      additionalProperties: false
+      required: [id, ceremony_type, pool_id, from_epoch, to_epoch, status, expected_members, expected_accounts,
+        committed_shares, verified_signatures, acknowledged_shares, staged_batches, record_version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        ceremony_type: {type: string, enum: [BOOTSTRAP, ROTATE]}
+        pool_id: {type: string}
+        from_epoch: {type: integer, format: int64}
+        to_epoch: {type: integer, format: int64}
+        status:
+          type: string
+          description: FINALIZED 表示平台结构事务已提交；远端 release/token 是否完成须以 finalize 响应和总 operation 为准
+          enum: [PLANNED, ROOT_COMMITTED, SHARES_COMMITTED, MANIFEST_DRAFT, MANIFEST_SIGNED,
+            ACKNOWLEDGED, BATCHES_STAGED, READY, FINALIZED]
+        expected_members: {type: integer, minimum: 1}
+        expected_accounts: {type: integer, minimum: 1}
+        committed_shares: {type: integer, minimum: 0}
+        verified_signatures: {type: integer, minimum: 0}
+        acknowledged_shares: {type: integer, minimum: 0}
+        staged_batches: {type: integer, minimum: 0}
+        record_version: {type: integer, format: int64, minimum: 1}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    RecoveryPlanProgress:
+      allOf:
+        - $ref: '#/components/schemas/RecoveryPlan'
+        - type: object
+          required: [fencing_token, lease_expires_at]
+          properties:
+            fencing_token: {type: integer, format: int64, minimum: 1}
+            lease_expires_at: {type: string, format: date-time}
+    RecoveryPlanEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/RecoveryPlan'}
+    RecoveryPlanProgressEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/RecoveryPlanProgress'}
+    RecoveryFinalizeSeatReplacement:
+      type: object
+      additionalProperties: false
+      description: 当前 Go 嵌套类型使用导出字段名编码；只列 Owner 实际变化的 Seat，不能缩小全 Seat rotation 集合
+      required: [SeatExternalID, TargetMemberExternalID]
+      properties:
+        SeatExternalID: {type: string, minLength: 1, maxLength: 128}
+        TargetMemberExternalID: {type: string, minLength: 1, maxLength: 128}
+    RecoveryFinalizeRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, plan_id, case_id, evidence_ids]
+      properties:
+        operation_id: {type: string, minLength: 1, maxLength: 128}
+        plan_id: {type: string, minLength: 1, maxLength: 128, description: 必须等于路径 id}
+        case_id: {type: string, minLength: 1, maxLength: 128}
+        replacements:
+          type: array
+          description: 按 SeatExternalID 规范排序；BOOTSTRAP 为空，ROTATE 只含 Owner 变化项
+          items: {$ref: '#/components/schemas/RecoveryFinalizeSeatReplacement'}
+        evidence_ids:
+          type: array
+          minItems: 1
+          description: 与 READY plan 一致的规范排序证据 ID 集合
+          items: {type: string, minLength: 1, maxLength: 128}
+        expected_fencing_token:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 首次为 0；续租时使用服务端已持久 fence
+    RecoveryReplacementClaimToken:
+      type: object
+      additionalProperties: false
+      required: [operation_id, claim_operation_id, seat_id, target_member_id, claim_token, expires_at]
+      properties:
+        operation_id: {type: string}
+        claim_operation_id: {type: string, description: 后续领取路径与 Idempotency-Key}
+        seat_id: {type: string}
+        target_member_id: {type: string}
+        claim_token:
+          type: string
+          x-sensitive: true
+          description: 只在首次签发成功响应出现；服务端只持久化 SHA-256，无法从重放或 GET 恢复
+        expires_at: {type: string, format: date-time}
+    RecoveryFinalization:
+      type: object
+      additionalProperties: false
+      required: [plan_id, ceremony_type, pool_id, from_epoch, to_epoch, status]
+      properties:
+        plan_id: {type: string}
+        ceremony_type: {type: string, enum: [BOOTSTRAP, ROTATE]}
+        pool_id: {type: string}
+        from_epoch: {type: integer, format: int64, minimum: 1}
+        to_epoch: {type: integer, format: int64, minimum: 2}
+        status:
+          type: string
+          enum: [READY, ROTATING, RECONCILE_REQUIRED, READY_TO_COMMIT, PROVIDER_COMMIT_PENDING,
+            READY_TO_ISSUE, FINALIZED]
+        fencing_token: {type: integer, format: int64, minimum: 1}
+        lease_expires_at: {type: string, format: date-time}
+        claims:
+          type: array
+          description: 仅首次从 READY_TO_ISSUE 提交到 FINALIZED 的响应可出现；空值字段会被 JSON 省略
+          items: {$ref: '#/components/schemas/RecoveryReplacementClaimToken'}
+    RecoveryFinalizationEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/RecoveryFinalization'}
+    RecoveryReplacementClaimRequest:
+      type: object
+      additionalProperties: false
+      required: [seat_id, target_member_id, claim_token]
+      properties:
+        seat_id: {type: string, minLength: 1, maxLength: 128}
+        target_member_id: {type: string, minLength: 1, maxLength: 128}
+        claim_token: {type: string, minLength: 1, x-sensitive: true}
+    RecoveryReplacementDelivery:
+      type: object
+      additionalProperties: false
+      required: [operation_id, seat_id, target_member_id, credential]
+      properties:
+        operation_id: {type: string}
+        seat_id: {type: string}
+        target_member_id: {type: string}
+        credential:
+          type: string
+          x-sensitive: true
+          description: fenced CAS 成功后只向当前管理员代交付请求披露一次
+    RecoveryReplacementDeliveryEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/RecoveryReplacementDelivery'}
     HealthEnvelope:
       type: object
       required: [data]
@@ -522,7 +1156,7 @@ components:
           required: [status, storage]
           properties:
             status: {type: string, const: ok}
-            storage: {type: string, const: memory}
+            storage: {type: string, const: postgres}
     SeatEnvelope:
       type: object
       required: [data]
@@ -866,6 +1500,25 @@ components:
             reason: {type: string}
             message: {type: string}
   responses:
+    RecoveryVerificationBundleResponse:
+      description: canonical public Evidence Bundle；Cache-Control=no-store，ETag 为持久 bundle digest
+      headers:
+        Cache-Control:
+          schema: {type: string, const: no-store}
+        ETag:
+          schema: {type: string}
+        X-Recovery-Export-ID:
+          schema: {type: string}
+        X-Recovery-Export-Capability:
+          schema: {type: string, enum: [LEGACY_EXPORT_LIMITED, REVEAL_CAPABLE]}
+      content:
+        application/vnd.trusted-pool.recovery-evidence+json:
+          schema: {$ref: '#/components/schemas/RecoveryVerificationBundle'}
+    RecoveryPlanProgressResponse:
+      description: 准备阶段已持久提交；不表示永久换员或 Epoch 激活完成
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/RecoveryPlanProgressEnvelope'}
     OperationResponse:
       description: 当前操作状态；`RECONCILE_REQUIRED` 不代表失败或成功
       content:
