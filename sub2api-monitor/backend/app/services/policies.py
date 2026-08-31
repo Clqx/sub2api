@@ -25,6 +25,7 @@ from app.models import (
 
 TTFT_RULE_KEY = "response.ttft.high"
 TTFT_WINDOW_KEY = "streaming"
+CHANNEL_MONITOR_RULE_KEY = "channel.unhealthy"
 
 
 def incident_fingerprint(
@@ -453,7 +454,7 @@ async def evaluate_channel(
         policy=policy,
         subject_id=channel.external_monitor_id,
         subject_type="channel_monitor",
-        rule_key="channel.unhealthy",
+        rule_key=CHANNEL_MONITOR_RULE_KEY,
         window_key=channel.primary_model,
         firing=unhealthy or degraded,
         severity="critical" if unhealthy else "warning",
@@ -463,6 +464,34 @@ async def evaluate_channel(
             f"{channel.primary_status or 'unknown'}; latency={channel.primary_latency_ms}ms"
         )[:1000],
     )
+
+
+async def resolve_channel_monitor_incidents(
+    session: AsyncSession,
+    target_id: str,
+    *,
+    reason: str = "model detection is paused",
+) -> None:
+    incidents = list(
+        await session.scalars(
+            select(Incident).where(
+                Incident.target_id == target_id,
+                Incident.rule_key == CHANNEL_MONITOR_RULE_KEY,
+                Incident.status != IncidentStatus.RESOLVED.value,
+            )
+        )
+    )
+    for incident in incidents:
+        await _resolve_incident(
+            session,
+            incident,
+            reason=reason,
+            title=f"{incident.title} (monitoring stopped)",
+            message=(
+                f"Channel alert closed because {reason}; "
+                "this does not indicate service recovery."
+            ),
+        )
 
 
 async def resolve_ttft_incidents_for_policy(

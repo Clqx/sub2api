@@ -1,16 +1,17 @@
 # Project Status
 
-Last updated: 2026-08-09
+Last updated: 2026-08-30
 
 ## Current Phase
 
-Phase 1 and the completed Phase 2 monitoring slices are closed. The current controlled-automation increment adds native fault discovery, event subscriptions, and a narrowly allowlisted Admin API executor.
+Phase 1 and the functional Phase 2 slices are closed. Phase 3 release hardening is active, while Phase 0 supported-version,
+fixture and capacity evidence carryovers remain open. The current system is a tested candidate worktree, not a production V1 release.
 
 ## Phase Goal
 
-Expand the runnable Hub from API-only monitoring to securely bound API+read-only-DB collection, expose real cached quota with honest freshness, and retain passive-by-default alert behavior.
+Turn the completed monitoring and controlled-action workflows into a reproducible release: freeze supported Sub2API contracts, prove compatibility and capacity, rehearse failure/backup/upgrade paths, and close supply-chain and runtime security gates.
 
-The current Phase 2 increment adds fresh provider quota through the existing Sub2API admin usage API without changing Sub2API source. It remains disabled globally and per target by default; scheduled calls never use `force=true` and are rate-limited per account.
+Passive collection remains the default. Active quota requires global and per-target opt-in; every account-recovery action requires a separate audited manual approval; cost-routing execute mode requires side-effect confirmation. Missing or stale evidence remains unknown and cannot be presented as healthy.
 
 ## Completed
 
@@ -21,7 +22,7 @@ The current Phase 2 increment adds fresh provider quota through the existing Sub
 - [x] Reserved future edge Collector Agent and Analysis Agent modules outside V1.
 - [x] Established development, independent review, test, and Docker release gates.
 - [x] Recorded Phase 0 decisions, risks, and scope in `docs/progress/phase-0.md`.
-- [x] Selected local single-administrator authentication and ntfy-only notifications for V1.
+- [x] Selected local single-administrator authentication and ntfy as the original Phase 1 notification baseline; later Phase 2 slices added Telegram and signed Webhooks.
 - [x] Added requirement traceability, UI-state, Docker acceptance, and phase-evidence matrices.
 
 ## Phase 1 Completed
@@ -83,29 +84,54 @@ The current Phase 2 increment adds fresh provider quota through the existing Sub
 
 - [x] Mirror firing native Ops alerts and resolve them only from complete evidence.
 - [x] Create deduplicated scheduled-collection failure and recovery incidents.
-- [x] Add target/event/severity subscriptions for ntfy and HMAC-signed Webhooks on the durable outbox.
-- [x] Add recommendation, approval, and explicitly enabled execution modes for five allowlisted account recovery actions.
+- [x] Add target/event/severity subscriptions for ntfy, Telegram, and HMAC-signed Webhooks on the durable outbox.
+- [x] Add recommendations and separate audited manual approval for five allowlisted account recovery actions; unattended execution and re-enabling disabled legacy execute rules are rejected.
 - [x] Enforce cooldown, event-transition uniqueness, target idempotency keys, bounded result persistence, audit, and post-action collection.
 - [x] Keep destructive account, credential, routing, system, data-management, and backup APIs outside the executor.
 
-## Pending Phase 0 Decisions
+## Phase 2 Cost Routing, TTFT, and Delivery Safety Completed
+
+- [x] Add a fixed-budget cost-routing controller with recommendation and explicitly confirmed execute modes.
+- [x] Recheck policy state before priority-only writes, fail closed on missing inventory or unhealthy quality bindings, and reconcile unknown write outcomes after worker interruption.
+- [x] Preserve fallback baselines, recover priorities after rate improvements, and emit durable rate-recovery events.
+- [x] Read only a bounded safe recent-usage projection and emit deduplicated actual account-switch events without prompts, bodies, or credentials.
+- [x] Evaluate streaming TTFT only with an exact sample-count gate, configurable percentile thresholds, and recovery hysteresis.
+- [x] Deliver through ntfy, Telegram, and HMAC-signed Webhooks with encrypted credentials, destination validation, expiring claims, retries, and explicit at-least-once semantics.
+- [x] Pause model-detection mutations before upstream access and suppress frozen detection snapshots from current dashboards.
+
+## Open Release Gates
 
 - [ ] Confirm the oldest Sub2API version that V1 must support.
 - [ ] Collect sanitized API and schema fixtures from at least two representative Sub2API versions.
 - [ ] Freeze the initial OpenAPI contract and monitor database model against those fixtures.
 - [ ] Set the V1 performance baseline after real account counts are known.
+- [ ] Validate collection concurrency, backpressure, response-size bounds, long-running stability, and large frontend lists against the agreed capacity envelope.
+- [ ] Rehearse API 401/429/5xx, database outage, notification timeout/provider outage, worker interruption, and stale/duplicate/out-of-order evidence.
+- [ ] Close durable silence, reminder, restart-recovery, timezone, audit, and multi-instance semantics; automation cooldown does not satisfy this gate.
+- [ ] Rehearse database backup/restore, schema and configuration upgrade, failed migration recovery, notification-queue recovery, and rollback with recorded RPO/RTO.
+- [ ] Pass dependency, license, SBOM, container, secret, and log scans; record the release image digest and signed compatibility report.
+- [ ] Exercise supported Sub2API versions and ntfy, Telegram, and Webhook failure/recovery paths in a production-like environment.
+
+Current compatibility evidence and its gaps are recorded in [SUPPORTED_VERSIONS.md](SUPPORTED_VERSIONS.md).
 
 ## Exit Criteria
 
-- Every V1 requirement has an acceptance criterion.
-- Connector DTOs and capability states are reviewed.
-- API-only and full-mode probe fixtures exist.
-- The initial OpenAPI contract and monitoring database model are approved.
-- Threat model covers target credentials, SSRF, log redaction, and read-only DB access.
+- Every V1 requirement has an acceptance criterion and links to current automated or rehearsal evidence.
+- API-only and full-mode fixtures cover every supported version plus missing/unknown/breaking-field cases.
+- Connector DTOs, capability degradation, quota/rate freshness, TTFT sampling, and cost authority are frozen and reviewed.
+- Performance, recovery, backup/restore, upgrade/rollback, notification, and controlled-action gates pass on the release candidate.
+- Threat model and scans cover target credentials, SSRF/DNS rebinding, notification destinations, log redaction, read-only DB access, dependencies, and images.
+- Independent QA signs off with no unwaived high or critical finding.
 
 ## Next Phase
 
-Phase 2 - full API+DB connector, field precedence, binding verification, expanded provider quota mappings, and V1 workflow completion.
+Phase 3 - compatibility baseline, reliability/capacity evidence, disaster recovery, security scanning, and a reproducible release candidate. Phase 4 enhancements remain backlog until this gate closes.
+
+## Latest Local Validation
+
+- 2026-08-30: backend `pytest -q` completed with 160 tests passing.
+- 2026-08-30: frontend `npm test` completed with 25 tests passing; `npm run build` completed successfully.
+- These results cover the current candidate worktree. They are development regression evidence, not a released commit, cross-version compatibility report, production provider exercise, or SLA.
 
 ## Change Log
 
@@ -127,3 +153,4 @@ Phase 2 - full API+DB connector, field precedence, binding verification, expande
 - 2026-08-08: Added native Sub2API operations aggregation and the four-view Operations page. Final gates: 57 backend tests, Ruff, strict mypy, 9 frontend tests, ESLint, production build, live target reprobe, and desktop/mobile browser checks with no page overflow.
 - 2026-08-08: Added native per-account usage analytics with 7/30/90-day summaries, trends, model and endpoint distributions. Final gates: 59 backend tests, Ruff, strict mypy, 10 frontend tests, ESLint, production build, live `whiles` reads, and 1280px/390px browser checks with no page overflow.
 - 2026-08-09: Added native Ops alert ingestion, collection-failure incidents, filtered ntfy/Webhook subscriptions, signed Webhook delivery, and explicitly confirmed account-recovery automation with idempotent execution and verification runs.
+- 2026-08-30: Closed the current cost-routing, actual account-switch, TTFT policy, Telegram safety, model-detection pause, worker-reconciliation, and UI regression slices. Promoted the project to Phase 3 hardening with 160 backend tests, 25 frontend tests, and a successful production frontend build; compatibility, performance, disaster-recovery, durable silence/reminder, security/SBOM, and real-provider release gates remain open.

@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.connectors.sub2api import (
     NormalizedAccount,
-    NormalizedChannelMonitor,
     Sub2APIConnector,
     sanitize_monitoring_error,
     sanitize_upstream_billing_snapshot,
@@ -432,10 +431,7 @@ async def run_cost_routing_policy(
             raise RuntimeError("target is not ready for cost routing")
         connector = await connector_for_target(session, target, settings, cipher)
         async with connector:
-            inventory_fact, inventory, quality_monitors = await _load_routing_inventory(
-                connector,
-                quality_bindings=policy.quality_bindings,
-            )
+            inventory_fact, inventory = await _load_routing_inventory(connector)
             if inventory_fact.runtime_state != "healthy":
                 raise RuntimeError(inventory_fact.reason or "account inventory unavailable")
             await _recover_interrupted_routing_decisions(
@@ -505,12 +501,9 @@ async def run_cost_routing_policy(
             policy.mode = current_mode
 
             now = datetime.now(timezone.utc)
-            quality_by_account = _quality_failures_by_account(
-                eligible,
-                policy.quality_bindings,
-                quality_monitors,
-                now,
-            )
+            # V1 model probes are retired. Keep stored bindings for a future
+            # passive-quality design, but never let stale probe state suppress traffic.
+            quality_by_account: dict[str, list[str]] = {}
             plans: list[AccountRoutingPlan] = []
             for account in eligible:
                 external_account_id = account.external_account_id
@@ -946,24 +939,12 @@ async def run_cost_routing_policy(
 
 async def _load_routing_inventory(
     connector: Sub2APIConnector,
-    *,
-    quality_bindings: dict[str, list[str]],
-) -> tuple[Any, list[NormalizedAccount], list[NormalizedChannelMonitor]]:
-    if quality_bindings:
-        account_result, channel_result = await asyncio.wait_for(
-            asyncio.gather(connector.accounts(), connector.channel_monitors()),
-            timeout=COST_ROUTING_INVENTORY_TIMEOUT_SECONDS,
-        )
-        channel_fact, channel_monitors = channel_result
-        if channel_fact.runtime_state != "healthy":
-            raise RuntimeError(channel_fact.reason or "channel monitor inventory unavailable")
-    else:
-        account_result = await asyncio.wait_for(
-            connector.accounts(), timeout=COST_ROUTING_INVENTORY_TIMEOUT_SECONDS
-        )
-        channel_monitors = []
+) -> tuple[Any, list[NormalizedAccount]]:
+    account_result = await asyncio.wait_for(
+        connector.accounts(), timeout=COST_ROUTING_INVENTORY_TIMEOUT_SECONDS
+    )
     account_fact, accounts = account_result
-    return account_fact, accounts, channel_monitors
+    return account_fact, accounts
 
 
 async def _observe_actual_switches(
@@ -1149,38 +1130,6 @@ async def _current_execution_mode(
     if claim_owner is not None and policy.lease_owner != claim_owner:
         return None
     return policy.mode
-
-
-def _quality_failures_by_account(
-    accounts: list[AccountCurrent],
-    quality_bindings: dict[str, list[str]],
-    monitors: list[NormalizedChannelMonitor],
-    now: datetime,
-) -> dict[str, list[str]]:
-    monitor_by_id = {monitor.external_monitor_id: monitor for monitor in monitors}
-    output: dict[str, list[str]] = {}
-    for account in accounts:
-        failures: list[str] = []
-        for monitor_id in quality_bindings.get(account.external_account_id, []):
-            monitor = monitor_by_id.get(monitor_id)
-            if monitor is None:
-                failures.append(f"{monitor_id}:missing")
-                continue
-            checked_at = monitor.last_checked_at
-            if checked_at is not None and checked_at.tzinfo is None:
-                checked_at = checked_at.replace(tzinfo=timezone.utc)
-            stale_after = timedelta(seconds=max(90, monitor.interval_seconds * 3))
-            if not monitor.enabled:
-                failures.append(f"{monitor.name}:disabled")
-            elif checked_at is None or now - checked_at > stale_after:
-                failures.append(f"{monitor.name}:stale")
-            elif monitor.primary_status in {"degraded", "failed", "error"}:
-                failures.append(f"{monitor.name}:{monitor.primary_status}")
-            elif monitor.primary_status != "operational":
-                failures.append(f"{monitor.name}:unknown")
-        if failures:
-            output[account.external_account_id] = failures
-    return output
 
 
 def _apply_inventory(account: AccountCurrent, source: NormalizedAccount) -> None:

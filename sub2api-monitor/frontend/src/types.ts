@@ -194,6 +194,81 @@ export interface ChannelCheck {
   checked_at:string
 }
 
+export type ChannelQualityTimeRange = '6h'|'24h'|'7d'|'30d'
+
+export interface ChannelQualityLatency {
+  sample_count:number
+  p50_ms?:number|null
+  p90_ms?:number|null
+  p95_ms?:number|null
+  avg_ms?:number|null
+}
+
+export interface ChannelQualityMetrics {
+  success_requests:number
+  error_requests:number
+  request_count:number
+  input_tokens:number
+  output_tokens:number
+  cache_creation_tokens:number
+  cache_read_tokens:number
+  token_count:number
+  rpm:number
+  tpm:number
+  error_rate:number
+  success_rate:number
+  cache_rate:number
+  cache_rate_numerator:number
+  cache_rate_denominator:number
+  ttft:ChannelQualityLatency
+  duration:ChannelQualityLatency
+}
+
+export interface ChannelQualityHealth {
+  overall:'healthy'|'warning'|'critical'|'unknown'
+  error_rate:'healthy'|'warning'|'critical'|'unknown'
+  ttft:'healthy'|'warning'|'critical'|'unknown'
+  cache:'healthy'|'warning'|'critical'|'unknown'
+  score?:number|null
+  minimum_sample:number
+}
+
+export interface ChannelQualityTrendPoint {
+  bucket_start:string
+  metrics:ChannelQualityMetrics
+  health:ChannelQualityHealth
+}
+
+export interface ChannelQualityRow {
+  platform:string
+  group_id?:number|null
+  group_name?:string|null
+  rate_multiplier?:number|null
+  group_status:string
+  metrics:ChannelQualityMetrics
+  health:ChannelQualityHealth
+  buckets:ChannelQualityTrendPoint[]
+}
+
+export interface ChannelQualitySnapshot {
+  target_id:string
+  target_name:string
+  generated_at:string
+  time_range:ChannelQualityTimeRange
+  coverage:{
+    requested_start:string
+    requested_end:string
+    coverage_start:string
+    data_through:string
+    computed_at:string
+    aggregation_lag_seconds:number
+    coverage_complete:boolean
+    bucket_seconds:number
+  }
+  items:ChannelQualityRow[]
+  failures:Record<string,string>
+}
+
 export interface Capability {
   id: string
   key: string

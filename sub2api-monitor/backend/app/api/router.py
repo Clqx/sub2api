@@ -116,6 +116,16 @@ from app.services.targets import (
 router = APIRouter(prefix="/api/v1")
 
 
+def reject_paused_model_detection_mutation() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "model_detection_paused",
+            "message": "model detection is temporarily paused; read-only access remains available",
+        },
+    )
+
+
 def target_response(target: Target) -> TargetResponse:
     result = TargetResponse.model_validate(target)
     result.secret_configured = target.secret is not None
@@ -815,6 +825,26 @@ async def target_operations(
     return snapshot
 
 
+@router.get("/targets/{target_id}/channel-quality")
+async def target_channel_quality(
+    target_id: str,
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    cipher: SecretCipher = Depends(get_cipher),
+    time_range: Literal["6h", "24h", "7d", "30d"] = "6h",
+) -> dict[str, Any]:
+    target, connector = await _target_connector_or_404(session, target_id, settings, cipher)
+    try:
+        async with connector:
+            snapshot = await connector.channel_quality_snapshot(time_range)
+    except ConnectorError as exc:
+        raise _remote_http_error(exc) from exc
+    snapshot["target_id"] = target.id
+    snapshot["target_name"] = target.name
+    return snapshot
+
+
 @router.put(
     "/accounts/{account_id}/upstream-billing-probe",
     response_model=UpstreamBillingProbeResponse,
@@ -1012,6 +1042,7 @@ async def create_channel_monitor(
     settings: Settings = Depends(get_settings),
     cipher: SecretCipher = Depends(get_cipher),
 ) -> ChannelMonitorResponse:
+    reject_paused_model_detection_mutation()
     target, connector = await _target_connector_or_404(session, payload.target_id, settings, cipher)
     remote_payload = channel_payload(payload.model_dump(), include_target=True)
     try:
@@ -1043,6 +1074,7 @@ async def update_channel_monitor(
     settings: Settings = Depends(get_settings),
     cipher: SecretCipher = Depends(get_cipher),
 ) -> ChannelMonitorResponse:
+    reject_paused_model_detection_mutation()
     item = await _required_channel(session, monitor_id)
     target, connector = await _target_connector_or_404(session, item.target_id, settings, cipher)
     remote_payload = channel_payload(payload.model_dump(exclude_unset=True))
@@ -1076,6 +1108,7 @@ async def delete_channel_monitor(
     settings: Settings = Depends(get_settings),
     cipher: SecretCipher = Depends(get_cipher),
 ) -> Response:
+    reject_paused_model_detection_mutation()
     item = await _required_channel(session, monitor_id)
     target, connector = await _target_connector_or_404(session, item.target_id, settings, cipher)
     try:
@@ -1106,6 +1139,7 @@ async def run_channel_monitor(
     settings: Settings = Depends(get_settings),
     cipher: SecretCipher = Depends(get_cipher),
 ) -> list[ChannelCheckResponse]:
+    reject_paused_model_detection_mutation()
     item = await _required_channel(session, monitor_id)
     target, connector = await _target_connector_or_404(session, item.target_id, settings, cipher)
     try:
@@ -1777,15 +1811,6 @@ async def dashboard(
             CollectionRun.created_at >= failed_since,
         )
     )
-    channels_total = await session.scalar(select(func.count()).select_from(ChannelMonitorCurrent))
-    channels_unhealthy = await session.scalar(
-        select(func.count())
-        .select_from(ChannelMonitorCurrent)
-        .where(
-            ChannelMonitorCurrent.enabled.is_(True),
-            ChannelMonitorCurrent.primary_status.in_(["degraded", "failed", "error"]),
-        )
-    )
     return DashboardResponse(
         targets_total=int(targets_total or 0),
         targets_ready=int(targets_ready or 0),
@@ -1794,8 +1819,9 @@ async def dashboard(
         low_quota_accounts=int(low_quota_accounts or 0),
         active_incidents=int(active_incidents or 0),
         failed_collections_24h=int(failed_collections or 0),
-        channels_total=int(channels_total or 0),
-        channels_unhealthy=int(channels_unhealthy or 0),
+        # Retain the response fields for old clients without reporting frozen V1 snapshots.
+        channels_total=0,
+        channels_unhealthy=0,
     )
 
 

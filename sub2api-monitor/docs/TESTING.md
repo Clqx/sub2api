@@ -24,7 +24,10 @@ Test IDs use `UT-*`, `CT-*`, `IT-*`, `FE-*`, `SEC-*`, and `DKR-*`. Requirement-t
 
 ### Integration
 
-Use test containers/Compose for monitor PostgreSQL, fake Sub2API API, read-only target PostgreSQL, and ntfy mock. Validate collection through durable notification delivery.
+Current CI uses a real monitor-state PostgreSQL plus fake API-only Sub2API and notification services, then validates the
+durable collection/notification path through Compose smoke and Playwright. A read-only target PostgreSQL/FULL connector
+was exercised in earlier local Phase 2 work, but that evidence is not a version-frozen CI gate. Release evidence must add
+a traceable representative target version and a real read-only target PostgreSQL job.
 
 ### Frontend
 
@@ -57,13 +60,15 @@ Use test containers/Compose for monitor PostgreSQL, fake Sub2API API, read-only 
 
 ## CI Gates
 
-Pull requests must pass:
+The current repository workflow requires:
 
-- Python: Ruff format/lint, mypy, pytest unit/contract, migration checks
-- React: ESLint, TypeScript, Vitest, production build
-- OpenAPI generated-client drift check
-- Docker Compose validation and image build
-- secret, dependency, and static security scans
+- Python: Ruff format/lint, mypy, pytest with the configured coverage floor, and migration coverage exercised by tests
+- React: ESLint, TypeScript/Vitest through the test script, production build, and production-dependency `npm audit`
+- Docker: Compose validation, clean service build/start, smoke test, and Playwright against the API-only QA target
+
+Before production release, the workflow still must add an OpenAPI generated-client drift gate, dedicated secret/static
+security scans, SBOM and image vulnerability evidence, a version-frozen read-only target PostgreSQL/FULL job, and
+repeatable upgrade plus backup/restore gates. These are release requirements, not claims about the current PR workflow.
 
 Core connector and policy modules target at least 90% branch coverage; overall backend and frontend target at least 80% without excluding meaningful code solely to raise the number.
 

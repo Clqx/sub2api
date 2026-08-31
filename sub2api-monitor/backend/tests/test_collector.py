@@ -30,6 +30,7 @@ class FixtureConnector:
     def __init__(self, target_id: str):
         self.target_id = target_id
         self.passive_calls = 0
+        self.model_probe_calls = 0
 
     async def __aenter__(self) -> FixtureConnector:
         return self
@@ -73,6 +74,10 @@ class FixtureConnector:
 
     async def active_usage(self, _: NormalizedAccount) -> tuple[ProbeFact, list[QuotaWindow]]:
         raise RuntimeError("fixture active usage failure")
+
+    async def channel_monitors(self):
+        self.model_probe_calls += 1
+        raise AssertionError("retired model detection must not be collected")
 
 
 class SuccessfulActiveConnector(FixtureConnector):
@@ -141,17 +146,22 @@ async def test_collection_isolates_targets_and_uses_only_passive_usage(
     quotas = list(await db_session.scalars(select(QuotaSample)))
     capabilities = list(await db_session.scalars(select(Capability)))
     passive_capabilities = [item for item in capabilities if item.key == "quota.passive"]
+    channel_capabilities = [item for item in capabilities if item.key == "channels.monitor"]
     assert [(item.target_id, item.external_account_id) for item in accounts] == [
         ("target-a", "shared-account-id"),
         ("target-b", "shared-account-id"),
     ]
     assert all(run.status == "succeeded" for run in runs)
     assert all(connector.passive_calls == 1 for connector in connectors.values())
+    assert all(connector.model_probe_calls == 0 for connector in connectors.values())
     assert len(observations) == 2
     assert len(quotas) == 2
     assert len(passive_capabilities) == 2, [(item.target_id, item.key) for item in capabilities]
     assert all(item.support_state == "supported" for item in passive_capabilities)
     assert all(item.runtime_state == "healthy" for item in passive_capabilities)
+    assert len(channel_capabilities) == 2
+    assert all(item.support_state == "unsupported" for item in channel_capabilities)
+    assert all(item.runtime_state == "disabled" for item in channel_capabilities)
     assert all("credentials" not in observation.payload for observation in observations)
     assert all(item.freshness == "fresh" for item in quotas)
 

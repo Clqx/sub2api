@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import math
 import re
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlparse
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.config import Settings
 
@@ -30,6 +32,85 @@ class ConnectorError(RuntimeError):
 
 class ContractError(ConnectorError):
     pass
+
+
+NonNegativeInt = Annotated[int, Field(ge=0)]
+NonNegativeFloat = Annotated[float, Field(ge=0)]
+UnitRate = Annotated[float, Field(ge=0, le=1)]
+HealthState = Literal["healthy", "warning", "critical", "unknown"]
+
+
+class _ChannelQualityPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore", allow_inf_nan=False)
+
+
+class _ChannelQualityLatency(_ChannelQualityPayload):
+    sample_count: NonNegativeInt
+    p50_ms: NonNegativeFloat | None = None
+    p90_ms: NonNegativeFloat | None = None
+    p95_ms: NonNegativeFloat | None = None
+    avg_ms: NonNegativeFloat | None = None
+
+
+class _ChannelQualityMetrics(_ChannelQualityPayload):
+    success_requests: NonNegativeInt
+    error_requests: NonNegativeInt
+    request_count: NonNegativeInt
+    input_tokens: NonNegativeInt
+    output_tokens: NonNegativeInt
+    cache_creation_tokens: NonNegativeInt
+    cache_read_tokens: NonNegativeInt
+    token_count: NonNegativeInt
+    rpm: NonNegativeFloat
+    tpm: NonNegativeFloat
+    error_rate: UnitRate
+    success_rate: UnitRate
+    cache_rate: UnitRate
+    cache_rate_numerator: NonNegativeInt
+    cache_rate_denominator: NonNegativeInt
+    ttft: _ChannelQualityLatency
+    duration: _ChannelQualityLatency
+
+
+class _ChannelQualityHealth(_ChannelQualityPayload):
+    overall: HealthState
+    error_rate: HealthState
+    ttft: HealthState
+    cache: HealthState
+    score: Annotated[float, Field(ge=0, le=100)] | None = None
+    minimum_sample: NonNegativeInt
+
+
+class _ChannelQualityTrendPoint(_ChannelQualityPayload):
+    bucket_start: datetime
+    metrics: _ChannelQualityMetrics
+    health: _ChannelQualityHealth
+
+
+class _ChannelQualityRow(_ChannelQualityPayload):
+    platform: Annotated[str, Field(min_length=1, max_length=100)]
+    group_id: int | None = None
+    group_name: Annotated[str, Field(max_length=200)] | None = None
+    model: Annotated[str, Field(max_length=200)] | None = None
+    metrics: _ChannelQualityMetrics
+    health: _ChannelQualityHealth
+    buckets: list[_ChannelQualityTrendPoint]
+
+
+class _ChannelQualityCoverage(_ChannelQualityPayload):
+    requested_start: datetime
+    requested_end: datetime
+    coverage_start: datetime
+    data_through: datetime
+    computed_at: datetime
+    aggregation_lag_seconds: NonNegativeInt
+    coverage_complete: bool
+    bucket_seconds: Annotated[int, Field(gt=0)]
+
+
+class _ChannelQualityMatrix(_ChannelQualityPayload):
+    coverage: _ChannelQualityCoverage
+    items: list[_ChannelQualityRow]
 
 
 @dataclass(slots=True)
@@ -177,6 +258,7 @@ SecretRotatedCallback = Callable[[dict[str, str]], Awaitable[None]]
 ACTIVE_USAGE_PLATFORMS = frozenset({"anthropic", "openai"})
 ACTIVE_USAGE_ACCOUNT_TYPES = frozenset({"oauth", "setup-token"})
 MONITORING_TIME_RANGES = frozenset({"5m", "30m", "1h", "6h", "24h"})
+CHANNEL_QUALITY_TIME_RANGES = frozenset({"6h", "24h", "7d", "30d"})
 ACCOUNT_AUTOMATION_ACTIONS = frozenset(
     {
         "recover_state",
@@ -780,6 +862,90 @@ class Sub2APIConnector:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "time_range": time_range,
             "resources": resources,
+            "failures": failures,
+        }
+
+    async def channel_quality_snapshot(self, time_range: str = "6h") -> dict[str, Any]:
+        if time_range not in CHANNEL_QUALITY_TIME_RANGES:
+            raise ValueError("unsupported channel quality time range")
+
+        async def fetch_groups() -> tuple[httpx.Response | None, str | None]:
+            try:
+                response = await self.request(
+                    "GET",
+                    "/api/v1/admin/groups/all",
+                    params={"include_inactive": "true"},
+                )
+            except (ConnectorError, httpx.HTTPError) as exc:
+                reason = exc.reason if isinstance(exc, ConnectorError) else None
+                return None, reason or "group inventory request failed"
+            return response, None
+
+        matrix_response, (groups_response, groups_failure) = await asyncio.gather(
+            self.request(
+                "GET",
+                "/api/v1/admin/channel-monitor-v2/matrix",
+                params={"range": time_range, "group_by": "platform_group"},
+            ),
+            fetch_groups(),
+        )
+        if matrix_response.status_code != 200:
+            raise ConnectorError(
+                "target channel quality monitoring is unavailable",
+                status_code=matrix_response.status_code,
+                reason=_envelope_error_reason(matrix_response),
+            )
+        matrix = _require_dict_data(matrix_response, "channel quality matrix")
+        try:
+            normalized_matrix = _ChannelQualityMatrix.model_validate(matrix).model_dump(
+                mode="json"
+            )
+        except ValidationError as exc:
+            raise ContractError(
+                "invalid channel quality matrix response",
+                status_code=matrix_response.status_code,
+            ) from exc
+        raw_items = normalized_matrix["items"]
+
+        failures: dict[str, str] = {}
+        inventory: dict[str, dict[str, Any]] = {}
+        if groups_response is None:
+            failures["groups"] = groups_failure or "group inventory request failed"
+        elif groups_response.status_code == 200:
+            try:
+                raw_groups = _envelope_data(groups_response)
+            except ConnectorError:
+                raw_groups = None
+                failures["groups"] = "group inventory returned an application error"
+            if isinstance(raw_groups, dict):
+                raw_groups = raw_groups.get("items")
+            if isinstance(raw_groups, list):
+                for group in raw_groups:
+                    if not isinstance(group, dict) or group.get("id") is None:
+                        continue
+                    inventory[str(group["id"])] = {
+                        "rate_multiplier": _as_float(group.get("rate_multiplier")),
+                        "status": str(group.get("status") or "unknown")[:30],
+                    }
+            elif "groups" not in failures:
+                failures["groups"] = "invalid group inventory response"
+        else:
+            failures["groups"] = f"group inventory returned HTTP {groups_response.status_code}"
+
+        items: list[dict[str, Any]] = []
+        for raw_item in raw_items:
+            item = dict(raw_item)
+            group_id = item.get("group_id")
+            group = inventory.get(str(group_id)) if group_id is not None else None
+            item["rate_multiplier"] = group.get("rate_multiplier") if group else None
+            item["group_status"] = group.get("status") if group else "unknown"
+            items.append(item)
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "time_range": time_range,
+            "coverage": normalized_matrix["coverage"],
+            "items": items,
             "failures": failures,
         }
 
@@ -1461,9 +1627,10 @@ def _as_float(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _usage_freshness(

@@ -26,9 +26,9 @@ Each deployment is a `target`. Accounts are globally identified by `(target_id, 
 | CHN-01 | Monitor model channels | Aggregate target channel status, latency, availability, history, and manual checks across deployments. |
 | ALT-01 | Evaluate policies | Support warning, critical, exhausted, unavailable, group-capacity, stale-data, and recovery events. |
 | ALT-02 | Control noise | Apply sustain duration, hysteresis, cooldown, reminder, deduplication, acknowledgement, and silence. |
-| NTF-01 | Publish to ntfy | Route by target/policy, redact content, retry failures durably, and retain delivery history. |
-| EVT-01 | Subscribe to events | Filter lifecycle events by target, type, and severity; deliver through ntfy or signed Webhooks. |
-| AUT-01 | Bound fault automation | Recommend or execute fixed account recovery actions with confirmation, cooldown, idempotency, audit, and verification. |
+| NTF-01 | Publish notifications | Route by target/policy to ntfy, Telegram, or signed Webhooks; redact content, retry durably with at-least-once semantics, and retain delivery history. |
+| EVT-01 | Subscribe to events | Filter lifecycle events by target, type, and severity; deliver through ntfy, Telegram, or signed Webhooks. |
+| AUT-01 | Bound fault automation | Recommend fixed account recovery actions and require a separate audited manual approval before idempotent execution and verification; unattended execution is prohibited. |
 | OPS-01 | Self-observability | Expose health, readiness, worker heartbeat, collection runs, and outbox state. |
 | OPS-02 | Aggregate target operations | Expose the target's native traffic, capacity, request/error, alert, log, and system-health telemetry through fixed read-only APIs. |
 | SEC-01 | Protect credentials | Secrets are write-only in APIs, encrypted at rest, redacted from logs, and never exposed to the browser. |
@@ -42,7 +42,7 @@ Each deployment is a `target`. Accounts are globally identified by `(target_id, 
 - Operations: target traffic, latency, concurrency, group capacity, requests/errors, alerts, logs, and system health.
 - Alerts: firing, acknowledged, silenced, resolved, and notification delivery state.
 - Policies: global defaults with per-target overrides.
-- Notifications: ntfy/Webhook subscriptions, event filters, test publish, and delivery history.
+- Notifications: ntfy/Telegram/Webhook subscriptions, event filters, test publish, and delivery history.
 - Automation: recovery rules, recommendation approvals, execution outcomes, and verification state.
 - System: worker status, collection runs, audit records, and configuration diagnostics.
 

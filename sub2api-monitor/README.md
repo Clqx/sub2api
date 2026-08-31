@@ -4,7 +4,7 @@ Independent monitoring center for multiple Sub2API deployments. It observes acco
 
 ## Project Status
 
-Phase 1 and the current Phase 2 slices are complete. The runnable system supports multiple API-only or API+read-only-DB targets, account availability, passive and explicitly opted-in active quota observations, upstream billing-rate discovery, cost routing, channel uptime and TTFT monitoring, alert incidents, durable multi-channel delivery, and an operations UI. The current source of truth is [docs/STATUS.md](docs/STATUS.md).
+The functional Phase 2 slices are complete and Phase 3 release hardening is active. The runnable system supports multiple API-only or API+read-only-DB targets, account availability, passive and explicitly opted-in active quota observations, upstream billing-rate discovery, cost routing, channel uptime and TTFT monitoring, alert incidents, durable multi-channel delivery, bounded account recovery automation, and an operations UI. This does not yet constitute a production V1 release; compatibility, performance, disaster-recovery, and release-security gates remain open. See [docs/STATUS.md](docs/STATUS.md) and the [repository-wide capability roadmap](../docs/PROJECT_CAPABILITIES_AND_ROADMAP_CN.md).
 
 ## Stack
 
@@ -129,14 +129,16 @@ The notification outbox uses short database claims with expiring leases. Network
 
 ### Bounded account recovery automation
 
-The **Automation** page creates disabled-by-default rules for `account.unavailable` incidents. Recommendation mode requires operator approval before execution; automatic mode requires explicit side-effect confirmation. Only unified state recovery, error clearing, rate-limit clearing, temporary-unschedulable clearing, and schedulable restoration are allowed. Every execution has a stable target idempotency key, cooldown, audit trail, bounded result, and follow-up collection. See [fault automation](docs/FAULT_AUTOMATION.md) for the exact Admin API and security contract.
+The **Automation** page creates disabled-by-default recommendation rules for `account.unavailable` incidents. Every recommendation requires a separate audited operator approval with explicit side-effect confirmation before execution; unattended automatic rules cannot be enabled, and disabled legacy execute rules cannot be re-enabled. Only unified state recovery, error clearing, rate-limit clearing, temporary-unschedulable clearing, and schedulable restoration are allowed. Every approved execution has a stable target idempotency key, cooldown, audit trail, bounded result, and follow-up collection. See [fault automation](docs/FAULT_AUTOMATION.md) for the exact Admin API and security contract.
 
 For public database targets, use `sslmode=require` plus the separately supplied PEM certificate. The connector pins the resolved public IP, requires the supplied certificate, validates its trust chain, and enforces TLS 1.2 or newer. `sslmode=verify-full` remains rejected because DNS pinning cannot preserve hostname verification; the monitor does not silently downgrade that mode.
 
 ## Documentation
 
+- [Repository-wide capability and delivery roadmap](../docs/PROJECT_CAPABILITIES_AND_ROADMAP_CN.md)
 - [V1 scope](docs/V1_SCOPE.md)
 - [Capability matrix](docs/CAPABILITY_MATRIX.md)
+- [Supported-version evidence](docs/SUPPORTED_VERSIONS.md)
 - [UI state matrix](docs/UI_STATE_MATRIX.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Connector contract](docs/CONNECTOR_CONTRACT.md)

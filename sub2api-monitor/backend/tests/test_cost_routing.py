@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app.api.router import update_cost_routing_policy
 from app.config import Settings
-from app.connectors.sub2api import ProbeFact, normalize_account, normalize_channel_monitor
+from app.connectors.sub2api import ProbeFact, normalize_account
 from app.models import (
     AccountCurrent,
     AuditEvent,
@@ -820,7 +820,7 @@ async def test_execute_mode_guard_cancels_pending_priority_write(
 
 
 @pytest.mark.asyncio
-async def test_channel_quality_failure_demotes_bound_account(
+async def test_retired_model_quality_binding_does_not_demote_account(
     db_session,
     settings_dict: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
@@ -863,19 +863,6 @@ async def test_channel_quality_failure_demotes_bound_account(
             now,
         )
     ]
-    quality_monitors = [
-        normalize_channel_monitor(
-            {
-                "id": "monitor-1",
-                "name": "Primary OpenAI",
-                "provider": "openai",
-                "enabled": True,
-                "interval_seconds": 30,
-                "last_checked_at": now.isoformat(),
-                "primary_status": "failed",
-            }
-        )
-    ]
     writes: list[tuple[str, int]] = []
 
     class FakeConnector:
@@ -889,7 +876,7 @@ async def test_channel_quality_failure_demotes_bound_account(
             return ProbeFact("supported", "healthy", "fresh"), inventory
 
         async def channel_monitors(self):
-            return ProbeFact("supported", "healthy", "fresh"), quality_monitors
+            raise AssertionError("retired model quality must not be loaded")
 
         async def probe_upstream_billing_batch(self, _account_ids: list[str]):
             return [
@@ -917,16 +904,15 @@ async def test_channel_quality_failure_demotes_bound_account(
         cipher,
         actor="worker:test",
     )
-    assert writes == [("1", 100000)]
+    assert writes == []
     decision = await db_session.scalar(select(RoutingDecision))
-    assert decision is not None
-    assert decision.reason == "quality_failed"
-    assert decision.result["quality_failures"] == ["Primary OpenAI:failed"]
+    assert decision is None
+    await db_session.refresh(account)
+    assert account.priority == 100
     incident = await db_session.scalar(
         select(Incident).where(Incident.rule_key == "cost_routing.priority_changed")
     )
-    assert incident is not None
-    assert incident.severity == "critical"
+    assert incident is None
 
 
 @pytest.mark.asyncio

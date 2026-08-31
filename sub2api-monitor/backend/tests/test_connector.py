@@ -156,6 +156,208 @@ async def test_recent_usage_routes_returns_only_safe_switch_fields(
     assert seen[0].url.params["sort_order"] == "desc"
 
 
+def _channel_quality_metrics() -> dict[str, object]:
+    return {
+        "success_requests": 99,
+        "error_requests": 1,
+        "request_count": 100,
+        "input_tokens": 1000,
+        "output_tokens": 500,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 910,
+        "token_count": 2410,
+        "rpm": 0.3,
+        "tpm": 12.0,
+        "error_rate": 0.01,
+        "success_rate": 0.99,
+        "cache_rate": 0.91,
+        "cache_rate_numerator": 910,
+        "cache_rate_denominator": 1000,
+        "ttft": {"sample_count": 80, "p50_ms": 850, "p90_ms": 1200},
+        "duration": {"sample_count": 100, "p50_ms": 2600},
+    }
+
+
+def _channel_quality_health() -> dict[str, object]:
+    return {
+        "overall": "healthy",
+        "error_rate": "healthy",
+        "ttft": "healthy",
+        "cache": "healthy",
+        "score": 96,
+        "minimum_sample": 20,
+    }
+
+
+def _channel_quality_matrix_data() -> dict[str, object]:
+    return {
+        "coverage": {
+            "requested_start": "2026-08-23T00:00:00Z",
+            "requested_end": "2026-08-23T06:00:00Z",
+            "coverage_start": "2026-08-23T00:00:00Z",
+            "data_through": "2026-08-23T05:59:00Z",
+            "computed_at": "2026-08-23T06:00:00Z",
+            "aggregation_lag_seconds": 60,
+            "coverage_complete": True,
+            "bucket_seconds": 3600,
+        },
+        "items": [
+            {
+                "platform": "openai",
+                "group_id": 7,
+                "group_name": "Low rate",
+                "metrics": _channel_quality_metrics(),
+                "health": _channel_quality_health(),
+                "buckets": [],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_channel_quality_snapshot_uses_only_passive_metrics(
+    settings_dict: dict[str, object],
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/api/v1/admin/channel-monitor-v2/matrix":
+            assert request.url.params["range"] == "6h"
+            assert request.url.params["group_by"] == "platform_group"
+            matrix = _channel_quality_matrix_data()
+            items = matrix["items"]
+            assert isinstance(items, list)
+            assert isinstance(items[0], dict)
+            items[0]["authorization"] = "Bearer must-not-survive"
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": matrix,
+                },
+            )
+        if request.url.path == "/api/v1/admin/groups/all":
+            assert request.url.params["include_inactive"] == "true"
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": [
+                        {
+                            "id": 7,
+                            "name": "Low rate",
+                            "status": "active",
+                            "rate_multiplier": 0.21,
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected endpoint: {request.url}")
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        snapshot = await connector.channel_quality_snapshot("6h")
+
+    assert snapshot["items"][0]["rate_multiplier"] == 0.21
+    assert snapshot["items"][0]["group_status"] == "active"
+    assert "authorization" not in snapshot["items"][0]
+    assert {request.url.path for request in seen} == {
+        "/api/v1/admin/channel-monitor-v2/matrix",
+        "/api/v1/admin/groups/all",
+    }
+    assert all(
+        "models" not in request.url.path and "run" not in request.url.path
+        for request in seen
+    )
+
+
+@pytest.mark.asyncio
+async def test_channel_quality_keeps_metrics_when_group_inventory_fails(
+    settings_dict: dict[str, object],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/admin/channel-monitor-v2/matrix":
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": _channel_quality_matrix_data()},
+            )
+        return httpx.Response(200, json={"code": 500, "message": "inventory unavailable"})
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        snapshot = await connector.channel_quality_snapshot("24h")
+
+    assert len(snapshot["items"]) == 1
+    assert snapshot["items"][0]["rate_multiplier"] is None
+    assert snapshot["failures"]["groups"] == "group inventory returned an application error"
+
+
+@pytest.mark.asyncio
+async def test_channel_quality_keeps_metrics_when_group_inventory_transport_fails(
+    settings_dict: dict[str, object],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/admin/channel-monitor-v2/matrix":
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": _channel_quality_matrix_data()},
+            )
+        raise httpx.ConnectError("inventory disconnected", request=request)
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        snapshot = await connector.channel_quality_snapshot("6h")
+
+    assert len(snapshot["items"]) == 1
+    assert snapshot["items"][0]["rate_multiplier"] is None
+    assert snapshot["failures"]["groups"] == "group inventory request failed"
+
+
+@pytest.mark.asyncio
+async def test_channel_quality_rejects_invalid_nested_metrics(
+    settings_dict: dict[str, object],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/admin/channel-monitor-v2/matrix":
+            matrix = _channel_quality_matrix_data()
+            items = matrix["items"]
+            assert isinstance(items, list)
+            assert isinstance(items[0], dict)
+            items[0]["metrics"] = {}
+            return httpx.Response(200, json={"code": 0, "data": matrix})
+        return httpx.Response(200, json={"code": 0, "data": []})
+
+    connector = Sub2APIConnector(
+        base_url="http://target.test",
+        auth_type="x_api_key",
+        secret={"api_key": "secret"},
+        settings=Settings(**settings_dict),
+        transport=httpx.MockTransport(handler),
+    )
+    async with connector:
+        with pytest.raises(ContractError, match="invalid channel quality matrix response"):
+            await connector.channel_quality_snapshot("6h")
+
+
 @pytest.mark.asyncio
 async def test_passive_usage_never_requests_active_source(settings_dict: dict[str, object]) -> None:
     seen: list[httpx.Request] = []

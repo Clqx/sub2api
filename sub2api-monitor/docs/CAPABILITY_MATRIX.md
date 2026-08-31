@@ -2,6 +2,8 @@
 
 The UI and Hub API expose observed capabilities, not assumptions based on a selected mode. `API_ONLY` and `FULL` are the required V1 onboarding paths.
 
+Last reviewed: 2026-08-30. Rows in this table describe implemented capability surfaces in the current candidate worktree. Production readiness is tracked separately in [STATUS.md](STATUS.md) and [DELIVERY_PLAN.md](DELIVERY_PLAN.md).
+
 | Capability | V1 role | API_ONLY | FULL | Notes |
 |---|---|---|---|---|
 | Instance health/version | Diagnostic | Probe | Probe | Public health may remain available when authenticated calls fail. |
@@ -12,12 +14,15 @@ The UI and Hub API expose observed capabilities, not assumptions based on a sele
 | Active quota probe | Optional, opt-in | Provider/account probe | Provider/account probe | May call upstream and change target-side snapshots/state. |
 | Upstream billing-rate probe | Optional, target-managed | Discover and operate | Discover and operate | Reads normalized snapshots; manual probes may call the account's upstream deployment. |
 | Channel monitor inventory | Optional, target-managed | Discover and operate | Discover and operate | Aggregates status, latency, availability, and history without exposing channel API keys. |
+| Streaming TTFT policy | Optional, read-only | Evaluate native Ops sample | Evaluate native Ops sample | Uses exact streaming sample count, configured percentile/window, minimum samples, warning/critical thresholds, and recovery hysteresis; it is not an end-user SLO guarantee. |
 | Group membership/capacity | Optional | Probe | Probe API and DB | Missing capability is `unsupported`, never zero. |
 | Native operations telemetry | Optional, read-only | Probe and aggregate | Probe and aggregate | Dashboard trends, QPS/TPS, latency, concurrency, account availability, requests/errors, OpenAI tokens, alerts, logs, pipeline health, group usage, and capacity. |
 | Native Ops alert ingestion | Optional, read-only | Mirror and resolve | Mirror and resolve | Polls firing target alerts; incomplete snapshots never resolve known incidents. |
-| Event subscriptions | Optional | ntfy/Webhook | ntfy/Webhook | Target, event-type, and severity filters share the durable outbox; Webhooks support Bearer and HMAC-SHA256. |
-| Account fault automation | Optional, explicit opt-in | Recommend or execute | Recommend or execute | Fixed Admin API allowlist, five-minute minimum cooldown, idempotency, audit, and post-action verification. |
+| Event subscriptions | Optional | ntfy/Telegram/Webhook | ntfy/Telegram/Webhook | Target, event-type, and severity filters share the durable at-least-once outbox; Webhooks support Bearer and HMAC-SHA256. |
+| Account fault automation | Optional, manual approval | Recommend, then approve | Recommend, then approve | Fixed Admin API allowlist, separate audited approval for each action, five-minute minimum cooldown, idempotency, audit, and post-action verification; unattended execution cannot be enabled. |
 | Cost-aware fault routing | Optional, explicit opt-in | Recommend or execute | Recommend or execute | OpenAI API-key accounts only; fixed 30-second control cycle, 25-second execution budget, availability and bound-channel-quality demotion, deterministic priority bands, decisions, audit, and repeated change notifications. |
+| Actual account-switch events | Optional, read-only | Observe bounded recent usage | Observe bounded recent usage | First observation establishes a baseline; later same-session changes emit deduplicated events without persisting prompts, bodies, or credentials. |
+| Model-detection safety pause | Optional, controlled | Pause mutation and suppress frozen state | Pause mutation and suppress frozen state | Pauses before upstream mutation; frozen detection snapshots do not appear as current dashboard truth. |
 | API/DB consistency check | Full-mode required | N/A | Must pass | Mismatch blocks full-mode merge. |
 | Target DB fallback | Optional | N/A | Schema/permission probe | Read-only and limited to allowlisted queries. |
 

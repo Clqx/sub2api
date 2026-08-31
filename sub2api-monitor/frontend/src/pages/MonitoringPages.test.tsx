@@ -28,8 +28,10 @@ describe('monitoring expansion pages', () => {
       total: 1,
     })
     vi.spyOn(api, 'upstreamBillingSettings').mockResolvedValue({ enabled: true, interval_minutes: 30 })
-    vi.spyOn(api, 'costRoutingPolicy').mockResolvedValue({ id:'routing-1',target_id:'target-1',enabled:true,mode:'recommend',probe_interval_seconds:30,priority_scale:1000,unhealthy_priority:100000,minimum_priority:1,quality_bindings:{'9':['5']},fallback_account_ids:['9'],fallback_priorities:{'9':200},last_account_count:1,last_change_count:0 })
-    vi.spyOn(api, 'channelMonitors').mockResolvedValue([{id:'channel-1',target_id:'target-1',external_monitor_id:'5',name:'Relay quality',provider:'openai',api_mode:'responses',endpoint:'https://example.com',api_key_masked:'***',api_key_decrypt_failed:false,primary_model:'gpt-5',extra_models:[],group_name:'',enabled:true,interval_seconds:30,jitter_seconds:0,last_checked_at:'2026-08-09T00:00:00Z',primary_status:'operational',primary_latency_ms:120,availability_7d:100,extra_models_status:[],extra_headers:{},body_override_mode:'off',observed_at:'2026-08-09T00:00:00Z'}])
+    const routingPolicy={ id:'routing-1',target_id:'target-1',enabled:true,mode:'recommend' as const,probe_interval_seconds:30,priority_scale:1000,unhealthy_priority:100000,minimum_priority:1,quality_bindings:{'9':['5']},fallback_account_ids:['9'],fallback_priorities:{'9':200},last_account_count:1,last_change_count:0 }
+    vi.spyOn(api, 'costRoutingPolicy').mockResolvedValue(routingPolicy)
+    const saveRouting=vi.spyOn(api, 'updateCostRoutingPolicy').mockResolvedValue(routingPolicy)
+    const channelMonitors=vi.spyOn(api, 'channelMonitors')
     vi.spyOn(api, 'routingDecisions').mockResolvedValue([{id:'decision-1',policy_id:'routing-1',target_id:'target-1',external_account_id:'9',account_name:'Relay',observed_multiplier:.16,previous_priority:200,desired_priority:160,reason:'cost_decrease',mode:'recommend',status:'recommended',result:{},created_at:'2026-08-09T00:00:00Z'}])
     const accounts = vi.spyOn(api, 'accounts').mockResolvedValue({
       items: [{
@@ -51,23 +53,48 @@ describe('monitoring expansion pages', () => {
     expect(screen.getAllByText('160').length).toBeGreaterThan(0)
     expect(screen.getByText('倍率下降')).toBeTruthy()
     expect(screen.queryByText('OAuth account')).toBeNull()
-    expect((screen.getByRole('checkbox',{name:'Relay 绑定 Relay quality'}) as HTMLInputElement).checked).toBe(true)
+    expect(screen.queryByText('服务质量绑定')).toBeNull()
+    expect(channelMonitors).not.toHaveBeenCalled()
     expect((screen.getByRole('checkbox',{name:'Relay 设为兜底账号'}) as HTMLInputElement).checked).toBe(true)
     expect(accounts.mock.calls[0]?.[0]).toContain('platform=openai')
     expect(accounts.mock.calls[0]?.[0]).toContain('account_type=apikey')
+    vi.spyOn(window,'confirm').mockReturnValue(true)
+    fireEvent.click(screen.getByRole('button',{name:'保存成本路由'}))
+    await vi.waitFor(()=>expect(saveRouting).toHaveBeenCalled())
+    expect(saveRouting.mock.calls[0]?.[1].quality_bindings).toEqual({'9':['5']})
   })
 
   it('renders aggregated channel health and availability', async () => {
-    vi.spyOn(api, 'targets').mockResolvedValue({ items: [], total: 0 })
-    vi.spyOn(api, 'channelMonitors').mockResolvedValue([{
-      id: 'channel-1', target_id: 'target-1', target_name: 'Prod', external_monitor_id: '5', name: 'Codex', provider: 'openai', api_mode: 'responses', endpoint: 'https://example.com', api_key_masked: 'sk-***', api_key_decrypt_failed: false, primary_model: 'gpt-5.3-codex', extra_models: [], group_name: 'Primary', enabled: true, interval_seconds: 60, jitter_seconds: 0, last_checked_at: '2026-08-08T00:00:00Z', primary_status: 'operational', primary_latency_ms: 420, availability_7d: 99.9, extra_models_status: [], extra_headers: {}, body_override_mode: 'off', observed_at: '2026-08-08T00:00:00Z',
-    }])
+    vi.spyOn(api, 'targets').mockResolvedValue({ items: [{id:'target-1',name:'Prod',base_url:'https://example.com',mode:'full',enabled:true,monitoring_readiness:'ready'}], total: 1 })
+    const quality=vi.spyOn(api,'targetChannelQuality').mockResolvedValue({
+      target_id:'target-1',target_name:'Prod',generated_at:'2026-08-23T06:00:00Z',time_range:'6h',failures:{},
+      coverage:{requested_start:'2026-08-23T00:00:00Z',requested_end:'2026-08-23T06:00:00Z',coverage_start:'2026-08-23T00:00:00Z',data_through:'2026-08-23T05:59:00Z',computed_at:'2026-08-23T06:00:00Z',aggregation_lag_seconds:60,coverage_complete:true,bucket_seconds:3600},
+      items:[{
+        platform:'openai',group_id:7,group_name:'Low rate',rate_multiplier:.21,group_status:'active',
+        metrics:{success_requests:99,error_requests:1,request_count:100,input_tokens:1000,output_tokens:500,cache_creation_tokens:0,cache_read_tokens:910,token_count:2410,rpm:.3,tpm:12,error_rate:.01,success_rate:.99,cache_rate:.91,cache_rate_numerator:910,cache_rate_denominator:1000,ttft:{sample_count:80,p50_ms:850,p90_ms:1200},duration:{sample_count:100,p50_ms:2600}},
+        health:{overall:'healthy',error_rate:'healthy',ttft:'healthy',cache:'healthy',score:96,minimum_sample:20},
+        buckets:[
+          {bucket_start:'2026-08-23T05:30:00Z',metrics:{success_requests:10,error_requests:0,request_count:10,input_tokens:100,output_tokens:50,cache_creation_tokens:0,cache_read_tokens:90,token_count:240,rpm:.3,tpm:12,error_rate:0,success_rate:1,cache_rate:.9,cache_rate_numerator:90,cache_rate_denominator:100,ttft:{sample_count:8,p50_ms:800},duration:{sample_count:10,p50_ms:2500}},health:{overall:'healthy',error_rate:'healthy',ttft:'healthy',cache:'healthy',score:98,minimum_sample:5}},
+          {bucket_start:'2026-08-23T06:00:00Z',metrics:{success_requests:0,error_requests:0,request_count:0,input_tokens:0,output_tokens:0,cache_creation_tokens:0,cache_read_tokens:0,token_count:0,rpm:0,tpm:0,error_rate:0,success_rate:0,cache_rate:0,cache_rate_numerator:0,cache_rate_denominator:0,ttft:{sample_count:0},duration:{sample_count:0}},health:{overall:'unknown',error_rate:'unknown',ttft:'unknown',cache:'unknown',score:null,minimum_sample:5}},
+        ],
+      }],
+    })
+    const activeRun=vi.spyOn(api,'runChannelMonitor')
 
     renderPage(<ChannelsPage />)
 
-    expect(await screen.findByText('Codex')).toBeTruthy()
-    expect(screen.getByText('420 ms')).toBeTruthy()
-    expect(screen.getByText('99.90%')).toBeTruthy()
+    expect(await screen.findByText('Low rate')).toBeTruthy()
+    expect(screen.getByText('0.21x')).toBeTruthy()
+    expect(screen.getByText('91.0%')).toBeTruthy()
+    expect(screen.getByText('99.0%')).toBeTruthy()
+    expect(screen.getByText('850 ms')).toBeTruthy()
+    expect(screen.getByText('健康评分 96')).toBeTruthy()
+    const trend=screen.getByLabelText('Low rate 窗口健康趋势')
+    expect(trend.querySelectorAll('i')[1]?.title).toContain('可用 -- · 缓存 -- · 首字 --')
+    expect((screen.getByRole('tab',{name:'模型检测'}) as HTMLButtonElement).disabled).toBe(true)
+    expect(activeRun).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button',{name:'24h'}))
+    await vi.waitFor(()=>expect(quality.mock.calls.some(([,range])=>range==='24h')).toBe(true))
   })
 
   it('renders native target operations and group capacity', async () => {

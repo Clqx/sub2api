@@ -25,14 +25,13 @@ from app.models import (
 from app.security import SecretCipher
 from app.services.active_usage import collect_active_usage
 from app.services.automation import verify_applied_automations
-from app.services.monitoring import sync_channel_monitors
 from app.services.policies import (
     evaluate_account,
-    evaluate_channel,
     evaluate_collection_health,
     evaluate_native_alerts,
     evaluate_ttft,
     evaluate_upstream_rate_change,
+    resolve_channel_monitor_incidents,
     upstream_rate_multiplier,
 )
 from app.services.targets import (
@@ -59,6 +58,7 @@ async def collect_run(
     if target is None:
         await _fail_run(session, run, "target no longer exists")
         return
+    await resolve_channel_monitor_incidents(session, target.id)
     if target.monitoring_readiness != "ready":
         await _fail_run(session, run, "target is not ready; probe it first")
         return
@@ -77,11 +77,12 @@ async def collect_run(
                 billing_fact, _ = await connector.upstream_billing_probe_settings()
             except Exception as exc:
                 billing_fact = ProbeFact("unknown", "unavailable", "missing", _safe_error(exc))
-            try:
-                channel_fact, channel_monitors = await connector.channel_monitors()
-            except Exception as exc:
-                channel_fact = ProbeFact("unknown", "unavailable", "missing", _safe_error(exc))
-                channel_monitors = []
+            channel_fact = ProbeFact(
+                "unsupported",
+                "disabled",
+                "missing",
+                "model detection is paused",
+            )
             try:
                 native_alert_fact, native_alerts, native_alerts_complete = (
                     await connector.native_alert_events()
@@ -155,16 +156,6 @@ async def collect_run(
                 native_alerts,
                 complete=native_alerts_complete,
             )
-        if channel_fact.runtime_state == "healthy":
-            stored_channels, removed_channels = await sync_channel_monitors(
-                session, target, channel_monitors, observed_at=now
-            )
-            for channel in stored_channels:
-                await evaluate_channel(session, target.name, channel)
-            for channel in removed_channels:
-                channel.enabled = False
-                await evaluate_channel(session, target.name, channel)
-                await session.delete(channel)
         passive_fact = _passive_capability_fact(
             passive_results, passive_attempted, passive_succeeded
         )

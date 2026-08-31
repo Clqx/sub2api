@@ -2,6 +2,10 @@
 
 Date: 2026-08-03
 
+> Historical phase snapshot. Statements about an untracked directory or missing runtime tests describe the repository at
+> that date, not the current parent-repository status. Current release state is maintained in `../STATUS.md` and
+> `../DELIVERY_PLAN.md`.
+
 ## Goal
 
 Define the V1 boundary and delivery process for an independent multi-target Sub2API monitoring project before runtime implementation begins.

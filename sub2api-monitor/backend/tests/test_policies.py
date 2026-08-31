@@ -30,6 +30,7 @@ from app.services.policies import (
     evaluate_upstream_rate_change,
     incident_fingerprint,
     policy_for_target,
+    resolve_channel_monitor_incidents,
 )
 
 
@@ -429,6 +430,31 @@ async def test_channel_failure_fires_once_and_recovers(db_session) -> None:
     channel.primary_status = "operational"
     await evaluate_channel(db_session, target.name, channel)
     assert incidents[0].status == "resolved"
+
+
+async def test_paused_model_detection_resolves_channel_incidents(db_session) -> None:
+    target = Target(id="target-channel-paused", name="Prod", base_url="https://example.com")
+    policy = Policy(id="policy-channel-paused", name="Default")
+    channel = ChannelMonitorCurrent(
+        target_id=target.id,
+        external_monitor_id="7",
+        name="Primary Codex",
+        provider="openai",
+        endpoint="https://upstream.example.com",
+        primary_model="gpt-5.3-codex",
+        primary_status="failed",
+    )
+    db_session.add_all([target, policy, channel])
+    await db_session.flush()
+
+    await evaluate_channel(db_session, target.name, channel)
+    incident = await db_session.scalar(select(Incident))
+    assert incident is not None and incident.status == "firing"
+
+    await resolve_channel_monitor_incidents(db_session, target.id)
+
+    assert incident.status == "resolved"
+    assert "does not indicate service recovery" in incident.message
 
 
 async def test_upstream_rate_change_alerts_only_for_enabled_openai_apikey(db_session) -> None:

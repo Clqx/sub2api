@@ -2,6 +2,10 @@
 
 Date opened: 2026-08-03
 
+> Historical phase snapshot. Image IDs and the missing standalone commit below record the evidence available at that
+> date; they are not the current release baseline. Current version evidence is maintained in `../STATUS.md` and
+> `../SUPPORTED_VERSIONS.md`.
+
 ## Ownership and Build Identity
 
 - Coordinator: root agent

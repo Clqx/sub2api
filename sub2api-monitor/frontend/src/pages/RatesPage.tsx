@@ -10,7 +10,6 @@ import { api } from "../api";
 import { Empty, ErrorState, Status } from "../components/Status";
 import type {
   Account,
-  ChannelMonitor,
   CostRoutingPolicy,
   RoutingDecision,
   UpstreamBillingProbeSnapshot,
@@ -30,7 +29,6 @@ export function RatesPage() {
   const [priorityScale, setPriorityScale] = useState(1000);
   const [unhealthyPriority, setUnhealthyPriority] = useState(100000);
   const [minimumPriority, setMinimumPriority] = useState(1);
-  const [qualityBindings, setQualityBindings] = useState<Record<string, string[]>>({});
   const [fallbackAccountIds, setFallbackAccountIds] = useState<string[]>([]);
 
   useEffect(() => {
@@ -55,12 +53,6 @@ export function RatesPage() {
     enabled: Boolean(targetId),
     refetchInterval: routingEnabled ? 10000 : false,
   });
-  const qualityMonitors = useQuery({
-    queryKey: ["cost-routing-quality-monitors", targetId],
-    queryFn: () => api.channelMonitors(`?target_id=${encodeURIComponent(targetId)}`),
-    enabled: Boolean(targetId),
-  });
-
   useEffect(() => {
     if (settings.data) {
       setEnabled(settings.data.enabled);
@@ -74,7 +66,6 @@ export function RatesPage() {
       setPriorityScale(routingPolicy.data.priority_scale);
       setUnhealthyPriority(routingPolicy.data.unhealthy_priority);
       setMinimumPriority(routingPolicy.data.minimum_priority);
-      setQualityBindings(routingPolicy.data.quality_bindings ?? {});
       setFallbackAccountIds(routingPolicy.data.fallback_account_ids ?? []);
     }
   }, [routingPolicy.data]);
@@ -114,7 +105,7 @@ export function RatesPage() {
         priority_scale: priorityScale,
         unhealthy_priority: unhealthyPriority,
         minimum_priority: minimumPriority,
-        quality_bindings: qualityBindings,
+        quality_bindings: routingPolicy.data?.quality_bindings ?? {},
         fallback_account_ids: fallbackAccountIds,
         confirm_side_effects: confirmSideEffects,
       }),
@@ -272,6 +263,7 @@ export function RatesPage() {
               </label>
               <button
                 className="primary"
+                aria-label="保存成本路由"
                 disabled={!targetId || saveRouting.isPending}
                 onClick={submitRouting}
               >
@@ -295,18 +287,6 @@ export function RatesPage() {
               baselines={routingPolicy.data?.fallback_priorities ?? {}}
               onChange={setFallbackAccountIds}
             />
-            {qualityMonitors.isError ? (
-              <ErrorState error={qualityMonitors.error} />
-            ) : (
-              <QualityBindings
-                accounts={rows}
-                monitors={(qualityMonitors.data ?? []).filter(
-                  (monitor) => monitor.provider.toLowerCase() === "openai",
-                )}
-                bindings={qualityBindings}
-                onChange={setQualityBindings}
-              />
-            )}
             {(saveRouting.isError || queueRoutingRun.isError) && (
               <span className="form-error">
                 {String(saveRouting.error ?? queueRoutingRun.error)}
@@ -475,74 +455,6 @@ function RoutingSummary({ policy }: { policy?: CostRoutingPolicy }) {
           <strong>{policy.last_error}</strong>
         </span>
       )}
-    </div>
-  );
-}
-
-function QualityBindings({
-  accounts,
-  monitors,
-  bindings,
-  onChange,
-}: {
-  accounts: Account[];
-  monitors: ChannelMonitor[];
-  bindings: Record<string, string[]>;
-  onChange: (value: Record<string, string[]>) => void;
-}) {
-  if (!accounts.length || !monitors.length) return null;
-  const setBinding = (accountId: string, monitorId: string, checked: boolean) => {
-    const current = bindings[accountId] ?? [];
-    const nextMonitorIds = checked
-      ? [...new Set([...current, monitorId])]
-      : current.filter((item) => item !== monitorId);
-    const next = { ...bindings };
-    if (nextMonitorIds.length) next[accountId] = nextMonitorIds;
-    else delete next[accountId];
-    onChange(next);
-  };
-  return (
-    <div className="quality-bindings">
-      <h3>服务质量绑定</h3>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>账号</th>
-              {monitors.map((monitor) => (
-                <th key={monitor.id}>{monitor.name}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {accounts.map((account) => (
-              <tr key={account.id}>
-                <td>
-                  <strong>{account.name}</strong>
-                </td>
-                {monitors.map((monitor) => (
-                  <td key={monitor.id}>
-                    <input
-                      type="checkbox"
-                      aria-label={`${account.name} 绑定 ${monitor.name}`}
-                      checked={(bindings[account.external_account_id] ?? []).includes(
-                        monitor.external_monitor_id,
-                      )}
-                      onChange={(event) =>
-                        setBinding(
-                          account.external_account_id,
-                          monitor.external_monitor_id,
-                          event.target.checked,
-                        )
-                      }
-                    />
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }

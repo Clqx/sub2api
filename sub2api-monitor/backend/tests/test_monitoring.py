@@ -1,8 +1,28 @@
-import pytest
-from pydantic import ValidationError
+from collections.abc import Awaitable
+from typing import Any
 
-from app.models import AccountCurrent
-from app.schemas import AutomationRuleCreate, ChannelCreate, UpstreamBillingSettings
+import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.router import (
+    create_channel_monitor,
+    dashboard,
+    delete_channel_monitor,
+    run_channel_monitor,
+    update_channel_monitor,
+)
+from app.config import Settings
+from app.models import AccountCurrent, ChannelMonitorCurrent, Target, User
+from app.schemas import (
+    AutomationRuleCreate,
+    ChannelCreate,
+    ChannelMonitorCreate,
+    ChannelMonitorUpdate,
+    UpstreamBillingSettings,
+)
+from app.security import SecretCipher
 from app.services.monitoring import supports_upstream_billing_probe
 
 
@@ -87,3 +107,73 @@ def test_telegram_channel_requires_valid_bot_token_and_chat_id() -> None:
         token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghi",
     )
     assert channel.topic == "-1001234567890"
+
+
+@pytest.mark.asyncio  # type: ignore[untyped-decorator]
+async def test_model_detection_mutations_are_paused_before_upstream_access(
+    db_session: AsyncSession, settings_dict: dict[str, object]
+) -> None:
+    user = User(username="admin", password_hash="unused")
+    settings = Settings.model_validate(settings_dict)
+    cipher = SecretCipher(settings.master_key)
+    create_payload = ChannelMonitorCreate(
+        target_id="missing-target",
+        name="paused",
+        provider="openai",
+        endpoint="https://api.openai.com",
+        api_key="secret",
+        primary_model="gpt-5",
+    )
+
+    async def assert_paused(operation: Awaitable[Any]) -> None:
+        with pytest.raises(HTTPException) as error:
+            await operation
+        assert error.value.status_code == 409
+        assert error.value.detail["code"] == "model_detection_paused"
+
+    await assert_paused(
+        create_channel_monitor(create_payload, user, db_session, settings, cipher)
+    )
+    await assert_paused(
+        update_channel_monitor(
+            "missing-monitor",
+            ChannelMonitorUpdate(name="paused"),
+            user,
+            db_session,
+            settings,
+            cipher,
+        )
+    )
+    await assert_paused(
+        delete_channel_monitor("missing-monitor", user, db_session, settings, cipher)
+    )
+    await assert_paused(
+        run_channel_monitor("missing-monitor", user, db_session, settings, cipher)
+    )
+
+
+@pytest.mark.asyncio  # type: ignore[untyped-decorator]
+async def test_dashboard_does_not_report_frozen_model_detection_snapshots(
+    db_session: AsyncSession,
+) -> None:
+    target = Target(id="target", name="Target", base_url="https://example.com")
+    db_session.add_all(
+        [
+            target,
+            ChannelMonitorCurrent(
+                target_id=target.id,
+                external_monitor_id="legacy-monitor",
+                name="Legacy monitor",
+                provider="openai",
+                endpoint="https://api.openai.com",
+                enabled=True,
+                primary_status="failed",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    response = await dashboard(User(username="admin", password_hash="unused"), db_session)
+
+    assert response.channels_total == 0
+    assert response.channels_unhealthy == 0

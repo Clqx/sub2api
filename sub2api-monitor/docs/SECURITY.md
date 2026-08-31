@@ -20,7 +20,7 @@ Protected assets are target administrator credentials, DB credentials, the monit
 | Target response secret/data exfiltration | Size limits, schema validation, field allowlists, raw-payload rejection | Malformed/oversized fixture and redaction tests | A newly allowlisted field can be classified incorrectly. |
 | DB mutation or expensive query | Dedicated read-only role, transaction read-only, fixed queries, timeout | Permission and timeout integration tests | Target DBA can grant unsafe rights after setup. |
 | Credential disclosure in API/log/backup | Write-only API, centralized redaction, encrypted columns, encrypted restricted backups | API snapshots, log scans, restore drill | Compromise of the running process/master key exposes active secrets. |
-| Master-key loss or rotation failure | Versioned envelope encryption, tested rotation and escrow/recovery runbook | Rotation and restore rehearsal | Loss of all key copies makes credentials unrecoverable. |
+| Master-key loss or rotation failure | Current release uses one externally supplied Fernet master key and fails startup when it is missing or invalid | Key configuration and encrypted-at-rest tests | There is no versioned envelope, KMS adapter, tested rotation, or escrow/recovery workflow yet; loss of the key makes credentials unrecoverable. |
 | Notification SSRF, content leakage, or forged destination | Redacted templates, per-delivery network validation and DNS pinning, independent private-destination opt-in, TLS | DNS-rebinding, content, and redirect tests | Destination operator sees intended notification content. |
 | Webhook forgery or replay | Optional HMAC-SHA256, stable delivery/event IDs, encrypted secrets, bounded durable retry | Signature, filtering, and retry tests | Consumers must verify signatures and retain their own replay window. |
 | Over-broad Admin API automation | Fixed method/path catalog, disabled/recommend defaults, explicit confirmation, cooldown, idempotency, audit, verification run | Schema, connector, policy, and worker tests | The target Admin key remains globally privileged if the monitor host is compromised. |
@@ -38,7 +38,7 @@ Protected assets are target administrator credentials, DB credentials, the monit
 - Drop raw `credentials` and `extra` fields at the connector boundary. Persist only normalized, explicitly allowlisted monitoring fields.
 - Cross-check API and DB target identity before enabling full-mode merge.
 - Mark and audit active probes that call upstream providers or may mutate target-side snapshots/state. They are disabled by default.
-- Prevent secrets from entering unencrypted backups; document master-key rotation, escrow, loss, and restore behavior.
+- Prevent secrets from entering unencrypted backups. Before production release, add versioned envelope/KMS support and rehearse master-key rotation, escrow, loss, and restore; the current backup path requires the same external master key.
 - Record configuration and management actions in an immutable audit trail without recording secrets.
 - Never expose a generic Admin API proxy; automation actions must be compile-time allowlisted and persist only bounded response metadata.
 
