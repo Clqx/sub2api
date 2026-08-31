@@ -61,9 +61,10 @@ Why?
 ### ✅ Correct Workflow
 
 1. **Create new migration**
+   Replace `NNN` with the next unused migration number.
    ```bash
    # Create new file with next sequential number
-   touch migrations/018_your_change.sql
+   touch migrations/NNN_your_change.sql
    ```
 
 2. **Write forward-only migration SQL**
@@ -72,16 +73,14 @@ Why?
 
 3. **Test locally**
    ```bash
-   # Apply migration
-   make migrate-up
-
-   # Test rollback
-   make migrate-down
+   # The integration harness starts dependencies and applies migrations.
+   # Rehearse every supported existing schema baseline in dedicated tests.
+   make test-integration
    ```
 
 4. **Commit and deploy**
    ```bash
-   git add migrations/018_your_change.sql
+   git add migrations/NNN_your_change.sql
    git commit -m "feat(db): add your change"
    ```
 
@@ -107,8 +106,8 @@ git log --oneline -- migrations/017_add_gemini_tier_id.sql
 # 2. Revert to the commit when it was first applied
 git checkout <commit-hash> -- migrations/017_add_gemini_tier_id.sql
 
-# 3. Create a NEW migration for your changes
-touch migrations/018_your_new_change.sql
+# 3. Create a NEW migration with the next unused number
+touch migrations/NNN_your_new_change.sql
 ```
 
 ## Migration System Details
@@ -122,11 +121,12 @@ touch migrations/018_your_new_change.sql
 
 1. **Keep migrations small and focused**
    - One logical change per migration
-   - Easier to review and rollback
+   - Easier to review, recover, or compensate with a later migration
 
-2. **Write reversible migrations**
-   - Always provide a working Down migration
-   - Test rollback before committing
+2. **Plan forward recovery**
+   - This runner is forward-only and does not execute Down sections
+   - If schema compensation is required, add a new numbered migration
+   - Rehearse application rollback against the forward-migrated schema before committing
 
 3. **Use transactions**
    - Wrap DDL statements in transactions when possible
@@ -139,7 +139,7 @@ touch migrations/018_your_new_change.sql
 5. **Test in development first**
    - Apply migration locally
    - Verify data integrity
-   - Test rollback
+   - Test application rollback against the forward-migrated schema and any planned compensating migration
 
 ## Example Migration
 
@@ -167,9 +167,19 @@ See "If You Accidentally Modified an Applied Migration" above.
 # Check migration status
 psql -d sub2api -c "SELECT * FROM schema_migrations ORDER BY applied_at DESC;"
 
-# Manually rollback if needed (use with caution)
-# Better to fix the migration and create a new one
+# Do not reverse applied DDL manually or edit an applied migration.
+# Inspect the impact, fix the deployment cause, and add a new forward
+# compensating migration when the database state must change.
 ```
+
+### Migration 227 Blocked by Legacy PREPARED Credentials
+
+Migration `227_trusted_pool_permanent_rotation_encrypted_staging.sql` deliberately
+fails when migration `226` still has a non-null `prepared_credential`. It never
+copies or transforms that plaintext in SQL. Complete activation for every legacy
+`PREPARED` permanent rotation with the old application version, verify the plaintext
+column is empty, and then retry the normal forward migration. Do not delete rotation
+evidence, edit migration `226`, or insert a migration-ledger row to bypass this gate.
 
 ### Need to Skip a Migration (Emergency Only)
 ```sql

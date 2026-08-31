@@ -4,6 +4,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,9 +20,11 @@ type trustedPoolGatewayAdmissionStub struct {
 	err          error
 	releaseCalls int
 	settled      bool
+	fingerprint  string
 }
 
-func (s *trustedPoolGatewayAdmissionStub) AcquireGatewayAdmission(ctx context.Context, _ int64) (func(), bool, error) {
+func (s *trustedPoolGatewayAdmissionStub) AcquireGatewayAdmission(ctx context.Context, _ int64, fingerprint string) (func(), bool, error) {
+	s.fingerprint = fingerprint
 	if s.err != nil {
 		return nil, s.guarded, s.err
 	}
@@ -37,7 +41,7 @@ func trustedPoolGatewayGuardRouter(stub TrustedPoolGatewayAdmission, method, pat
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
-		c.Set(string(ContextKeyAPIKey), &service.APIKey{ID: 9})
+		c.Set(string(ContextKeyAPIKey), &service.APIKey{ID: 9, Key: "sk-request-key"})
 		c.Next()
 	})
 	router.Use(TrustedPoolGatewayGuard(stub))
@@ -58,6 +62,8 @@ func TestTrustedPoolGatewayGuardHoldsLeaseThroughHandler(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, recorder.Code)
 	require.True(t, reached)
 	require.Equal(t, 1, stub.releaseCalls)
+	digest := sha256.Sum256([]byte("sk-request-key"))
+	require.Equal(t, hex.EncodeToString(digest[:]), stub.fingerprint)
 }
 
 func TestTrustedPoolGatewayGuardBlocksSuspendedSeat(t *testing.T) {

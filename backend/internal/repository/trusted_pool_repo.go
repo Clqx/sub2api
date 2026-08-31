@@ -11,15 +11,49 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 type trustedPoolRepository struct {
-	db *sql.DB
+	db                        *sql.DB
+	permanentCredentialSealer *permanentCredentialEnvelopeSealer
+	permanentCredentialTTL    time.Duration
+	now                       func() time.Time
 }
 
 func NewTrustedPoolRepository(db *sql.DB) service.TrustedPoolRepository {
-	return &trustedPoolRepository{db: db}
+	return &trustedPoolRepository{db: db, now: time.Now}
+}
+
+func ProvideTrustedPoolRepository(db *sql.DB, cfg *config.Config) (service.TrustedPoolRepository, error) {
+	repo := &trustedPoolRepository{db: db, now: time.Now}
+	if cfg == nil || !cfg.TrustedPool.PermanentRotation.StagingEncryption.Enabled {
+		return repo, nil
+	}
+	staging := cfg.TrustedPool.PermanentRotation.StagingEncryption
+	key, err := staging.StagingEncryptionKey()
+	if err != nil {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation credential envelope: %w", err)
+	}
+	defer clear(key)
+	provider, err := newLocalPermanentRotationKEKProvider(strings.TrimSpace(staging.KeyID), key)
+	if err != nil {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation credential envelope: %w", err)
+	}
+	repo.permanentCredentialSealer, err = newPermanentCredentialEnvelopeSealer(provider)
+	if err != nil {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation credential envelope: %w", err)
+	}
+	repo.permanentCredentialTTL = staging.PreparedCredentialTTL
+	if repo.permanentCredentialTTL == 0 {
+		repo.permanentCredentialTTL = config.TrustedPoolPermanentRotationDefaultPreparedCredentialTTL
+	}
+	if repo.permanentCredentialTTL < config.TrustedPoolPermanentRotationMinPreparedCredentialTTL ||
+		repo.permanentCredentialTTL > config.TrustedPoolPermanentRotationMaxPreparedCredentialTTL {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation credential envelope: prepared credential TTL is out of range")
+	}
+	return repo, nil
 }
 
 func NewTrustedPoolAuthRepository(db *sql.DB) service.TrustedPoolAuthRepository {
@@ -570,6 +604,23 @@ func (r *trustedPoolRepository) GetSeat(ctx context.Context, externalPoolID, ext
 func (r *trustedPoolRepository) GetSeatByAPIKeyID(ctx context.Context, apiKeyID int64) (*service.TrustedPoolSeat, error) {
 	return scanTrustedPoolSeat(r.db.QueryRowContext(ctx,
 		"SELECT "+trustedPoolSeatColumns+" FROM trusted_pool_seats WHERE api_key_id = $1", apiKeyID))
+}
+
+func (r *trustedPoolRepository) TrustedPoolCredentialMatches(ctx context.Context, apiKeyID int64, credentialFingerprint string) (bool, error) {
+	if strings.TrimSpace(credentialFingerprint) == "" {
+		return false, nil
+	}
+	var matches bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT encode(sha256(convert_to(k.key, 'UTF8')), 'hex') = $2
+		FROM trusted_pool_seats AS s
+		JOIN api_keys AS k ON k.id=s.api_key_id AND k.deleted_at IS NULL
+		WHERE s.api_key_id=$1
+	`, apiKeyID, credentialFingerprint).Scan(&matches)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, service.ErrTrustedPoolSeatNotFound
+	}
+	return matches, err
 }
 
 func (r *trustedPoolRepository) GetUsageSnapshot(ctx context.Context, subscriptionID int64) (*service.TrustedPoolUsageSnapshot, error) {

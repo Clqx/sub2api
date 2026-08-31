@@ -153,7 +153,7 @@ func trustedPoolClientHasScope(client *TrustedPoolIntegrationClient, scope strin
 	if client == nil {
 		return false
 	}
-	if scope == "settlement:resolve" {
+	if scope == "settlement:resolve" || scope == "seat:permanent-rotate" {
 		// 人工核账使用独立身份；与普通 Seat 权限混用会失去密钥隔离意义。
 		return len(client.Scopes) == 1 && strings.TrimSpace(client.Scopes[0]) == scope
 	}

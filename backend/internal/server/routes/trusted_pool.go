@@ -40,4 +40,11 @@ func RegisterTrustedPoolRoutes(v1 *gin.RouterGroup, h *handler.TrustedPoolHandle
 	{
 		resolve.POST("/seats/:seat_id/settlements/:settlement_id/resolve", h.ResolvePendingSettlement)
 	}
+	permanentRotate := root.Group("")
+	permanentRotate.Use(middleware.TrustedPoolAuth(auth, "seat:permanent-rotate"))
+	{
+		permanentRotate.POST("/permanent-rotations/prepare", h.PreparePermanentRotation)
+		permanentRotate.POST("/permanent-rotations/activate", h.ActivatePermanentRotation)
+		permanentRotate.POST("/permanent-rotations/commit", h.CommitPermanentRotation)
+	}
 }

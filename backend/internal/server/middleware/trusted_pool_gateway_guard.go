@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strings"
@@ -15,7 +17,7 @@ const trustedPoolAPIKeySlotHeldKey = "trusted_pool_api_key_slot_held"
 type trustedPoolRequestContextKey struct{}
 
 type TrustedPoolGatewayAdmission interface {
-	AcquireGatewayAdmission(ctx context.Context, apiKeyID int64) (release func(), guarded bool, err error)
+	AcquireGatewayAdmission(ctx context.Context, apiKeyID int64, credentialFingerprint string) (release func(), guarded bool, err error)
 }
 
 // TrustedPoolGatewayGuard 在业务处理前登记严格请求租约，再读取最新 Seat gate。
@@ -28,7 +30,8 @@ func TrustedPoolGatewayGuard(integration TrustedPoolGatewayAdmission) gin.Handle
 			return
 		}
 		requestCtx, _ := service.WithTrustedPoolSettlementTracker(c.Request.Context())
-		release, guarded, err := integration.AcquireGatewayAdmission(requestCtx, apiKey.ID)
+		credentialDigest := sha256.Sum256([]byte(apiKey.Key))
+		release, guarded, err := integration.AcquireGatewayAdmission(requestCtx, apiKey.ID, hex.EncodeToString(credentialDigest[:]))
 		if err != nil {
 			if errors.Is(err, service.ErrTrustedPoolSeatSuspended) {
 				AbortWithError(c, http.StatusForbidden, "TRUSTED_POOL_SEAT_SUSPENDED", "Trusted pool seat is suspended")

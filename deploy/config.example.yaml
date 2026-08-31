@@ -1291,6 +1291,34 @@ update:
   proxy_url: ""
 
 # =============================================================================
+# Trusted-pool Permanent Rotation (可信资源池永久轮换)
+# =============================================================================
+# Disabled deployments continue to serve ordinary trusted-pool operations.
+# When enabled, startup fails unless key ID and exactly one valid private-key
+# source are configured. The file contains standard base64 text for a generated
+# 64-byte Ed25519 private key and should be mounted read-only.
+trusted_pool:
+  permanent_rotation:
+    enabled: false
+    required: false
+    signing_key_id: ""
+    signing_private_key_file: ""
+    signing_private_key_base64: ""
+    # Permanent rotation always requires this independent AES-256 staging key;
+    # release mode additionally requires required=true. It cannot reuse the
+    # signing key ID or signing-key material.
+    staging_encryption:
+      enabled: false
+      required: false
+      key_id: ""
+      key_file: ""
+      key_base64: ""
+      # Exact PREPARE replay may disclose the credential again only within this
+      # window. Expiry rejects that replay but never blocks authenticated
+      # activation of the prepared rotation. Allowed range: 1m..24h.
+      prepared_credential_ttl: 15m
+
+# =============================================================================
 # Image Storage (异步图片任务结果对象存储)
 # =============================================================================
 # 长耗时生图套 Cloudflare 会 524 超时，异步图片任务接口（/v1/images/generations/async

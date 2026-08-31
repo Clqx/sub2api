@@ -132,7 +132,7 @@ var ProviderSet = wire.NewSet(
 	ProvideSchedulerCache,
 	NewSchedulerOutboxRepository,
 	NewAuthCacheInvalidationOutboxRepository,
-	NewTrustedPoolRepository,
+	ProvideTrustedPoolRepository,
 	NewTrustedPoolAuthRepository,
 	NewProxyLatencyCache,
 	NewTotpCache,

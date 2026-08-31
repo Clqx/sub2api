@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -85,7 +86,9 @@ func main() {
 			// Continue to main server after auto-setup
 		} else {
 			log.Println("First run detected, starting setup wizard...")
-			runSetupServer()
+			if err := runSetupServer(); err != nil {
+				log.Fatalf("Failed to start setup server: %v", err)
+			}
 			return
 		}
 	}
@@ -94,7 +97,25 @@ func main() {
 	runMainServer()
 }
 
-func runSetupServer() {
+func runSetupServer() error {
+	server, err := newSetupServer()
+	if err != nil {
+		return err
+	}
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func newSetupServer() (*http.Server, error) {
+	// Manual first-run mode does not initialize the normal Wire graph. Load the
+	// bootstrap configuration here so optional capabilities with startup gates,
+	// including trusted-pool permanent rotation, are validated before listening.
+	if _, err := config.LoadForBootstrap(); err != nil {
+		return nil, fmt.Errorf("validate setup server config: %w", err)
+	}
+
 	r := gin.New()
 	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS(config.CORSConfig{}))
@@ -118,17 +139,13 @@ func runSetupServer() {
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 
-	server := &http.Server{
+	return &http.Server{
 		Addr:              addr,
 		Handler:           r,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		Protocols:         protocols,
-	}
-
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("Failed to start setup server: %v", err)
-	}
+	}, nil
 }
 
 func runMainServer() {

@@ -2,7 +2,10 @@
 package config
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -99,6 +102,188 @@ type Config struct {
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
+	TrustedPool             TrustedPoolConfig             `mapstructure:"trusted_pool"`
+}
+
+// TrustedPoolConfig contains deployment-level gates for optional trusted-pool
+// capabilities. Ordinary trusted-pool provisioning remains available when
+// permanent rotation is disabled.
+type TrustedPoolConfig struct {
+	PermanentRotation TrustedPoolPermanentRotationConfig `mapstructure:"permanent_rotation"`
+}
+
+// TrustedPoolPermanentRotationConfig controls the dedicated Ed25519 signer
+// used by the three permanent-rotation endpoints.
+type TrustedPoolPermanentRotationConfig struct {
+	Enabled                 bool                                                `mapstructure:"enabled"`
+	Required                bool                                                `mapstructure:"required"`
+	SigningKeyID            string                                              `mapstructure:"signing_key_id"`
+	SigningPrivateKeyBase64 string                                              `mapstructure:"signing_private_key_base64"`
+	SigningPrivateKeyFile   string                                              `mapstructure:"signing_private_key_file"`
+	StagingEncryption       TrustedPoolPermanentRotationStagingEncryptionConfig `mapstructure:"staging_encryption"`
+}
+
+// TrustedPoolPermanentRotationStagingEncryptionConfig controls the independent
+// AES-256 key used to encrypt prepared credentials while a permanent rotation
+// is waiting for activation. It must never reuse the Ed25519 signing key.
+type TrustedPoolPermanentRotationStagingEncryptionConfig struct {
+	Enabled   bool   `mapstructure:"enabled"`
+	Required  bool   `mapstructure:"required"`
+	KeyID     string `mapstructure:"key_id"`
+	KeyBase64 string `mapstructure:"key_base64"`
+	KeyFile   string `mapstructure:"key_file"`
+	// PreparedCredentialTTL bounds how long an exact PREPARE replay may
+	// disclose the prepared credential again. Expiry never blocks an
+	// authenticated activation of the already-prepared rotation.
+	PreparedCredentialTTL time.Duration `mapstructure:"prepared_credential_ttl"`
+}
+
+const (
+	TrustedPoolPermanentRotationDefaultPreparedCredentialTTL = 15 * time.Minute
+	TrustedPoolPermanentRotationMinPreparedCredentialTTL     = time.Minute
+	TrustedPoolPermanentRotationMaxPreparedCredentialTTL     = 24 * time.Hour
+)
+
+// StagingEncryptionKey loads a 32-byte AES-256 key. File input contains
+// standard base64 text and is preferred for production secret mounts.
+func (c TrustedPoolPermanentRotationStagingEncryptionConfig) StagingEncryptionKey() ([]byte, error) {
+	encoded := strings.TrimSpace(c.KeyBase64)
+	keyFile := strings.TrimSpace(c.KeyFile)
+	if encoded != "" && keyFile != "" {
+		return nil, fmt.Errorf("key_base64 and key_file cannot both be set")
+	}
+	if keyFile != "" {
+		contents, err := os.ReadFile(keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read key_file: %w", err)
+		}
+		if len(contents) > 1024 {
+			return nil, fmt.Errorf("key_file is too large")
+		}
+		encoded = strings.TrimSpace(string(contents))
+	}
+	if encoded == "" {
+		return nil, fmt.Errorf("an AES-256 staging encryption key is required")
+	}
+	key, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("staging encryption key must be standard base64 encoding of 32 random bytes")
+	}
+	return append([]byte(nil), key...), nil
+}
+
+func (c *TrustedPoolPermanentRotationStagingEncryptionConfig) validate() error {
+	if c == nil {
+		return nil
+	}
+	c.KeyID = strings.TrimSpace(c.KeyID)
+	c.KeyBase64 = strings.TrimSpace(c.KeyBase64)
+	c.KeyFile = strings.TrimSpace(c.KeyFile)
+	if c.Required && !c.Enabled {
+		return fmt.Errorf("enabled must be true when required is true")
+	}
+	if !c.Enabled {
+		return nil
+	}
+	if c.PreparedCredentialTTL == 0 {
+		c.PreparedCredentialTTL = TrustedPoolPermanentRotationDefaultPreparedCredentialTTL
+	}
+	if c.PreparedCredentialTTL < TrustedPoolPermanentRotationMinPreparedCredentialTTL ||
+		c.PreparedCredentialTTL > TrustedPoolPermanentRotationMaxPreparedCredentialTTL {
+		return fmt.Errorf("prepared_credential_ttl must be between %s and %s when enabled",
+			TrustedPoolPermanentRotationMinPreparedCredentialTTL, TrustedPoolPermanentRotationMaxPreparedCredentialTTL)
+	}
+	if c.KeyID == "" || len(c.KeyID) > 128 {
+		return fmt.Errorf("key_id is required and must be at most 128 bytes when enabled")
+	}
+	key, err := c.StagingEncryptionKey()
+	if err != nil {
+		return err
+	}
+	clear(key)
+	return nil
+}
+
+// SigningPrivateKey loads and validates the configured 64-byte Ed25519
+// private key. File input contains standard base64 text and is preferred for
+// production secret mounts.
+func (c TrustedPoolPermanentRotationConfig) SigningPrivateKey() (ed25519.PrivateKey, error) {
+	encoded := strings.TrimSpace(c.SigningPrivateKeyBase64)
+	keyFile := strings.TrimSpace(c.SigningPrivateKeyFile)
+	if encoded != "" && keyFile != "" {
+		return nil, fmt.Errorf("signing_private_key_base64 and signing_private_key_file cannot both be set")
+	}
+	if keyFile != "" {
+		contents, err := os.ReadFile(keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read signing_private_key_file: %w", err)
+		}
+		if len(contents) > 1024 {
+			return nil, fmt.Errorf("signing_private_key_file is too large")
+		}
+		encoded = strings.TrimSpace(string(contents))
+	}
+	if encoded == "" {
+		return nil, fmt.Errorf("an Ed25519 signing private key is required")
+	}
+	privateKey, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(privateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("signing private key must be standard base64 encoding of a 64-byte Ed25519 private key")
+	}
+	derived := ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])
+	if !bytes.Equal(privateKey, derived) {
+		return nil, fmt.Errorf("signing private key has an inconsistent Ed25519 public-key suffix")
+	}
+	return append(ed25519.PrivateKey(nil), privateKey...), nil
+}
+
+func (c *TrustedPoolPermanentRotationConfig) validate(serverMode string) error {
+	if c == nil {
+		return nil
+	}
+	c.SigningKeyID = strings.TrimSpace(c.SigningKeyID)
+	c.SigningPrivateKeyBase64 = strings.TrimSpace(c.SigningPrivateKeyBase64)
+	c.SigningPrivateKeyFile = strings.TrimSpace(c.SigningPrivateKeyFile)
+	if err := c.StagingEncryption.validate(); err != nil {
+		return fmt.Errorf("staging_encryption: %w", err)
+	}
+	if (c.StagingEncryption.Enabled || c.StagingEncryption.Required) && !c.Enabled {
+		return fmt.Errorf("enabled must be true when staging_encryption is enabled or required")
+	}
+	if c.Required && !c.Enabled {
+		return fmt.Errorf("enabled must be true when required is true")
+	}
+	if !c.Enabled {
+		return nil
+	}
+	if c.SigningKeyID == "" || len(c.SigningKeyID) > 128 {
+		return fmt.Errorf("signing_key_id is required and must be at most 128 bytes when enabled")
+	}
+	signingKey, err := c.SigningPrivateKey()
+	if err != nil {
+		return err
+	}
+	defer clear(signingKey)
+
+	if !c.StagingEncryption.Enabled {
+		return fmt.Errorf("staging_encryption.enabled must be true when permanent rotation is enabled")
+	}
+	isRelease := strings.EqualFold(strings.TrimSpace(serverMode), "release")
+	if isRelease && !c.StagingEncryption.Required {
+		return fmt.Errorf("staging_encryption.required must be true in release mode")
+	}
+	stagingKey, err := c.StagingEncryption.StagingEncryptionKey()
+	if err != nil {
+		return fmt.Errorf("staging_encryption: %w", err)
+	}
+	defer clear(stagingKey)
+	if c.StagingEncryption.KeyID == c.SigningKeyID {
+		return fmt.Errorf("staging_encryption.key_id must differ from signing_key_id")
+	}
+	if bytes.Equal(stagingKey, signingKey[:ed25519.SeedSize]) || bytes.Equal(stagingKey, signingKey[ed25519.SeedSize:]) {
+		return fmt.Errorf("staging encryption key must not reuse Ed25519 signing key material")
+	}
+	return nil
 }
 
 type LogConfig struct {
@@ -2509,6 +2694,17 @@ func setEnvReachableDefaults() {
 	viper.SetDefault("gateway.session_idle_timeout_minutes", 0)
 	viper.SetDefault("gateway.user_message_queue.mode", "")
 	viper.SetDefault("update.proxy_url", "")
+	viper.SetDefault("trusted_pool.permanent_rotation.enabled", false)
+	viper.SetDefault("trusted_pool.permanent_rotation.required", false)
+	viper.SetDefault("trusted_pool.permanent_rotation.signing_key_id", "")
+	viper.SetDefault("trusted_pool.permanent_rotation.signing_private_key_base64", "")
+	viper.SetDefault("trusted_pool.permanent_rotation.signing_private_key_file", "")
+	viper.SetDefault("trusted_pool.permanent_rotation.staging_encryption.enabled", false)
+	viper.SetDefault("trusted_pool.permanent_rotation.staging_encryption.required", false)
+	viper.SetDefault("trusted_pool.permanent_rotation.staging_encryption.key_id", "")
+	viper.SetDefault("trusted_pool.permanent_rotation.staging_encryption.key_base64", "")
+	viper.SetDefault("trusted_pool.permanent_rotation.staging_encryption.key_file", "")
+	viper.SetDefault("trusted_pool.permanent_rotation.staging_encryption.prepared_credential_ttl", TrustedPoolPermanentRotationDefaultPreparedCredentialTTL)
 
 	// sticky_escape_enabled is the one exception to the zero-value rule: its
 	// effective default is true, applied post-unmarshal via a viper.IsSet guard.
@@ -2569,6 +2765,9 @@ func setEnvReachableDefaults() {
 }
 
 func (c *Config) Validate() error {
+	if err := c.TrustedPool.PermanentRotation.validate(c.Server.Mode); err != nil {
+		return fmt.Errorf("trusted_pool.permanent_rotation: %w", err)
+	}
 	forwardedClientIPHeaders, err := NormalizeForwardedClientIPHeaders(c.Security.ForwardedClientIPHeaders)
 	if err != nil {
 		return fmt.Errorf("security.forwarded_client_ip_headers: %w", err)

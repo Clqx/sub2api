@@ -178,6 +178,21 @@ func TestParseScopesRejectsUnknownPrivileges(t *testing.T) {
 	require.Equal(t, []string{"seat:read", "seat:write"}, scopes)
 }
 
+func TestParseScopesRequiresPermanentRotationSingleton(t *testing.T) {
+	scopes, err := parseScopes("seat:permanent-rotate")
+	require.NoError(t, err)
+	require.Equal(t, []string{"seat:permanent-rotate"}, scopes)
+
+	for _, value := range []string{
+		"seat:permanent-rotate,seat:read",
+		"seat:write,seat:permanent-rotate",
+		"settlement:resolve,seat:permanent-rotate",
+	} {
+		_, err = parseScopes(value)
+		require.ErrorContains(t, err, "must be the client's only scope", value)
+	}
+}
+
 func TestProvisionTrustedPoolClientRejectsExpiredCredential(t *testing.T) {
 	db, _, err := sqlmock.New()
 	require.NoError(t, err)

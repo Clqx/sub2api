@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -786,6 +789,73 @@ func ProvideAPIKeyService(
 	return svc
 }
 
+// ProvideTrustedPoolIntegrationService explicitly installs the permanent
+// rotation signer only when the deployment capability is enabled. Config.Load
+// has already rejected missing or malformed keys, so application composition
+// cannot silently defer this failure until the first rotation request.
+func ProvideTrustedPoolIntegrationService(
+	repo TrustedPoolRepository,
+	concurrency *ConcurrencyService,
+	apiKeys *APIKeyService,
+	subs *SubscriptionService,
+	cfg *config.Config,
+) (*TrustedPoolIntegrationService, error) {
+	svc := NewTrustedPoolIntegrationService(repo, concurrency, apiKeys, subs)
+	if cfg == nil {
+		return svc, nil
+	}
+	rotation := cfg.TrustedPool.PermanentRotation
+	staging := rotation.StagingEncryption
+	if staging.Required && !staging.Enabled {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation staging encryption: enabled must be true when required is true")
+	}
+	if (staging.Enabled || staging.Required) && !rotation.Enabled {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation staging encryption: permanent rotation must be enabled")
+	}
+	if rotation.Required && !rotation.Enabled {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation signer: enabled must be true when required is true")
+	}
+	if !rotation.Enabled {
+		return svc, nil
+	}
+	privateKey, err := rotation.SigningPrivateKey()
+	if err != nil {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation signer: %w", err)
+	}
+	defer clear(privateKey)
+	if !staging.Enabled {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation staging encryption: enabled must be true when permanent rotation is enabled")
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Server.Mode), "release") && !staging.Required {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation staging encryption: required must be true in release mode")
+	}
+	preparedCredentialTTL := staging.PreparedCredentialTTL
+	if preparedCredentialTTL == 0 {
+		preparedCredentialTTL = config.TrustedPoolPermanentRotationDefaultPreparedCredentialTTL
+	}
+	if preparedCredentialTTL < config.TrustedPoolPermanentRotationMinPreparedCredentialTTL ||
+		preparedCredentialTTL > config.TrustedPoolPermanentRotationMaxPreparedCredentialTTL {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation staging encryption: prepared credential TTL must be between %s and %s",
+			config.TrustedPoolPermanentRotationMinPreparedCredentialTTL,
+			config.TrustedPoolPermanentRotationMaxPreparedCredentialTTL)
+	}
+	stagingKey, stagingErr := staging.StagingEncryptionKey()
+	if stagingErr != nil {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation staging encryption: %w", stagingErr)
+	}
+	defer clear(stagingKey)
+	if strings.TrimSpace(staging.KeyID) == strings.TrimSpace(rotation.SigningKeyID) {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation staging encryption: key ID must differ from signing key ID")
+	}
+	if bytes.Equal(stagingKey, privateKey[:32]) || bytes.Equal(stagingKey, privateKey[32:]) {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation staging encryption: key must not reuse signing key material")
+	}
+	if err := svc.ConfigurePermanentRotationAttestation(rotation.SigningKeyID, privateKey); err != nil {
+		return nil, fmt.Errorf("configure trusted-pool permanent rotation signer: %w", err)
+	}
+	return svc, nil
+}
+
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	// Core services
@@ -864,7 +934,7 @@ var ProviderSet = wire.NewSet(
 	NewTencentCaptchaService,
 	NewAliyunCaptchaService,
 	NewSubscriptionService,
-	NewTrustedPoolIntegrationService,
+	ProvideTrustedPoolIntegrationService,
 	NewTrustedPoolAuthService,
 	wire.Bind(new(DefaultSubscriptionAssigner), new(*SubscriptionService)),
 	ProvideConcurrencyService,

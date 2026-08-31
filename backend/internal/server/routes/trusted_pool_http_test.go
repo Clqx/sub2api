@@ -61,6 +61,9 @@ func (r *trustedPoolHTTPRepoStub) GetSeat(_ context.Context, externalPoolID, _ s
 func (r *trustedPoolHTTPRepoStub) GetSeatByAPIKeyID(context.Context, int64) (*service.TrustedPoolSeat, error) {
 	return nil, service.ErrTrustedPoolSeatNotFound
 }
+func (r *trustedPoolHTTPRepoStub) TrustedPoolCredentialMatches(context.Context, int64, string) (bool, error) {
+	return true, nil
+}
 func (r *trustedPoolHTTPRepoStub) GetUsageSnapshot(context.Context, int64) (*service.TrustedPoolUsageSnapshot, error) {
 	return nil, nil
 }
@@ -258,6 +261,47 @@ func TestTrustedPoolProvisionRejectsMismatchedIdempotencyKey(t *testing.T) {
 	router.ServeHTTP(recorder, request)
 	require.Equal(t, http.StatusBadRequest, recorder.Code)
 	require.Zero(t, repo.provisionCalls)
+}
+
+func TestTrustedPoolPermanentRotationRouteRequiresExactScopeAndIdempotencyHeader(t *testing.T) {
+	path := "/v1/integrations/trusted-pools/permanent-rotations/prepare"
+	body := `{"protocol_version":"trusted-pool/permanent-seat-rotation/v1","operation_id":"prepare-op","request_hash":"63dc318b24b47335dd8089b3202940cb4c1467b9b4284f6996bd429b822d38e3","external_pool_id":"pool-1","plan_id":"plan-1","ceremony_type":"ROTATE","from_epoch":7,"to_epoch":8,"child_set_hash":"94c426879876dcf4b861be633f203e023eb90670144f8dcd36c5a12ab1e752c9","seats":[]}`
+	repo := &trustedPoolHTTPRepoStub{}
+	for _, scopes := range [][]string{{"seat:write"}, {"*"}, {"seat:read", "seat:permanent-rotate"}} {
+		router, secret := newTrustedPoolHTTPRouter(repo, scopes)
+		request := trustedPoolHTTPRequest(http.MethodPost, path, body, secret)
+		request.Header.Set("Idempotency-Key", "prepare-op")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusForbidden, recorder.Code)
+	}
+
+	router, secret := newTrustedPoolHTTPRouter(repo, []string{"seat:permanent-rotate"})
+	missingHeader := httptest.NewRecorder()
+	router.ServeHTTP(missingHeader, trustedPoolHTTPRequest(http.MethodPost, path, body, secret))
+	require.Equal(t, http.StatusBadRequest, missingHeader.Code)
+
+	request := trustedPoolHTTPRequest(http.MethodPost, path, body, secret)
+	request.Header.Set("Idempotency-Key", "prepare-op")
+	allowed := httptest.NewRecorder()
+	router.ServeHTTP(allowed, request)
+	require.NotEqual(t, http.StatusForbidden, allowed.Code)
+
+	for _, endpoint := range []string{"activate", "commit"} {
+		operationID := endpoint + "-op"
+		endpointBody := `{"operation_id":"` + operationID + `"}`
+		missingEndpointHeader := httptest.NewRecorder()
+		router.ServeHTTP(missingEndpointHeader, trustedPoolHTTPRequest(http.MethodPost,
+			"/v1/integrations/trusted-pools/permanent-rotations/"+endpoint, endpointBody, secret))
+		require.Equal(t, http.StatusBadRequest, missingEndpointHeader.Code)
+
+		request = trustedPoolHTTPRequest(http.MethodPost, "/v1/integrations/trusted-pools/permanent-rotations/"+endpoint, endpointBody, secret)
+		request.Header.Set("Idempotency-Key", operationID)
+		allowed = httptest.NewRecorder()
+		router.ServeHTTP(allowed, request)
+		require.NotEqual(t, http.StatusNotFound, allowed.Code)
+		require.NotEqual(t, http.StatusForbidden, allowed.Code)
+	}
 }
 
 func TestTrustedPoolCredentialAckRequiresDedicatedScope(t *testing.T) {

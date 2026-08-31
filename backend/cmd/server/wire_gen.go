@@ -314,8 +314,14 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	batchImageDownloadService := service.NewBatchImageDownloadService(batchImageRepository, accountRepository, batchImageDownloadLimiter, configConfig)
 	batchImageCleanupService := service.ProvideBatchImageCleanupService(batchImageRepository, accountRepository, configConfig)
 	batchImageHandler := handler.ProvideBatchImageHandler(batchImagePublicService, batchImageDownloadService, batchImageCleanupService, openAIGatewayHandler)
-	trustedPoolRepository := repository.NewTrustedPoolRepository(db)
-	trustedPoolIntegrationService := service.NewTrustedPoolIntegrationService(trustedPoolRepository, concurrencyService, apiKeyService, subscriptionService)
+	trustedPoolRepository, err := repository.ProvideTrustedPoolRepository(db, configConfig)
+	if err != nil {
+		return nil, err
+	}
+	trustedPoolIntegrationService, err := service.ProvideTrustedPoolIntegrationService(trustedPoolRepository, concurrencyService, apiKeyService, subscriptionService, configConfig)
+	if err != nil {
+		return nil, err
+	}
 	trustedPoolHandler := handler.NewTrustedPoolHandler(trustedPoolIntegrationService)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)

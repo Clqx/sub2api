@@ -136,6 +136,61 @@ func (h *TrustedPoolHandler) Rotate(c *gin.Context) {
 	response.Success(c, result)
 }
 
+func (h *TrustedPoolHandler) PreparePermanentRotation(c *gin.Context) {
+	var input service.PrepareTrustedPoolPermanentRotationInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.BadRequest(c, "invalid trusted pool permanent rotation prepare request")
+		return
+	}
+	headerOperationID := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if headerOperationID == "" || strings.TrimSpace(input.OperationID) == "" || headerOperationID != strings.TrimSpace(input.OperationID) {
+		response.BadRequest(c, "idempotency key must match operation_id")
+		return
+	}
+	result, err := h.service.PreparePermanentRotation(c.Request.Context(), input)
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	// credential 仅在 PREPARED 状态的精确幂等重放中返回；当前无 TTL，禁止记录响应体与 trace。
+	response.Created(c, result)
+}
+
+func (h *TrustedPoolHandler) ActivatePermanentRotation(c *gin.Context) {
+	var input service.ActivateTrustedPoolPermanentRotationInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.BadRequest(c, "invalid trusted pool permanent rotation activation request")
+		return
+	}
+	headerOperationID := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if headerOperationID == "" || strings.TrimSpace(input.OperationID) == "" || headerOperationID != strings.TrimSpace(input.OperationID) {
+		response.BadRequest(c, "idempotency key must match operation_id")
+		return
+	}
+	result, err := h.service.ActivatePermanentRotation(c.Request.Context(), input)
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	response.Success(c, result)
+}
+
+func (h *TrustedPoolHandler) CommitPermanentRotation(c *gin.Context) {
+	var input service.CommitTrustedPoolPermanentRotationInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.BadRequest(c, "invalid trusted pool permanent rotation commit request")
+		return
+	}
+	headerOperationID := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if headerOperationID == "" || strings.TrimSpace(input.OperationID) == "" || headerOperationID != strings.TrimSpace(input.OperationID) {
+		response.BadRequest(c, "idempotency key must match operation_id")
+		return
+	}
+	result, err := h.service.CommitPermanentRotation(c.Request.Context(), input)
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	response.Success(c, result)
+}
+
 func (h *TrustedPoolHandler) UsageRisk(c *gin.Context) {
 	hours, _ := strconv.Atoi(c.DefaultQuery("hours", "24"))
 	risk, err := h.service.UsageRisk(c.Request.Context(), c.Param("seat_id"), hours)

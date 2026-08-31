@@ -112,6 +112,22 @@ services:
       - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:-}
 
       # =======================================================================
+      # Trusted-pool Permanent Rotation (disabled unless explicitly enabled)
+      # =======================================================================
+      # Bare keys preserve config.yaml values when the host variable is absent.
+      - TRUSTED_POOL_PERMANENT_ROTATION_ENABLED
+      - TRUSTED_POOL_PERMANENT_ROTATION_REQUIRED
+      - TRUSTED_POOL_PERMANENT_ROTATION_SIGNING_KEY_ID
+      - TRUSTED_POOL_PERMANENT_ROTATION_SIGNING_PRIVATE_KEY_BASE64
+      - TRUSTED_POOL_PERMANENT_ROTATION_SIGNING_PRIVATE_KEY_FILE
+      - TRUSTED_POOL_PERMANENT_ROTATION_STAGING_ENCRYPTION_ENABLED
+      - TRUSTED_POOL_PERMANENT_ROTATION_STAGING_ENCRYPTION_REQUIRED
+      - TRUSTED_POOL_PERMANENT_ROTATION_STAGING_ENCRYPTION_KEY_ID
+      - TRUSTED_POOL_PERMANENT_ROTATION_STAGING_ENCRYPTION_KEY_BASE64
+      - TRUSTED_POOL_PERMANENT_ROTATION_STAGING_ENCRYPTION_KEY_FILE
+      - TRUSTED_POOL_PERMANENT_ROTATION_STAGING_ENCRYPTION_PREPARED_CREDENTIAL_TTL
+
+      # =======================================================================
       # Timezone Configuration
       # This affects ALL time operations in the application:
       # - Database timestamps

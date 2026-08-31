@@ -23,11 +23,12 @@ import (
 )
 
 var allowedTrustedPoolScopes = map[string]struct{}{
-	"credential:ack":     {},
-	"seat:provision":     {},
-	"seat:read":          {},
-	"seat:write":         {},
-	"settlement:resolve": {},
+	"credential:ack":        {},
+	"seat:permanent-rotate": {},
+	"seat:provision":        {},
+	"seat:read":             {},
+	"seat:write":            {},
+	"settlement:resolve":    {},
 }
 
 type clientProvisionOptions struct {
@@ -249,6 +250,9 @@ func parseScopes(value string) ([]string, error) {
 	}
 	if _, resolvesSettlements := seen["settlement:resolve"]; resolvesSettlements && len(result) != 1 {
 		return nil, errors.New("settlement:resolve must be the client's only scope")
+	}
+	if _, rotatesPermanently := seen["seat:permanent-rotate"]; rotatesPermanently && len(result) != 1 {
+		return nil, errors.New("seat:permanent-rotate must be the client's only scope")
 	}
 	return result, nil
 }

@@ -1,9 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,18 +24,33 @@ import (
 )
 
 const (
-	TrustedPoolSeatStateActive   = "active"
-	TrustedPoolSeatStateDraining = "draining"
-	TrustedPoolSeatStateFrozen   = "frozen"
-	TrustedPoolSeatStateRotating = "rotating"
+	TrustedPoolPermanentRotationProtocolV1    = "trusted-pool/permanent-seat-rotation/v1"
+	TrustedPoolSeatStateActive                = "active"
+	TrustedPoolSeatStateDraining              = "draining"
+	TrustedPoolSeatStateFrozen                = "frozen"
+	TrustedPoolSeatStateRotating              = "rotating"
+	TrustedPoolSeatStateRotationPrepared      = "rotation_prepared"
+	TrustedPoolSeatStateRotationPendingCommit = "rotation_activated_pending_commit"
 )
 
 var (
-	ErrTrustedPoolSeatNotFound       = infraerrors.NotFound("TRUSTED_POOL_SEAT_NOT_FOUND", "trusted pool seat not found")
-	ErrTrustedPoolSeatConflict       = infraerrors.Conflict("TRUSTED_POOL_SEAT_CONFLICT", "trusted pool seat binding conflicts with existing data")
-	ErrTrustedPoolInvalidState       = infraerrors.Conflict("TRUSTED_POOL_INVALID_STATE", "trusted pool seat state does not allow this operation")
-	ErrTrustedPoolNotDrained         = infraerrors.Conflict("TRUSTED_POOL_NOT_DRAINED", "trusted pool seat still has active requests")
-	ErrTrustedPoolEpochConflict      = infraerrors.Conflict("TRUSTED_POOL_EPOCH_CONFLICT", "trusted pool assignment epoch conflict")
+	ErrTrustedPoolSeatNotFound                      = infraerrors.NotFound("TRUSTED_POOL_SEAT_NOT_FOUND", "trusted pool seat not found")
+	ErrTrustedPoolSeatConflict                      = infraerrors.Conflict("TRUSTED_POOL_SEAT_CONFLICT", "trusted pool seat binding conflicts with existing data")
+	ErrTrustedPoolInvalidState                      = infraerrors.Conflict("TRUSTED_POOL_INVALID_STATE", "trusted pool seat state does not allow this operation")
+	ErrTrustedPoolNotDrained                        = infraerrors.Conflict("TRUSTED_POOL_NOT_DRAINED", "trusted pool seat still has active requests")
+	ErrTrustedPoolEpochConflict                     = infraerrors.Conflict("TRUSTED_POOL_EPOCH_CONFLICT", "trusted pool assignment epoch conflict")
+	ErrTrustedPoolPermanentCommitReceiptUnavailable = infraerrors.Conflict(
+		"TRUSTED_POOL_PERMANENT_COMMIT_RECEIPT_UNAVAILABLE",
+		"permanent rotation commit receipt no longer matches the current credential generation",
+	)
+	ErrTrustedPoolPermanentCredentialEnvelopeUnavailable = infraerrors.ServiceUnavailable(
+		"TRUSTED_POOL_PERMANENT_CREDENTIAL_ENVELOPE_UNAVAILABLE",
+		"permanent rotation prepared credential is unavailable",
+	)
+	ErrTrustedPoolPermanentCredentialExpired = infraerrors.Conflict(
+		"TRUSTED_POOL_PERMANENT_CREDENTIAL_EXPIRED",
+		"permanent rotation prepared credential has expired",
+	)
 	ErrTrustedPoolOperationIDMissing = infraerrors.BadRequest("TRUSTED_POOL_OPERATION_ID_REQUIRED", "operation_id is required")
 	ErrTrustedPoolSeatSuspended      = infraerrors.Forbidden("TRUSTED_POOL_SEAT_SUSPENDED", "trusted pool seat is not active")
 	ErrTrustedPoolSettlementNotFound = infraerrors.NotFound("TRUSTED_POOL_SETTLEMENT_NOT_FOUND", "trusted pool settlement not found")
@@ -131,6 +150,204 @@ type TrustedPoolRotationResult struct {
 	AccessCredentialRotated bool             `json:"access_credential_rotated"`
 }
 
+// TrustedPoolPermanentRotationSeatBinding 把平台计划中的 Seat 与 Sub2API 稳定资源逐项绑定。
+// ChildRequestHash 是平台侧不可变子操作摘要，Sub2API 只校验格式并纳入父请求摘要。
+type TrustedPoolPermanentRotationSeatBinding struct {
+	ExternalSeatID          string `json:"external_seat_id"`
+	TargetMemberID          string `json:"target_member_id"`
+	ExpectedAssignmentEpoch int64  `json:"expected_assignment_epoch"`
+	PrincipalUserID         int64  `json:"principal_user_id"`
+	GroupID                 int64  `json:"group_id"`
+	SubscriptionID          int64  `json:"subscription_id"`
+	APIKeyID                int64  `json:"api_key_id"`
+	FromAPIKeyVersion       int64  `json:"from_api_key_version"`
+	ToAPIKeyVersion         int64  `json:"to_api_key_version"`
+	ChildOperationID        string `json:"child_operation_id"`
+	ChildRequestHash        string `json:"child_request_hash"`
+}
+
+type PrepareTrustedPoolPermanentRotationInput struct {
+	ProtocolVersion      string                                    `json:"protocol_version"`
+	OperationID          string                                    `json:"operation_id"`
+	ExternalPoolID       string                                    `json:"external_pool_id"`
+	PlanID               string                                    `json:"plan_id"`
+	CeremonyType         string                                    `json:"ceremony_type"`
+	FromEpoch            int64                                     `json:"from_epoch"`
+	ToEpoch              int64                                     `json:"to_epoch"`
+	ChildSetHash         string                                    `json:"child_set_hash"`
+	Seats                []TrustedPoolPermanentRotationSeatBinding `json:"seats"`
+	ActorClientID        string                                    `json:"-"`
+	RequestHash          string                                    `json:"request_hash"`
+	PreparedSetHash      string                                    `json:"-"`
+	Credentials          []string                                  `json:"-"`
+	PreparedRotationRefs []string                                  `json:"-"`
+}
+
+type TrustedPoolPermanentRotationPreparedSeat struct {
+	TrustedPoolPermanentRotationSeatBinding
+	Credential                 string    `json:"credential,omitempty"`
+	CredentialFingerprint      string    `json:"credential_fingerprint"`
+	ActiveAPIKeyVersion        int64     `json:"active_api_key_version"`
+	PreparedRotationRef        string    `json:"prepared_rotation_ref"`
+	State                      string    `json:"state"`
+	CredentialEnabled          bool      `json:"credential_enabled"`
+	SubscriptionEnabled        bool      `json:"subscription_enabled"`
+	CredentialRotationComplete bool      `json:"credential_rotation_complete"`
+	CompletedAt                time.Time `json:"completed_at"`
+}
+
+type TrustedPoolPermanentRotationPrepareResult struct {
+	OperationID          string                                     `json:"operation_id"`
+	ProtocolVersion      string                                     `json:"protocol_version"`
+	ExternalPoolID       string                                     `json:"external_pool_id"`
+	PlanID               string                                     `json:"plan_id"`
+	CeremonyType         string                                     `json:"ceremony_type"`
+	FromEpoch            int64                                      `json:"from_epoch"`
+	ToEpoch              int64                                      `json:"to_epoch"`
+	RequestHash          string                                     `json:"request_hash"`
+	ChildSetHash         string                                     `json:"child_set_hash"`
+	PreparedSetHash      string                                     `json:"prepared_set_hash"`
+	Status               string                                     `json:"status"`
+	CredentialsDisclosed bool                                       `json:"credentials_disclosed"`
+	Seats                []TrustedPoolPermanentRotationPreparedSeat `json:"seats"`
+	PreparedAt           time.Time                                  `json:"-"`
+	Attestation          *TrustedPoolPermanentRotationAttestation   `json:"attestation"`
+}
+
+type ActivateTrustedPoolPermanentRotationSeat struct {
+	ExternalSeatID          string `json:"external_seat_id"`
+	TargetMemberID          string `json:"target_member_id"`
+	ExpectedAssignmentEpoch int64  `json:"expected_assignment_epoch"`
+	PrincipalUserID         int64  `json:"principal_user_id"`
+	SubscriptionID          int64  `json:"subscription_id"`
+	APIKeyID                int64  `json:"api_key_id"`
+	ActiveAPIKeyVersion     int64  `json:"active_api_key_version"`
+	ChildOperationID        string `json:"child_operation_id"`
+	ChildRequestHash        string `json:"child_request_hash"`
+	CredentialFingerprint   string `json:"credential_fingerprint"`
+	PreparedRotationRef     string `json:"prepared_rotation_ref"`
+}
+
+type ActivateTrustedPoolPermanentRotationInput struct {
+	ProtocolVersion     string                                     `json:"protocol_version"`
+	OperationID         string                                     `json:"operation_id"`
+	PrepareOperationID  string                                     `json:"prepare_operation_id"`
+	ExternalPoolID      string                                     `json:"external_pool_id"`
+	PlanID              string                                     `json:"plan_id"`
+	CeremonyType        string                                     `json:"ceremony_type"`
+	FromEpoch           int64                                      `json:"from_epoch"`
+	ToEpoch             int64                                      `json:"to_epoch"`
+	PreparedSetHash     string                                     `json:"prepared_set_hash"`
+	Seats               []ActivateTrustedPoolPermanentRotationSeat `json:"seats"`
+	ActorClientID       string                                     `json:"-"`
+	RequestHash         string                                     `json:"request_hash"`
+	ConcurrencyVerified bool                                       `json:"-"`
+}
+
+type TrustedPoolPermanentRotationActivatedSeat struct {
+	ExternalSeatID          string `json:"external_seat_id"`
+	TargetMemberID          string `json:"target_member_id"`
+	ExpectedAssignmentEpoch int64  `json:"expected_assignment_epoch"`
+	AssignmentEpoch         int64  `json:"assignment_epoch"`
+	PrincipalUserID         int64  `json:"principal_user_id"`
+	GroupID                 int64  `json:"group_id"`
+	SubscriptionID          int64  `json:"subscription_id"`
+	APIKeyID                int64  `json:"api_key_id"`
+	ActiveAPIKeyVersion     int64  `json:"active_api_key_version"`
+	CredentialFingerprint   string `json:"credential_fingerprint"`
+	PreparedRotationRef     string `json:"prepared_rotation_ref"`
+	ChildOperationID        string `json:"child_operation_id"`
+	ChildRequestHash        string `json:"child_request_hash"`
+	CurrentConcurrency      int    `json:"current_concurrency"`
+	PendingSettlements      int    `json:"pending_settlements"`
+}
+
+type TrustedPoolPermanentRotationActivationResult struct {
+	ProtocolVersion                   string                                      `json:"protocol_version"`
+	OperationID                       string                                      `json:"operation_id"`
+	RequestHash                       string                                      `json:"request_hash"`
+	PrepareOperationID                string                                      `json:"prepare_operation_id"`
+	ExternalPoolID                    string                                      `json:"external_pool_id"`
+	PlanID                            string                                      `json:"plan_id"`
+	CeremonyType                      string                                      `json:"ceremony_type"`
+	FromEpoch                         int64                                       `json:"from_epoch"`
+	ToEpoch                           int64                                       `json:"to_epoch"`
+	PreparedSetHash                   string                                      `json:"prepared_set_hash"`
+	Status                            string                                      `json:"status"`
+	AllCredentialsEnabled             bool                                        `json:"all_credentials_enabled"`
+	AllSubscriptionsEnabled           bool                                        `json:"all_subscriptions_enabled"`
+	OldCredentialSetInvalidated       bool                                        `json:"old_credential_set_invalidated"`
+	AuthorizationCacheInvalidated     bool                                        `json:"authorization_cache_invalidated"`
+	CredentialFingerprintGateEnforced bool                                        `json:"credential_fingerprint_gate_enforced"`
+	ObservedAt                        time.Time                                   `json:"observed_at"`
+	Attestation                       *TrustedPoolPermanentRotationAttestation    `json:"attestation"`
+	Seats                             []TrustedPoolPermanentRotationActivatedSeat `json:"seats"`
+	AuthCacheBarrier                  struct {
+		DurableOutbox bool `json:"durable_outbox"`
+		MinimumEvents int  `json:"minimum_events"`
+	} `json:"auth_cache_barrier"`
+}
+
+type CommitTrustedPoolPermanentRotationInput struct {
+	ProtocolVersion       string                                     `json:"protocol_version"`
+	OperationID           string                                     `json:"operation_id"`
+	PrepareOperationID    string                                     `json:"prepare_operation_id"`
+	ActivationOperationID string                                     `json:"activation_operation_id"`
+	ActivationRequestHash string                                     `json:"activation_request_hash"`
+	ExternalPoolID        string                                     `json:"external_pool_id"`
+	PlanID                string                                     `json:"plan_id"`
+	CeremonyType          string                                     `json:"ceremony_type"`
+	FromEpoch             int64                                      `json:"from_epoch"`
+	ToEpoch               int64                                      `json:"to_epoch"`
+	PreparedSetHash       string                                     `json:"prepared_set_hash"`
+	Seats                 []ActivateTrustedPoolPermanentRotationSeat `json:"seats"`
+	ActorClientID         string                                     `json:"-"`
+	RequestHash           string                                     `json:"request_hash"`
+	ConcurrencyVerified   bool                                       `json:"-"`
+}
+
+type TrustedPoolPermanentRotationCommitResult struct {
+	ProtocolVersion                   string                                      `json:"protocol_version"`
+	OperationID                       string                                      `json:"operation_id"`
+	RequestHash                       string                                      `json:"request_hash"`
+	PrepareOperationID                string                                      `json:"prepare_operation_id"`
+	ActivationOperationID             string                                      `json:"activation_operation_id"`
+	ActivationRequestHash             string                                      `json:"activation_request_hash"`
+	ExternalPoolID                    string                                      `json:"external_pool_id"`
+	PlanID                            string                                      `json:"plan_id"`
+	CeremonyType                      string                                      `json:"ceremony_type"`
+	FromEpoch                         int64                                       `json:"from_epoch"`
+	ToEpoch                           int64                                       `json:"to_epoch"`
+	PreparedSetHash                   string                                      `json:"prepared_set_hash"`
+	Status                            string                                      `json:"status"`
+	AllCredentialsEnabled             bool                                        `json:"all_credentials_enabled"`
+	AllSubscriptionsEnabled           bool                                        `json:"all_subscriptions_enabled"`
+	OldCredentialSetInvalidated       bool                                        `json:"old_credential_set_invalidated"`
+	AuthorizationCacheInvalidated     bool                                        `json:"authorization_cache_invalidated"`
+	CredentialFingerprintGateEnforced bool                                        `json:"credential_fingerprint_gate_enforced"`
+	ObservedAt                        time.Time                                   `json:"observed_at"`
+	Attestation                       *TrustedPoolPermanentRotationAttestation    `json:"attestation"`
+	Seats                             []TrustedPoolPermanentRotationActivatedSeat `json:"seats"`
+	AuthCacheBarrier                  struct {
+		DurableOutbox bool `json:"durable_outbox"`
+		MinimumEvents int  `json:"minimum_events"`
+	} `json:"auth_cache_barrier"`
+}
+
+type TrustedPoolPermanentRotationAttestation struct {
+	Version   string `json:"version"`
+	Issuer    string `json:"issuer"`
+	KeyID     string `json:"key_id"`
+	Reference string `json:"reference"`
+	Digest    string `json:"digest"`
+	Signature string `json:"signature"`
+}
+
+type trustedPoolPermanentRotationSigner struct {
+	keyID      string
+	privateKey ed25519.PrivateKey
+}
+
 type TrustedPoolUsageRisk struct {
 	ExternalSeatID         string  `json:"external_seat_id"`
 	WindowHours            int     `json:"window_hours"`
@@ -185,6 +402,7 @@ type TrustedPoolRepository interface {
 	RegisterSeat(ctx context.Context, input RegisterTrustedPoolSeatInput) (*TrustedPoolSeat, error)
 	GetSeat(ctx context.Context, externalPoolID, externalSeatID string) (*TrustedPoolSeat, error)
 	GetSeatByAPIKeyID(ctx context.Context, apiKeyID int64) (*TrustedPoolSeat, error)
+	TrustedPoolCredentialMatches(ctx context.Context, apiKeyID int64, credentialFingerprint string) (bool, error)
 	GetUsageSnapshot(ctx context.Context, subscriptionID int64) (*TrustedPoolUsageSnapshot, error)
 	CreatePendingSettlement(ctx context.Context, seatID int64, settlementID, requestID string, assignmentEpoch int64) error
 	CompletePendingSettlement(ctx context.Context, seatID int64, settlementID string) error
@@ -197,6 +415,13 @@ type TrustedPoolRepository interface {
 	FreezeSeat(ctx context.Context, externalPoolID, externalSeatID, operationID string) (*TrustedPoolSeat, error)
 	RotateSeatCredential(ctx context.Context, externalPoolID, externalSeatID, operationID, credential string, targetEpoch int64) (*TrustedPoolRotationResult, error)
 	GetUsageRisk(ctx context.Context, externalPoolID, externalSeatID string, since time.Time) (*TrustedPoolUsageRisk, error)
+}
+
+type TrustedPoolPermanentRotationRepository interface {
+	PreparePermanentRotation(ctx context.Context, input PrepareTrustedPoolPermanentRotationInput) (*TrustedPoolPermanentRotationPrepareResult, error)
+	ActivatePermanentRotation(ctx context.Context, input ActivateTrustedPoolPermanentRotationInput) (*TrustedPoolPermanentRotationActivationResult, error)
+	TryReplayPermanentRotationCommit(ctx context.Context, input CommitTrustedPoolPermanentRotationInput) (*TrustedPoolPermanentRotationCommitResult, bool, error)
+	CommitPermanentRotation(ctx context.Context, input CommitTrustedPoolPermanentRotationInput) (*TrustedPoolPermanentRotationCommitResult, error)
 }
 
 type trustedPoolSettlementContextKey struct{}
@@ -316,7 +541,7 @@ func trackTrustedPoolSettlementResult(ctx context.Context, err *error) {
 
 // AcquireGatewayAdmission 在读取 Seat gate 前先登记请求租约，闭合“读到 0 后又进入请求”的冻结竞态。
 // 非可信池 Key 不改变原有网关行为。
-func (s *TrustedPoolIntegrationService) AcquireGatewayAdmission(ctx context.Context, apiKeyID int64) (func(), bool, error) {
+func (s *TrustedPoolIntegrationService) AcquireGatewayAdmission(ctx context.Context, apiKeyID int64, credentialFingerprint string) (func(), bool, error) {
 	if s == nil || s.repo == nil || apiKeyID <= 0 {
 		return nil, false, nil
 	}
@@ -344,6 +569,17 @@ func (s *TrustedPoolIntegrationService) AcquireGatewayAdmission(ctx context.Cont
 		return nil, true, err
 	}
 	if latest == nil || latest.ID != seat.ID || latest.State != TrustedPoolSeatStateActive {
+		release()
+		return nil, true, ErrTrustedPoolSeatSuspended
+	}
+	// API Key 认证缓存可能仍持有轮换前的旧 credential。Seat 重新激活后必须逐请求
+	// 与数据库当前 key 指纹核对，安全边界不能依赖异步 Pub/Sub 是否已经收敛。
+	matches, err := s.repo.TrustedPoolCredentialMatches(ctx, apiKeyID, strings.TrimSpace(credentialFingerprint))
+	if err != nil {
+		release()
+		return nil, true, infraerrors.ServiceUnavailable("TRUSTED_POOL_GATE_UNAVAILABLE", "cannot verify trusted pool credential generation").WithCause(err)
+	}
+	if !matches {
 		release()
 		return nil, true, ErrTrustedPoolSeatSuspended
 	}
@@ -400,10 +636,11 @@ func (s *TrustedPoolIntegrationService) AcquireGatewayAdmission(ctx context.Cont
 }
 
 type TrustedPoolIntegrationService struct {
-	repo        TrustedPoolRepository
-	concurrency *ConcurrencyService
-	apiKeys     *APIKeyService
-	subs        *SubscriptionService
+	repo                    TrustedPoolRepository
+	concurrency             *ConcurrencyService
+	apiKeys                 *APIKeyService
+	subs                    *SubscriptionService
+	permanentRotationSigner *trustedPoolPermanentRotationSigner
 }
 
 func trustedPoolAuthorizedPrincipal(ctx context.Context, requestedPoolID string) (TrustedPoolIntegrationPrincipal, error) {
@@ -419,7 +656,19 @@ func trustedPoolAuthorizedPrincipal(ctx context.Context, requestedPoolID string)
 }
 
 func NewTrustedPoolIntegrationService(repo TrustedPoolRepository, concurrency *ConcurrencyService, apiKeys *APIKeyService, subs *SubscriptionService) *TrustedPoolIntegrationService {
-	return &TrustedPoolIntegrationService{repo: repo, concurrency: concurrency, apiKeys: apiKeys, subs: subs}
+	return &TrustedPoolIntegrationService{
+		repo: repo, concurrency: concurrency, apiKeys: apiKeys, subs: subs,
+	}
+}
+
+// ConfigurePermanentRotationAttestation 供显式装配与测试注入独立签名键；请求认证密钥不得复用。
+func (s *TrustedPoolIntegrationService) ConfigurePermanentRotationAttestation(keyID string, privateKey ed25519.PrivateKey) error {
+	keyID = strings.TrimSpace(keyID)
+	if s == nil || keyID == "" || len(keyID) > 128 || len(privateKey) != ed25519.PrivateKeySize {
+		return infraerrors.BadRequest("TRUSTED_POOL_ATTESTATION_KEY_INVALID", "permanent rotation attestation key is invalid")
+	}
+	s.permanentRotationSigner = &trustedPoolPermanentRotationSigner{keyID: keyID, privateKey: append(ed25519.PrivateKey(nil), privateKey...)}
+	return nil
 }
 
 func (s *TrustedPoolIntegrationService) ProvisionSeat(ctx context.Context, input ProvisionTrustedPoolSeatInput) (*TrustedPoolProvisionResult, error) {
@@ -744,6 +993,640 @@ func (s *TrustedPoolIntegrationService) Rotate(ctx context.Context, seatID, oper
 	}
 	result.AccessCredentialRotated = true
 	return result, nil
+}
+
+// PreparePermanentRotation 在 Pool 全量集合上生成新凭据，但保持 API Key/订阅不可用。
+// Seat 已 frozen，因此严格并发读为零后不会再出现新的网关入场。
+func (s *TrustedPoolIntegrationService) PreparePermanentRotation(ctx context.Context, input PrepareTrustedPoolPermanentRotationInput) (*TrustedPoolPermanentRotationPrepareResult, error) {
+	if s == nil || s.permanentRotationSigner == nil {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_ATTESTATION_UNAVAILABLE", "permanent rotation attestation signer is unavailable")
+	}
+	input.ProtocolVersion = strings.TrimSpace(input.ProtocolVersion)
+	principal, err := trustedPoolAuthorizedPrincipal(ctx, input.ExternalPoolID)
+	if err != nil {
+		return nil, err
+	}
+	input.OperationID = strings.TrimSpace(input.OperationID)
+	input.ExternalPoolID = strings.TrimSpace(input.ExternalPoolID)
+	input.PlanID = strings.TrimSpace(input.PlanID)
+	input.CeremonyType = strings.TrimSpace(input.CeremonyType)
+	input.ChildSetHash = strings.TrimSpace(input.ChildSetHash)
+	input.RequestHash = strings.TrimSpace(input.RequestHash)
+	input.ActorClientID = principal.ClientID
+	if input.ProtocolVersion != TrustedPoolPermanentRotationProtocolV1 || input.OperationID == "" || input.ExternalPoolID == "" || input.PlanID == "" ||
+		(input.CeremonyType != "BOOTSTRAP" && input.CeremonyType != "ROTATE") || len(input.Seats) == 0 ||
+		input.FromEpoch <= 0 || input.ToEpoch != input.FromEpoch+1 || !validTrustedPoolSHA256Hex(input.ChildSetHash) || !validTrustedPoolSHA256Hex(input.RequestHash) {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ROTATION_INVALID", "permanent rotation request is incomplete")
+	}
+	if len(input.OperationID) > 128 || len(input.ExternalPoolID) > 128 || len(input.PlanID) > 128 || len(input.Seats) > 1000 {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ROTATION_INVALID", "permanent rotation request exceeds limits")
+	}
+	if s.concurrency == nil {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_DRAIN_UNAVAILABLE", "trusted pool concurrency service is unavailable")
+	}
+	previousSeatID := ""
+	for index := range input.Seats {
+		seatInput := &input.Seats[index]
+		seatInput.ExternalSeatID = strings.TrimSpace(seatInput.ExternalSeatID)
+		seatInput.TargetMemberID = strings.TrimSpace(seatInput.TargetMemberID)
+		seatInput.ChildOperationID = strings.TrimSpace(seatInput.ChildOperationID)
+		seatInput.ChildRequestHash = strings.TrimSpace(seatInput.ChildRequestHash)
+		if seatInput.ExternalSeatID == "" || seatInput.ExternalSeatID <= previousSeatID || len(seatInput.ExternalSeatID) > 128 ||
+			seatInput.TargetMemberID == "" || len(seatInput.TargetMemberID) > 128 || seatInput.ExpectedAssignmentEpoch <= 0 ||
+			seatInput.ChildOperationID == "" || len(seatInput.ChildOperationID) > 128 || !validTrustedPoolSHA256Hex(seatInput.ChildRequestHash) ||
+			seatInput.PrincipalUserID <= 0 || seatInput.SubscriptionID <= 0 || seatInput.APIKeyID <= 0 ||
+			seatInput.FromAPIKeyVersion <= 0 || seatInput.ToAPIKeyVersion != seatInput.FromAPIKeyVersion+1 ||
+			seatInput.ToAPIKeyVersion != seatInput.ExpectedAssignmentEpoch+1 {
+			return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ROTATION_INVALID", "seats must be complete, unique and strictly sorted")
+		}
+		previousSeatID = seatInput.ExternalSeatID
+		seat, readErr := s.repo.GetSeat(ctx, principal.ExternalPoolID, seatInput.ExternalSeatID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if (seat.State != TrustedPoolSeatStateFrozen && seat.State != TrustedPoolSeatStateRotationPrepared) ||
+			seat.AssignmentEpoch != seatInput.ExpectedAssignmentEpoch ||
+			seat.PrincipalUserID != seatInput.PrincipalUserID || (seatInput.GroupID > 0 && seat.GroupID != seatInput.GroupID) ||
+			seat.SubscriptionID != seatInput.SubscriptionID || seat.APIKeyID != seatInput.APIKeyID {
+			return nil, ErrTrustedPoolSeatConflict
+		}
+		count, countErr := s.concurrency.GetAPIKeyConcurrencyStrict(ctx, seat.APIKeyID)
+		if countErr != nil {
+			return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_DRAIN_UNAVAILABLE", "cannot verify permanent rotation drain state").WithCause(countErr)
+		}
+		pending, pendingErr := s.repo.CountPendingSettlements(ctx, seat.ID)
+		if pendingErr != nil {
+			return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_DRAIN_UNAVAILABLE", "cannot verify permanent rotation settlements").WithCause(pendingErr)
+		}
+		if count != 0 || pending != 0 {
+			return nil, ErrTrustedPoolNotDrained
+		}
+	}
+	wantChildSetHash, hashErr := trustedPoolPermanentChildSetHash(input)
+	if hashErr != nil || input.ChildSetHash != wantChildSetHash {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ROTATION_INVALID", "child set hash does not match canonical seats")
+	}
+	if input.RequestHash != trustedPoolPermanentPrepareRequestHash(input) {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ROTATION_INVALID", "prepare request hash does not match canonical request")
+	}
+	input.Credentials = make([]string, len(input.Seats))
+	input.PreparedRotationRefs = make([]string, len(input.Seats))
+	setBindings := make([]ActivateTrustedPoolPermanentRotationSeat, len(input.Seats))
+	for index := range input.Seats {
+		credential, generationErr := generateTrustedPoolCredential()
+		if generationErr != nil {
+			return nil, infraerrors.InternalServer("TRUSTED_POOL_KEY_GENERATION_FAILED", "failed to generate trusted pool credential").WithCause(generationErr)
+		}
+		input.Credentials[index] = credential
+		ref, refErr := generateTrustedPoolPreparedRotationRef()
+		if refErr != nil {
+			return nil, infraerrors.InternalServer("TRUSTED_POOL_KEY_GENERATION_FAILED", "failed to generate permanent rotation reference").WithCause(refErr)
+		}
+		input.PreparedRotationRefs[index] = ref
+		digest := sha256.Sum256([]byte(credential))
+		setBindings[index] = ActivateTrustedPoolPermanentRotationSeat{
+			ExternalSeatID:          input.Seats[index].ExternalSeatID,
+			TargetMemberID:          input.Seats[index].TargetMemberID,
+			ExpectedAssignmentEpoch: input.Seats[index].ExpectedAssignmentEpoch,
+			PrincipalUserID:         input.Seats[index].PrincipalUserID,
+			SubscriptionID:          input.Seats[index].SubscriptionID,
+			APIKeyID:                input.Seats[index].APIKeyID,
+			ActiveAPIKeyVersion:     input.Seats[index].ToAPIKeyVersion,
+			ChildOperationID:        input.Seats[index].ChildOperationID,
+			ChildRequestHash:        input.Seats[index].ChildRequestHash,
+			CredentialFingerprint:   hex.EncodeToString(digest[:]),
+			PreparedRotationRef:     ref,
+		}
+	}
+	input.PreparedSetHash, err = trustedPoolPermanentPreparedSetHash(setBindings)
+	if err != nil {
+		return nil, infraerrors.InternalServer("TRUSTED_POOL_PERMANENT_ROTATION_FAILED", "cannot hash prepared credential set").WithCause(err)
+	}
+	repo, ok := s.repo.(TrustedPoolPermanentRotationRepository)
+	if !ok {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_PERMANENT_ROTATION_UNAVAILABLE", "permanent rotation store is unavailable")
+	}
+	result, err := repo.PreparePermanentRotation(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	result.Attestation, err = s.signPermanentPrepareResult(result)
+	if err != nil {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_ATTESTATION_UNAVAILABLE", "cannot attest permanent rotation preparation").WithCause(err)
+	}
+	return result, nil
+}
+
+// ActivatePermanentRotation 只在完整 prepared set 上执行一次 Pool 级事务，响应永不返回 credential。
+func (s *TrustedPoolIntegrationService) ActivatePermanentRotation(ctx context.Context, input ActivateTrustedPoolPermanentRotationInput) (*TrustedPoolPermanentRotationActivationResult, error) {
+	if s == nil || s.permanentRotationSigner == nil {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_ATTESTATION_UNAVAILABLE", "permanent rotation attestation signer is unavailable")
+	}
+	input.ProtocolVersion = strings.TrimSpace(input.ProtocolVersion)
+	principal, err := trustedPoolAuthorizedPrincipal(ctx, input.ExternalPoolID)
+	if err != nil {
+		return nil, err
+	}
+	input.OperationID = strings.TrimSpace(input.OperationID)
+	input.PrepareOperationID = strings.TrimSpace(input.PrepareOperationID)
+	input.ExternalPoolID = strings.TrimSpace(input.ExternalPoolID)
+	input.PlanID = strings.TrimSpace(input.PlanID)
+	input.CeremonyType = strings.TrimSpace(input.CeremonyType)
+	input.PreparedSetHash = strings.TrimSpace(input.PreparedSetHash)
+	input.RequestHash = strings.TrimSpace(input.RequestHash)
+	input.ActorClientID = principal.ClientID
+	if input.ProtocolVersion != TrustedPoolPermanentRotationProtocolV1 || input.OperationID == "" || input.PrepareOperationID == "" ||
+		input.ExternalPoolID == "" || input.PlanID == "" || (input.CeremonyType != "BOOTSTRAP" && input.CeremonyType != "ROTATE") ||
+		len(input.Seats) == 0 || input.FromEpoch <= 0 || input.ToEpoch != input.FromEpoch+1 ||
+		!validTrustedPoolSHA256Hex(input.PreparedSetHash) || !validTrustedPoolSHA256Hex(input.RequestHash) {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ACTIVATION_INVALID", "permanent rotation activation is incomplete")
+	}
+	if len(input.OperationID) > 128 || len(input.PrepareOperationID) > 128 || len(input.PlanID) > 128 || len(input.ExternalPoolID) > 128 || len(input.Seats) > 1000 {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ACTIVATION_INVALID", "permanent rotation activation exceeds limits")
+	}
+	previousSeatID := ""
+	allPrepared := true
+	for index := range input.Seats {
+		seatInput := &input.Seats[index]
+		seatInput.ExternalSeatID = strings.TrimSpace(seatInput.ExternalSeatID)
+		seatInput.TargetMemberID = strings.TrimSpace(seatInput.TargetMemberID)
+		seatInput.ChildOperationID = strings.TrimSpace(seatInput.ChildOperationID)
+		seatInput.ChildRequestHash = strings.TrimSpace(seatInput.ChildRequestHash)
+		seatInput.CredentialFingerprint = strings.TrimSpace(seatInput.CredentialFingerprint)
+		seatInput.PreparedRotationRef = strings.TrimSpace(seatInput.PreparedRotationRef)
+		if seatInput.ExternalSeatID == "" || seatInput.ExternalSeatID <= previousSeatID || len(seatInput.ExternalSeatID) > 128 ||
+			seatInput.TargetMemberID == "" || len(seatInput.TargetMemberID) > 128 || seatInput.PrincipalUserID <= 0 ||
+			seatInput.SubscriptionID <= 0 || seatInput.APIKeyID <= 0 || seatInput.ActiveAPIKeyVersion <= 0 ||
+			seatInput.ExpectedAssignmentEpoch <= 0 || seatInput.ActiveAPIKeyVersion != seatInput.ExpectedAssignmentEpoch+1 ||
+			seatInput.ChildOperationID == "" || len(seatInput.ChildOperationID) > 128 ||
+			!validTrustedPoolSHA256Hex(seatInput.ChildRequestHash) || !validTrustedPoolSHA256Hex(seatInput.CredentialFingerprint) ||
+			seatInput.PreparedRotationRef == "" || len(seatInput.PreparedRotationRef) > 128 {
+			return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ACTIVATION_INVALID", "activation seats must be complete, unique and strictly sorted")
+		}
+		previousSeatID = seatInput.ExternalSeatID
+		seat, readErr := s.repo.GetSeat(ctx, principal.ExternalPoolID, seatInput.ExternalSeatID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if seat.State != TrustedPoolSeatStateRotationPrepared {
+			allPrepared = false // 可能是精确激活重放，交由仓储摘要判定。
+			continue
+		}
+		if s.concurrency == nil {
+			return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_DRAIN_UNAVAILABLE", "trusted pool concurrency service is unavailable")
+		}
+		count, countErr := s.concurrency.GetAPIKeyConcurrencyStrict(ctx, seat.APIKeyID)
+		if countErr != nil {
+			return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_DRAIN_UNAVAILABLE", "cannot verify permanent activation drain state").WithCause(countErr)
+		}
+		if count != 0 {
+			return nil, ErrTrustedPoolNotDrained
+		}
+	}
+	input.ConcurrencyVerified = allPrepared
+	wantSetHash, hashErr := trustedPoolPermanentPreparedSetHash(input.Seats)
+	if hashErr != nil || wantSetHash != input.PreparedSetHash {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ACTIVATION_INVALID", "prepared set hash does not match canonical seats")
+	}
+	if input.RequestHash != trustedPoolPermanentActivateRequestHash(input) {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_ACTIVATION_INVALID", "activation request hash does not match canonical request")
+	}
+	repo, ok := s.repo.(TrustedPoolPermanentRotationRepository)
+	if !ok {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_PERMANENT_ROTATION_UNAVAILABLE", "permanent rotation store is unavailable")
+	}
+	result, err := repo.ActivatePermanentRotation(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	result.Attestation, err = s.signPermanentActivationResult(result)
+	if err != nil {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_ATTESTATION_UNAVAILABLE", "cannot attest permanent rotation activation").WithCause(err)
+	}
+	return result, nil
+}
+
+// CommitPermanentRotation 只释放已经完整安装且仍保持不可用的 Pool 集合。
+// 平台必须先完成本地 final，再调用此端点；在此之前普通 suspend/freeze 无法穿透 held 状态。
+func (s *TrustedPoolIntegrationService) CommitPermanentRotation(ctx context.Context, input CommitTrustedPoolPermanentRotationInput) (*TrustedPoolPermanentRotationCommitResult, error) {
+	if s == nil || s.permanentRotationSigner == nil {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_ATTESTATION_UNAVAILABLE", "permanent rotation attestation signer is unavailable")
+	}
+	input.ProtocolVersion = strings.TrimSpace(input.ProtocolVersion)
+	principal, err := trustedPoolAuthorizedPrincipal(ctx, input.ExternalPoolID)
+	if err != nil {
+		return nil, err
+	}
+	input.OperationID = strings.TrimSpace(input.OperationID)
+	input.PrepareOperationID = strings.TrimSpace(input.PrepareOperationID)
+	input.ActivationOperationID = strings.TrimSpace(input.ActivationOperationID)
+	input.ActivationRequestHash = strings.TrimSpace(input.ActivationRequestHash)
+	input.ExternalPoolID = strings.TrimSpace(input.ExternalPoolID)
+	input.PlanID = strings.TrimSpace(input.PlanID)
+	input.CeremonyType = strings.TrimSpace(input.CeremonyType)
+	input.PreparedSetHash = strings.TrimSpace(input.PreparedSetHash)
+	input.RequestHash = strings.TrimSpace(input.RequestHash)
+	input.ActorClientID = principal.ClientID
+	if input.ProtocolVersion != TrustedPoolPermanentRotationProtocolV1 || input.OperationID == "" || input.PrepareOperationID == "" ||
+		input.ActivationOperationID == "" || !validTrustedPoolSHA256Hex(input.ActivationRequestHash) || input.ExternalPoolID == "" || input.PlanID == "" ||
+		(input.CeremonyType != "BOOTSTRAP" && input.CeremonyType != "ROTATE") || len(input.Seats) == 0 || input.FromEpoch <= 0 ||
+		input.ToEpoch != input.FromEpoch+1 || !validTrustedPoolSHA256Hex(input.PreparedSetHash) || !validTrustedPoolSHA256Hex(input.RequestHash) {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_COMMIT_INVALID", "permanent rotation commit is incomplete")
+	}
+	if len(input.OperationID) > 128 || len(input.PrepareOperationID) > 128 || len(input.ActivationOperationID) > 128 ||
+		len(input.PlanID) > 128 || len(input.ExternalPoolID) > 128 || len(input.Seats) > 1000 {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_COMMIT_INVALID", "permanent rotation commit exceeds limits")
+	}
+	previousSeatID := ""
+	for index := range input.Seats {
+		seatInput := &input.Seats[index]
+		seatInput.ExternalSeatID = strings.TrimSpace(seatInput.ExternalSeatID)
+		seatInput.TargetMemberID = strings.TrimSpace(seatInput.TargetMemberID)
+		seatInput.ChildOperationID = strings.TrimSpace(seatInput.ChildOperationID)
+		seatInput.ChildRequestHash = strings.TrimSpace(seatInput.ChildRequestHash)
+		seatInput.CredentialFingerprint = strings.TrimSpace(seatInput.CredentialFingerprint)
+		seatInput.PreparedRotationRef = strings.TrimSpace(seatInput.PreparedRotationRef)
+		if seatInput.ExternalSeatID == "" || seatInput.ExternalSeatID <= previousSeatID || len(seatInput.ExternalSeatID) > 128 ||
+			seatInput.TargetMemberID == "" || len(seatInput.TargetMemberID) > 128 || seatInput.PrincipalUserID <= 0 ||
+			seatInput.SubscriptionID <= 0 || seatInput.APIKeyID <= 0 || seatInput.ActiveAPIKeyVersion != seatInput.ExpectedAssignmentEpoch+1 ||
+			seatInput.ExpectedAssignmentEpoch <= 0 || seatInput.ChildOperationID == "" || len(seatInput.ChildOperationID) > 128 ||
+			!validTrustedPoolSHA256Hex(seatInput.ChildRequestHash) || !validTrustedPoolSHA256Hex(seatInput.CredentialFingerprint) ||
+			seatInput.PreparedRotationRef == "" || len(seatInput.PreparedRotationRef) > 128 {
+			return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_COMMIT_INVALID", "commit seats must be complete, unique and strictly sorted")
+		}
+		previousSeatID = seatInput.ExternalSeatID
+	}
+	wantSetHash, hashErr := trustedPoolPermanentPreparedSetHash(input.Seats)
+	if hashErr != nil || wantSetHash != input.PreparedSetHash {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_COMMIT_INVALID", "prepared set hash does not match canonical seats")
+	}
+	if input.RequestHash != trustedPoolPermanentCommitRequestHash(input) {
+		return nil, infraerrors.BadRequest("TRUSTED_POOL_PERMANENT_COMMIT_INVALID", "commit request hash does not match canonical request")
+	}
+	repo, ok := s.repo.(TrustedPoolPermanentRotationRepository)
+	if !ok {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_PERMANENT_ROTATION_UNAVAILABLE", "permanent rotation store is unavailable")
+	}
+	replayed, found, replayErr := repo.TryReplayPermanentRotationCommit(ctx, input)
+	if replayErr != nil {
+		return nil, replayErr
+	}
+	if found {
+		replayed.Attestation, err = s.signPermanentCommitResult(replayed)
+		if err != nil {
+			return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_ATTESTATION_UNAVAILABLE", "cannot attest permanent rotation commit").WithCause(err)
+		}
+		return replayed, nil
+	}
+
+	allHeld, allActive := true, true
+	for index := range input.Seats {
+		seatInput := &input.Seats[index]
+		seat, readErr := s.repo.GetSeat(ctx, principal.ExternalPoolID, seatInput.ExternalSeatID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if seat.State != TrustedPoolSeatStateRotationPendingCommit {
+			allHeld = false
+			if seat.State != TrustedPoolSeatStateActive || seat.AssignmentEpoch != seatInput.ExpectedAssignmentEpoch+1 ||
+				seat.PrincipalUserID != seatInput.PrincipalUserID || seat.SubscriptionID != seatInput.SubscriptionID ||
+				seat.APIKeyID != seatInput.APIKeyID {
+				return nil, ErrTrustedPoolInvalidState
+			}
+			continue
+		}
+		allActive = false
+		if s.concurrency == nil {
+			return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_DRAIN_UNAVAILABLE", "trusted pool concurrency service is unavailable")
+		}
+		count, countErr := s.concurrency.GetAPIKeyConcurrencyStrict(ctx, seat.APIKeyID)
+		if countErr != nil {
+			return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_DRAIN_UNAVAILABLE", "cannot verify permanent commit drain state").WithCause(countErr)
+		}
+		if count != 0 {
+			return nil, ErrTrustedPoolNotDrained
+		}
+	}
+	if !allHeld && !allActive {
+		return nil, ErrTrustedPoolInvalidState
+	}
+	input.ConcurrencyVerified = allHeld
+	result, err := repo.CommitPermanentRotation(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	result.Attestation, err = s.signPermanentCommitResult(result)
+	if err != nil {
+		return nil, infraerrors.ServiceUnavailable("TRUSTED_POOL_ATTESTATION_UNAVAILABLE", "cannot attest permanent rotation commit").WithCause(err)
+	}
+	return result, nil
+}
+
+func validTrustedPoolSHA256Hex(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && value == strings.ToLower(value)
+}
+
+func trustedPoolJSONHash(value any) (string, error) {
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(canonical)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func trustedPoolPermanentChildSetHash(input PrepareTrustedPoolPermanentRotationInput) (string, error) {
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, "trusted-pool/permanent-rotation-child-set/v1")
+	writeTrustedPoolSecurityUint32(&encoded, uint32(len(input.Seats)))
+	for index := range input.Seats {
+		seat := input.Seats[index]
+		if seat.ChildRequestHash != trustedPoolPermanentChildRequestHash(input, seat) {
+			return "", ErrTrustedPoolSeatConflict
+		}
+		writeTrustedPoolSecurityString(&encoded, seat.ExternalSeatID)
+		writeTrustedPoolSecurityString(&encoded, seat.ChildOperationID)
+		digest, _ := hex.DecodeString(seat.ChildRequestHash)
+		encoded.Write(digest)
+	}
+	digest := sha256.Sum256(encoded.Bytes())
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func trustedPoolPermanentChildRequestHash(input PrepareTrustedPoolPermanentRotationInput, seat TrustedPoolPermanentRotationSeatBinding) string {
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, TrustedPoolPermanentRotationProtocolV1)
+	writeTrustedPoolSecurityString(&encoded, seat.ChildOperationID)
+	writeTrustedPoolSecurityString(&encoded, input.PlanID)
+	writeTrustedPoolSecurityString(&encoded, input.CeremonyType)
+	writeTrustedPoolSecurityString(&encoded, input.ExternalPoolID)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(input.FromEpoch))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(input.ToEpoch))
+	writeTrustedPoolSecurityString(&encoded, seat.ExternalSeatID)
+	writeTrustedPoolSecurityString(&encoded, seat.TargetMemberID)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ExpectedAssignmentEpoch))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(seat.PrincipalUserID))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(seat.SubscriptionID))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(seat.APIKeyID))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(seat.FromAPIKeyVersion))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ToAPIKeyVersion))
+	digest := sha256.Sum256(encoded.Bytes())
+	return hex.EncodeToString(digest[:])
+}
+
+func trustedPoolPermanentPreparedSetHash(seats []ActivateTrustedPoolPermanentRotationSeat) (string, error) {
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, "trusted-pool/permanent-prepared-seat-set/v1")
+	writeTrustedPoolSecurityUint32(&encoded, uint32(len(seats)))
+	for index := range seats {
+		seat := seats[index]
+		if index > 0 && seats[index-1].ExternalSeatID >= seat.ExternalSeatID || !validTrustedPoolSHA256Hex(seat.CredentialFingerprint) {
+			return "", ErrTrustedPoolSeatConflict
+		}
+		writeTrustedPoolSecurityString(&encoded, seat.ExternalSeatID)
+		writeTrustedPoolSecurityString(&encoded, seat.TargetMemberID)
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ExpectedAssignmentEpoch))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.PrincipalUserID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.SubscriptionID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.APIKeyID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ActiveAPIKeyVersion))
+		fingerprint, _ := hex.DecodeString(seat.CredentialFingerprint)
+		encoded.Write(fingerprint)
+		writeTrustedPoolSecurityString(&encoded, seat.PreparedRotationRef)
+		writeTrustedPoolSecurityString(&encoded, seat.ChildOperationID)
+		childHash, _ := hex.DecodeString(seat.ChildRequestHash)
+		encoded.Write(childHash)
+	}
+	digest := sha256.Sum256(encoded.Bytes())
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func trustedPoolPermanentPrepareRequestHash(input PrepareTrustedPoolPermanentRotationInput) string {
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, "trusted-pool/permanent-pool-rotation-prepare/v1")
+	writeTrustedPoolSecurityString(&encoded, input.OperationID)
+	writeTrustedPoolSecurityString(&encoded, input.PlanID)
+	writeTrustedPoolSecurityString(&encoded, input.CeremonyType)
+	writeTrustedPoolSecurityString(&encoded, input.ExternalPoolID)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(input.FromEpoch))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(input.ToEpoch))
+	childSetHash, _ := hex.DecodeString(input.ChildSetHash)
+	encoded.Write(childSetHash)
+	digest := sha256.Sum256(encoded.Bytes())
+	return hex.EncodeToString(digest[:])
+}
+
+func trustedPoolPermanentActivateRequestHash(input ActivateTrustedPoolPermanentRotationInput) string {
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, "trusted-pool/permanent-pool-rotation-activate/v1")
+	writeTrustedPoolSecurityString(&encoded, input.OperationID)
+	writeTrustedPoolSecurityString(&encoded, input.PrepareOperationID)
+	writeTrustedPoolSecurityString(&encoded, input.PlanID)
+	writeTrustedPoolSecurityString(&encoded, input.CeremonyType)
+	writeTrustedPoolSecurityString(&encoded, input.ExternalPoolID)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(input.FromEpoch))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(input.ToEpoch))
+	setHash, _ := hex.DecodeString(input.PreparedSetHash)
+	encoded.Write(setHash)
+	digest := sha256.Sum256(encoded.Bytes())
+	return hex.EncodeToString(digest[:])
+}
+
+func trustedPoolPermanentCommitRequestHash(input CommitTrustedPoolPermanentRotationInput) string {
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, "trusted-pool/permanent-pool-rotation-commit/v1")
+	writeTrustedPoolSecurityString(&encoded, input.OperationID)
+	writeTrustedPoolSecurityString(&encoded, input.PrepareOperationID)
+	writeTrustedPoolSecurityString(&encoded, input.ActivationOperationID)
+	writeTrustedPoolSecurityHex(&encoded, input.ActivationRequestHash)
+	writeTrustedPoolSecurityString(&encoded, input.PlanID)
+	writeTrustedPoolSecurityString(&encoded, input.CeremonyType)
+	writeTrustedPoolSecurityString(&encoded, input.ExternalPoolID)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(input.FromEpoch))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(input.ToEpoch))
+	writeTrustedPoolSecurityHex(&encoded, input.PreparedSetHash)
+	digest := sha256.Sum256(encoded.Bytes())
+	return hex.EncodeToString(digest[:])
+}
+
+func writeTrustedPoolSecurityString(target *bytes.Buffer, value string) {
+	writeTrustedPoolSecurityUint32(target, uint32(len([]byte(value))))
+	target.WriteString(value)
+}
+
+func writeTrustedPoolSecurityUint32(target *bytes.Buffer, value uint32) {
+	_ = binary.Write(target, binary.BigEndian, value)
+}
+
+func writeTrustedPoolSecurityUint64(target *bytes.Buffer, value uint64) {
+	_ = binary.Write(target, binary.BigEndian, value)
+}
+
+func generateTrustedPoolPreparedRotationRef() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return "tpr-" + hex.EncodeToString(raw), nil
+}
+
+func (s *TrustedPoolIntegrationService) signPermanentPrepareResult(result *TrustedPoolPermanentRotationPrepareResult) (*TrustedPoolPermanentRotationAttestation, error) {
+	if result == nil {
+		return nil, errors.New("nil permanent rotation prepare result")
+	}
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, "trusted-pool/permanent-pool-rotation-prepare-attestation/v1")
+	writeTrustedPoolSecurityString(&encoded, result.ProtocolVersion)
+	writeTrustedPoolSecurityString(&encoded, result.OperationID)
+	writeTrustedPoolSecurityHex(&encoded, result.RequestHash)
+	writeTrustedPoolSecurityString(&encoded, result.PlanID)
+	writeTrustedPoolSecurityString(&encoded, result.CeremonyType)
+	writeTrustedPoolSecurityString(&encoded, result.ExternalPoolID)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(result.FromEpoch))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(result.ToEpoch))
+	writeTrustedPoolSecurityHex(&encoded, result.ChildSetHash)
+	writeTrustedPoolSecurityHex(&encoded, result.PreparedSetHash)
+	writeTrustedPoolSecurityString(&encoded, result.Status)
+	writeTrustedPoolSecurityBool(&encoded, result.CredentialsDisclosed)
+	writeTrustedPoolSecurityUint32(&encoded, uint32(len(result.Seats)))
+	for _, seat := range result.Seats {
+		writeTrustedPoolSecurityString(&encoded, seat.ExternalSeatID)
+		writeTrustedPoolSecurityString(&encoded, seat.TargetMemberID)
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ExpectedAssignmentEpoch))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.PrincipalUserID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.SubscriptionID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.APIKeyID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ActiveAPIKeyVersion))
+		writeTrustedPoolSecurityHex(&encoded, seat.CredentialFingerprint)
+		writeTrustedPoolSecurityString(&encoded, seat.PreparedRotationRef)
+		writeTrustedPoolSecurityString(&encoded, seat.ChildOperationID)
+		writeTrustedPoolSecurityHex(&encoded, seat.ChildRequestHash)
+		writeTrustedPoolSecurityString(&encoded, seat.State)
+		writeTrustedPoolSecurityBool(&encoded, seat.CredentialEnabled)
+		writeTrustedPoolSecurityBool(&encoded, seat.SubscriptionEnabled)
+		writeTrustedPoolSecurityBool(&encoded, seat.CredentialRotationComplete)
+	}
+	return s.signPermanentRotationBytes(encoded.Bytes())
+}
+
+func (s *TrustedPoolIntegrationService) signPermanentActivationResult(result *TrustedPoolPermanentRotationActivationResult) (*TrustedPoolPermanentRotationAttestation, error) {
+	if result == nil {
+		return nil, errors.New("nil permanent rotation activation result")
+	}
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, "trusted-pool/permanent-pool-rotation-activate-attestation/v1")
+	writeTrustedPoolSecurityString(&encoded, result.ProtocolVersion)
+	writeTrustedPoolSecurityString(&encoded, result.OperationID)
+	writeTrustedPoolSecurityString(&encoded, result.PrepareOperationID)
+	writeTrustedPoolSecurityHex(&encoded, result.RequestHash)
+	writeTrustedPoolSecurityString(&encoded, result.PlanID)
+	writeTrustedPoolSecurityString(&encoded, result.CeremonyType)
+	writeTrustedPoolSecurityString(&encoded, result.ExternalPoolID)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(result.FromEpoch))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(result.ToEpoch))
+	writeTrustedPoolSecurityHex(&encoded, result.PreparedSetHash)
+	writeTrustedPoolSecurityString(&encoded, result.Status)
+	writeTrustedPoolSecurityBool(&encoded, result.AllCredentialsEnabled)
+	writeTrustedPoolSecurityBool(&encoded, result.AllSubscriptionsEnabled)
+	writeTrustedPoolSecurityBool(&encoded, result.OldCredentialSetInvalidated)
+	writeTrustedPoolSecurityBool(&encoded, result.AuthorizationCacheInvalidated)
+	writeTrustedPoolSecurityBool(&encoded, result.CredentialFingerprintGateEnforced)
+	writeTrustedPoolSecurityBool(&encoded, result.AuthCacheBarrier.DurableOutbox)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(result.AuthCacheBarrier.MinimumEvents))
+	writeTrustedPoolSecurityString(&encoded, result.ObservedAt.UTC().Format(time.RFC3339Nano))
+	writeTrustedPoolSecurityUint32(&encoded, uint32(len(result.Seats)))
+	for _, seat := range result.Seats {
+		writeTrustedPoolSecurityString(&encoded, seat.ExternalSeatID)
+		writeTrustedPoolSecurityString(&encoded, seat.TargetMemberID)
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ExpectedAssignmentEpoch))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.AssignmentEpoch))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.PrincipalUserID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.SubscriptionID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.APIKeyID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ActiveAPIKeyVersion))
+		writeTrustedPoolSecurityHex(&encoded, seat.CredentialFingerprint)
+		writeTrustedPoolSecurityString(&encoded, seat.PreparedRotationRef)
+		writeTrustedPoolSecurityString(&encoded, seat.ChildOperationID)
+		writeTrustedPoolSecurityHex(&encoded, seat.ChildRequestHash)
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.CurrentConcurrency))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.PendingSettlements))
+	}
+	return s.signPermanentRotationBytes(encoded.Bytes())
+}
+
+func (s *TrustedPoolIntegrationService) signPermanentCommitResult(result *TrustedPoolPermanentRotationCommitResult) (*TrustedPoolPermanentRotationAttestation, error) {
+	if result == nil {
+		return nil, errors.New("nil permanent rotation commit result")
+	}
+	var encoded bytes.Buffer
+	writeTrustedPoolSecurityString(&encoded, "trusted-pool/permanent-pool-rotation-commit-attestation/v1")
+	writeTrustedPoolSecurityString(&encoded, result.ProtocolVersion)
+	writeTrustedPoolSecurityString(&encoded, result.OperationID)
+	writeTrustedPoolSecurityString(&encoded, result.PrepareOperationID)
+	writeTrustedPoolSecurityString(&encoded, result.ActivationOperationID)
+	writeTrustedPoolSecurityHex(&encoded, result.RequestHash)
+	writeTrustedPoolSecurityHex(&encoded, result.ActivationRequestHash)
+	writeTrustedPoolSecurityString(&encoded, result.PlanID)
+	writeTrustedPoolSecurityString(&encoded, result.CeremonyType)
+	writeTrustedPoolSecurityString(&encoded, result.ExternalPoolID)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(result.FromEpoch))
+	writeTrustedPoolSecurityUint64(&encoded, uint64(result.ToEpoch))
+	writeTrustedPoolSecurityHex(&encoded, result.PreparedSetHash)
+	writeTrustedPoolSecurityString(&encoded, result.Status)
+	writeTrustedPoolSecurityBool(&encoded, result.AllCredentialsEnabled)
+	writeTrustedPoolSecurityBool(&encoded, result.AllSubscriptionsEnabled)
+	writeTrustedPoolSecurityBool(&encoded, result.OldCredentialSetInvalidated)
+	writeTrustedPoolSecurityBool(&encoded, result.AuthorizationCacheInvalidated)
+	writeTrustedPoolSecurityBool(&encoded, result.CredentialFingerprintGateEnforced)
+	writeTrustedPoolSecurityBool(&encoded, result.AuthCacheBarrier.DurableOutbox)
+	writeTrustedPoolSecurityUint64(&encoded, uint64(result.AuthCacheBarrier.MinimumEvents))
+	writeTrustedPoolSecurityString(&encoded, result.ObservedAt.UTC().Format(time.RFC3339Nano))
+	writeTrustedPoolSecurityUint32(&encoded, uint32(len(result.Seats)))
+	for _, seat := range result.Seats {
+		writeTrustedPoolSecurityString(&encoded, seat.ExternalSeatID)
+		writeTrustedPoolSecurityString(&encoded, seat.TargetMemberID)
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ExpectedAssignmentEpoch))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.AssignmentEpoch))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.PrincipalUserID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.SubscriptionID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.APIKeyID))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.ActiveAPIKeyVersion))
+		writeTrustedPoolSecurityHex(&encoded, seat.CredentialFingerprint)
+		writeTrustedPoolSecurityString(&encoded, seat.PreparedRotationRef)
+		writeTrustedPoolSecurityString(&encoded, seat.ChildOperationID)
+		writeTrustedPoolSecurityHex(&encoded, seat.ChildRequestHash)
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.CurrentConcurrency))
+		writeTrustedPoolSecurityUint64(&encoded, uint64(seat.PendingSettlements))
+	}
+	return s.signPermanentRotationBytes(encoded.Bytes())
+}
+
+func (s *TrustedPoolIntegrationService) signPermanentRotationBytes(payload []byte) (*TrustedPoolPermanentRotationAttestation, error) {
+	if s == nil || s.permanentRotationSigner == nil || len(s.permanentRotationSigner.privateKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("permanent rotation signer unavailable")
+	}
+	digest := sha256.Sum256(payload)
+	signature := ed25519.Sign(s.permanentRotationSigner.privateKey, digest[:])
+	digestHex := hex.EncodeToString(digest[:])
+	return &TrustedPoolPermanentRotationAttestation{
+		Version: "trusted-pool/permanent-rotation-attestation/v1", Issuer: "sub2api",
+		KeyID: s.permanentRotationSigner.keyID, Reference: "tpra-" + digestHex[:32],
+		Digest: digestHex, Signature: base64.StdEncoding.EncodeToString(signature),
+	}, nil
+}
+
+func writeTrustedPoolSecurityHex(target *bytes.Buffer, value string) {
+	decoded, _ := hex.DecodeString(value)
+	target.Write(decoded)
+}
+
+func writeTrustedPoolSecurityBool(target *bytes.Buffer, value bool) {
+	if value {
+		target.WriteByte(1)
+		return
+	}
+	target.WriteByte(0)
 }
 
 func (s *TrustedPoolIntegrationService) UsageRisk(ctx context.Context, seatID string, hours int) (*TrustedPoolUsageRisk, error) {
