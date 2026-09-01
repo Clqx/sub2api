@@ -316,8 +316,9 @@ BEGIN
        aggregate.pending_member_id IS DISTINCT FROM aggregate.target_member_id OR
        aggregate.pending_seat_id IS DISTINCT FROM aggregate.seat_id OR
        aggregate.pending_pool_id IS DISTINCT FROM aggregate.pool_id OR
-       aggregate.pending_assignment_type IS DISTINCT FROM
-           CASE aggregate.operation_type WHEN 'ASSIGN_TEMPORARY' THEN 'TEMPORARY' WHEN 'RESTORE' THEN 'PERMANENT' END OR
+       aggregate.pending_assignment_type IS DISTINCT FROM (
+           CASE aggregate.operation_type WHEN 'ASSIGN_TEMPORARY' THEN 'TEMPORARY' WHEN 'RESTORE' THEN 'PERMANENT' END
+       ) OR
        aggregate.expected_api_key_version IS DISTINCT FROM aggregate.expected_assignment_epoch OR
        aggregate.next_api_key_version IS DISTINCT FROM aggregate.next_assignment_epoch OR
        aggregate.pending_assignment_epoch IS DISTINCT FROM aggregate.next_assignment_epoch THEN

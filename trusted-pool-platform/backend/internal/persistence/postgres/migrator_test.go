@@ -3,12 +3,31 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"testing/fstest"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestMigrationChecksumAcceptsRepaired005LegacyChecksum(t *testing.T) {
+	current := sha256.Sum256([]byte("repaired migration"))
+	legacy, err := hex.DecodeString(acceptedLegacyMigrationChecksums["005_phase2c_assignment_persistence.sql"][0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrationChecksumAccepted("005_phase2c_assignment_persistence.sql", legacy, current) {
+		t.Fatal("published 005 checksum was not accepted after the syntax repair")
+	}
+	if !migrationChecksumAccepted("005_phase2c_assignment_persistence.sql", current[:], current) {
+		t.Fatal("current 005 checksum was not accepted")
+	}
+	other := sha256.Sum256([]byte("unexpected migration"))
+	if migrationChecksumAccepted("005_phase2c_assignment_persistence.sql", other[:], current) {
+		t.Fatal("unexpected 005 checksum was accepted")
+	}
+}
 
 func TestLoadMigrationsSortsAndUnwraps(t *testing.T) {
 	source := fstest.MapFS{

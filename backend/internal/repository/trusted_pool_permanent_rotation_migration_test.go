@@ -16,6 +16,7 @@ func TestTrustedPoolPermanentRotationMigrationClosesDirectSQLBypass(t *testing.T
 	sqlText := string(content)
 	for _, required := range []string{
 		"seat:permanent-rotate", "cardinality(scopes) = 1", "rotation_prepared",
+		"ALTER COLUMN state TYPE VARCHAR(64)",
 		"DEFERRABLE INITIALLY DEFERRED", "enforce_trusted_pool_permanent_rotation_aggregate",
 		"trusted_pool_permanent_child_set_hash_phase2g", "trusted_pool_permanent_prepared_set_hash_phase2g",
 		"prepared_credential IS NULL", "encode(sha256(convert_to(k.key, 'UTF8')), 'hex')",

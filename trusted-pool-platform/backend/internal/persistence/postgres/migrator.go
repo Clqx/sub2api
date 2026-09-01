@@ -17,6 +17,14 @@ const migrationAdvisoryLockKey int64 = 0x54504c4d494752 // "TPLMIGR"
 
 var ErrUnmanagedSchema = errors.New("trusted pool database contains an unmanaged schema")
 
+var acceptedLegacyMigrationChecksums = map[string][]string{
+	// The original 005 file had an ambiguous PL/pgSQL CASE expression. Existing
+	// ledgers retain its checksum while fresh databases record the repaired file.
+	"005_phase2c_assignment_persistence.sql": {
+		"373ec4cd408840e1b769bdf4307f943be100cc8a1a7a1746149ccfacad5dbd83",
+	},
+}
+
 type migration struct {
 	version  string
 	checksum [sha256.Size]byte
@@ -123,7 +131,7 @@ func applyMigration(ctx context.Context, conn *sql.Conn, item migration) error {
 	err := conn.QueryRowContext(ctx,
 		`SELECT checksum FROM trusted_pool_schema_migrations WHERE version = $1`, item.version).Scan(&recorded)
 	if err == nil {
-		if len(recorded) != sha256.Size || !equalBytes(recorded, item.checksum[:]) {
+		if !migrationChecksumAccepted(item.version, recorded, item.checksum) {
 			return fmt.Errorf("migration %s checksum mismatch: expected %s", item.version,
 				hex.EncodeToString(item.checksum[:]))
 		}
@@ -150,6 +158,22 @@ func applyMigration(ctx context.Context, conn *sql.Conn, item migration) error {
 		return fmt.Errorf("commit migration %s: %w", item.version, err)
 	}
 	return nil
+}
+
+func migrationChecksumAccepted(version string, recorded []byte, current [sha256.Size]byte) bool {
+	if len(recorded) != sha256.Size {
+		return false
+	}
+	if equalBytes(recorded, current[:]) {
+		return true
+	}
+	for _, encoded := range acceptedLegacyMigrationChecksums[version] {
+		legacy, err := hex.DecodeString(encoded)
+		if err == nil && equalBytes(recorded, legacy) {
+			return true
+		}
+	}
+	return false
 }
 
 func loadMigrations(source fs.FS) ([]migration, error) {

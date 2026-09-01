@@ -4,6 +4,8 @@
 ALTER TABLE trusted_pool_seats
     DROP CONSTRAINT IF EXISTS trusted_pool_seats_state_check;
 ALTER TABLE trusted_pool_seats
+    ALTER COLUMN state TYPE VARCHAR(64);
+ALTER TABLE trusted_pool_seats
     ADD CONSTRAINT trusted_pool_seats_state_check
     CHECK (state IN ('active', 'draining', 'frozen', 'rotating', 'rotation_prepared', 'rotation_activated_pending_commit'));
 
