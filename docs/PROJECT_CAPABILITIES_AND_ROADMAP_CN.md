@@ -2,7 +2,7 @@
 
 更新时间：2026-09-01
 
-审查基线：分支 `codex/monitor-trusted-pool-hardening` 的受控提交序列。永久轮换核心、Monitor、可信资源池平台和 PostgreSQL CI 门禁分别固化为 `bf309373e`、`56c792b1c`、`70259d007`、`7a78472eb`；本文随最终文档提交进入同一候选基线。这些提交是代码封板记录，不是生产发布或远端 CI 成功声明。
+审查基线：分支 `codex/monitor-trusted-pool-hardening` 的受控提交序列。永久轮换核心、Monitor、可信资源池平台、PostgreSQL CI 和首轮文档基线分别固化为 `bf309373e`、`56c792b1c`、`70259d007`、`7a78472eb`、`37202644b`；后续兼容修复与发布证据自动化继续在同一候选分支推进。这些提交是代码封板记录，不是生产发布或远端 CI 成功声明。
 
 本文是当前仓库的跨模块状态入口，用业务语言统一说明“已经能做什么、在什么条件下能用、距离生产交付还差什么”。模块内的架构、协议和历史阶段报告仍负责提供技术细节与当时的验收证据。
 
@@ -53,12 +53,12 @@
 
 | 模块 | 最近通过的验证 | 尚未覆盖的关键门禁 |
 |---|---|---|
-| Sub2API 后端 | 清空仅供测试的 `OPENAI_API_KEY` 后，`go test -tags=unit ./... -count=1` 全量通过；`go vet ./...` 通过 | live OpenAI 对比不属于本次离线封板；本机 Docker 引擎返回 500 且无真实 PostgreSQL，因此迁移 226/227 与加密暂存门禁留待 CI 首跑 |
-| 可信资源池后端 | 本轮 `go test ./... -count=1` 与 `go vet ./...` 全部通过；前序真实 PostgreSQL 核心 persistence/recovery 门禁记录保留 | 三组 DSN 已固化为 CI 强制门禁但尚无本轮远端工件；生产 provider、真实网关/KMS 全链路和更广多副本演练未完成 |
+| Sub2API 后端 | 单元测试与 `go vet` 通过；在 WSL 隔离 PostgreSQL 16.15 上，迁移 226/227、密文暂存 schema/原始行、回放、篡改拒绝和激活清理完整门禁通过 | live OpenAI 对比不属于本次离线封板；本地 JSON 是修复候选验证，仍需由提交后 CI 工件绑定最终 commit |
+| 可信资源池后端 | `go test ./...` 与 `go vet ./...` 通过；隔离 PostgreSQL 16.15 上 persistence 包 113 个测试事件通过，仅两个明确子进程 helper 跳过；`govulncheck` 无发现 | 仍缺最终 commit 对应的远端工件；生产 provider、真实网关/KMS 全链路和更广多副本演练未完成 |
 | Monitor 后端 | `pytest -q`：160 个测试通过 | 代表版本兼容性、性能基线、发布镜像安全和灾备演练 |
 | Monitor 前端 | 25 个测试通过，生产构建通过 | 完整发布环境浏览器回归和可访问性验收 |
 | 独立代码审查 | 本轮确认的 commit/suspend 竞态、PREPARED 明文路径、Compose 覆盖、setup 启动门禁、CI 假绿和文档状态缺口已在受控提交中修复 | 仍需在真实 PostgreSQL 工件、发布候选镜像和真实外部系统上复审 |
-| 版本可追溯性 | 核心、Monitor、平台、CI 和文档按依赖边界形成受控提交序列 | 仍需由 CI 保存 commit、数据库版本、命令、JSON 报告和候选镜像 digest |
+| 版本可追溯性 | 核心、Monitor、平台、CI 和文档按依赖边界形成受控提交序列；CI 已定义 Compose 哈希/PASS 工件与带 commit 标签、SPDX SBOM、SLSA provenance 的 OCI 候选包 | 仍需在最终 commit 上实际运行并下载工件，核对 PostgreSQL JSON 与 OCI manifest digest |
 
 ## 本轮 P0 收口结果
 
@@ -69,33 +69,36 @@
 3. **真实 PostgreSQL CI 定义已关闭阻断。** 新 job 使用 PostgreSQL 16 和两个隔离库，实际消费 `SUB2API_TEST_POSTGRES_DSN`、`PHASE2H_TEST_POSTGRES_DSN`、`PHASE2H_TEST_POSTGRES_ADMIN_DSN`；除两个明确子进程 helper 外，任何 SKIP 都会失败，并归档版本、命令和 JSON 结果。
 4. **中断恢复决策已关闭设计空白。** 当前采用 fail-forward only，不增加无法安全证明的 abort；状态矩阵、证据留存、签名键故障和真实进程退出演练标准已经进入运维手册。
 5. **commit 回执丢失后的 suspend 竞态已关闭。** 服务在检查 Seat 当前 active 状态前先按完整请求绑定查询历史 commit；`committed` 和 `retiring` 可返回原回执且不重新启用资源，`superseded` 或 fingerprint 漂移稳定失败关闭。
-6. **启动和 CI 门禁已加固。** manual first-run setup server 在监听前执行永久轮换配置预检；五套 Compose 不再用 `false` 覆盖配置文件；PostgreSQL job 除拒绝 skip 外，还归档秘密存储静态结果，并要求十一个真实库哨兵 pass 事件逐项出现。
+6. **启动和 CI 门禁已加固。** manual first-run setup server 在监听前执行永久轮换配置预检；五套 Sub2API Compose 不再用 `false` 覆盖配置文件；PostgreSQL job 除拒绝 skip 外，还归档秘密存储静态结果，并要求十二个真实库哨兵 pass 事件逐项出现。
 7. **PREPARED 明文路径已在代码中关闭。** Forward migration 227 对非空 legacy 明文失败关闭并删除旧列；PREPARED 使用独立 envelope、AAD 和 TTL，activate 清除可解密材料。静态与真实 PostgreSQL 子门禁已经接入，是否可发布仍取决于受控 commit 上的 CI 首跑证据。
+8. **历史迁移兼容缺口已关闭。** 平台 migration 005 的 PL/pgSQL `CASE` 比较已改为 PostgreSQL 16 可解析的显式表达式；迁移 runner 只为该文件接受已发布旧 checksum，空库记录修复后 checksum，其他版本或任意漂移仍失败关闭。Sub2API migration 226 同步把 Seat 状态列扩至 64 字符，避免激活中间态超过旧 20 字符上限。
+9. **发布候选证据已自动化。** 六套 Compose（含 root test profile）进入 CI；全部核心门禁通过后，CI 按正式发布使用的 `Dockerfile.goreleaser` 构建单架构 OCI，生成并验证 SPDX SBOM、SLSA provenance、manifest/config/blob 哈希和 commit revision 标签。该工件不会自动推送或提升为正式 release。
+10. **依赖扫描覆盖已扩展。** 安全 workflow 现覆盖核心与可信资源池 Go 模块、Monitor Python 生产依赖、兑换平台 npm 生产依赖和主前端审计；扫描器版本已固定。镜像漏洞与仓库秘密扫描仍是独立未关闭项。
 
 ## 仍未关闭的发布门禁
 
-1. **CI 首跑证据尚未产生。** 本机 Docker Desktop Linux 引擎持续返回 500 且没有可用 PostgreSQL，新增真实库 job 只完成配置、语法与静态审查；必须在当前受控提交上成功运行并归档工件。
-2. **加密暂存的发布证据尚未关闭。** migration 227 和 envelope/TTL/activate 清理已经进入受控提交；仍必须由真实 PostgreSQL CI 证明 legacy 非空升级失败关闭、七列 schema、PREPARED 原始行无明文、篡改/过期拒绝和 activate 清理全部通过。
+1. **远端 CI 首跑证据尚未产生。** 本机已借助 WSL PostgreSQL 16.15 完成两套真实库候选验证，但 Docker Desktop Linux 引擎仍返回 500；必须在最终受控 commit 上成功运行 CI 并归档数据库版本、命令和 JSON 工件。
+2. **加密暂存的发布证据尚未关闭。** migration 227 和 envelope/TTL/activate 清理已在本地真实 PostgreSQL 通过；仍必须由最终 commit 对应的 CI 工件证明 legacy 非空升级失败关闭、七列 schema、PREPARED 原始行无明文、篡改/过期拒绝和 activate 清理全部通过。
 3. **真实 fail-forward 演练尚未完成。** 仍需使用真实 PostgreSQL、Sub2API 和可持久 provider，在 prepare、activate、结构事务、commit、token 各边界执行进程退出与响应丢失演练。
 4. **可信资源池生产组合根仍关闭。** 生产 KMS adapter、七类 Recovery providers 和 export signer 尚未注入，开启治理或导出会在服务监听前失败；这符合失败关闭设计，但不构成可调用的生产能力。
-5. **发布证据基线尚未形成。** 代码版本已封板，但缺少当前 HEAD 对应的远端 PostgreSQL 工件、候选镜像 digest 和真实外部系统演练；必须继续执行 [Root Release Stage 0 发布基线清单](STAGE0_RELEASE_BASELINE_CHECKLIST_CN.md)。
+5. **发布证据基线尚未形成。** PostgreSQL、Compose 与 OCI/SBOM/provenance 门禁已可自动生成证据，但缺少最终 HEAD 对应的远端工件、镜像漏洞/仓库秘密扫描和真实外部系统演练；必须继续执行 [Root Release Stage 0 发布基线清单](STAGE0_RELEASE_BASELINE_CHECKLIST_CN.md)。
 
 ## 分阶段交付计划
 
 | 阶段 | 业务目标 | 进度 | 完成标准 |
 |---|---|---|---|
 | A. 状态与范围收敛 | 建立全仓统一能力口径，消除“开发完成”和“生产可用”的混用 | 已完成 | 根入口、模块状态、需求追踪和路线图互相链接，历史证据保留 |
-| B. 兼容性与发布加固 | 把 Monitor 和可信集成从功能闭环推进到可重复发布 | 进行中：永久轮换代码基线已封板，待 CI/真实演练与候选镜像证据 | 两个代表版本样本、契约冻结、性能基线、故障恢复、备份/恢复/升级/回滚、安全扫描和发布候选报告通过 |
+| B. 兼容性与发布加固 | 把 Monitor 和可信集成从功能闭环推进到可重复发布 | 进行中：本地真实库与发布证据流水线已完成，待远端工件、兼容样本、灾备和真实演练 | 两个代表版本样本、契约冻结、性能基线、故障恢复、备份/恢复/升级/回滚、安全扫描和发布候选报告通过 |
 | C. 生产基础设施接线 | 接入真实 KMS/HSM、签名、证明、成员和批次 provider，并完成真实 Sub2API 联调 | 待启动 | 所有生产 provider 就绪，敏感数据扫描通过，逐外部副作用失败和进程退出可恢复 |
 | D. 封闭试点 | 在严格边界下验证真实运营、对账和人工处置 | 受 C 阻塞 | 单实例试点、运行手册、告警值班、暂停未知结果和永久换员演练完成 |
 | E. 多实例与恢复执行 | 支持滚动发布、多副本接管、最终用户权限和受控 Reveal/恢复执行 | 规划中 | 跨工作流多副本矩阵、RBAC、Recovery Package 演练和独立安全评审通过 |
 
 ## 当前优先级
 
-1. **P0：生成加密暂存与发布基线证据。** PREPARED 明文路径已在受控代码中消除；下一步按 [Root Release Stage 0 发布基线清单](STAGE0_RELEASE_BASELINE_CHECKLIST_CN.md)运行 PostgreSQL job，并归档 commit、PostgreSQL 版本、命令和 JSON 报告。任何哨兵测试缺少 pass、真实测试 SKIP 或演练证据缺失都不能转为“生产可用”。
+1. **P0：生成最终 commit 的远端发布基线证据。** PREPARED 明文路径与本地 PostgreSQL 门禁已通过；下一步按 [Root Release Stage 0 发布基线清单](STAGE0_RELEASE_BASELINE_CHECKLIST_CN.md)运行完整 CI，归档数据库 JSON、六套 Compose 结果及 OCI/SBOM/provenance 工件。任何哨兵测试缺少 pass、非白名单 SKIP 或 digest/commit 不一致都不能转为“生产可用”。
 2. **P0：完成 Monitor 发布证据基线。** 收集两个代表 Sub2API 版本的脱敏 API/Schema 样本，冻结 V1 契约并建立 supported-version matrix。
 3. **P1：完成可靠性与灾备。** 建立真实账号规模下的采集并发和延迟基线，覆盖 API 401/429/5xx、数据库中断、通知超时、备份恢复和版本升级。
-4. **P2：完成生产安全门禁。** 运行依赖、SBOM、容器和秘密扫描，接入可信资源池所需的生产 KMS/HSM 与签名/证明 providers。
+4. **P2：完成生产安全门禁。** 依赖扫描与候选 OCI SBOM 已接入；继续完成 OCI 镜像漏洞和仓库秘密扫描，接入可信资源池所需的生产 KMS/HSM 与签名/证明 providers。
 5. **P3：完成真实联调和封闭试点。** 使用真实网关、KMS 和 provider 验证 prepare、activate-held、commit、claim 及失败恢复，全程保留审计和对账证据。
 6. **P4：再评估扩展能力。** 在上述门禁通过后，再启动多副本、滚动发布、最终用户 RBAC、Reveal 执行器和更多供应商适配。
 

@@ -80,7 +80,8 @@
     git rev-parse HEAD
     git status --porcelain=v1 --untracked-files=all
     git ls-files --error-unmatch <本清单中的每个必需文件>
-    git diff --check HEAD
+    git show --check --oneline --no-renames HEAD
+    git diff --check <候选范围基线>...HEAD
 
 合格条件：
 
@@ -132,12 +133,21 @@ CI 必须保留 skip 拦截，并逐项确认 migration、秘密存储、权限�
 
 部署配置还需逐套解析：
 
-    docker compose config
+    docker compose --profile test config
     docker compose -f deploy/docker-compose.yml config
     docker compose -f deploy/docker-compose.dev.yml config
     docker compose -f deploy/docker-compose.local.yml config
     docker compose -f deploy/docker-compose.standalone.yml config
     docker compose -f trusted-pool-platform/compose.yaml config
+
+`.github/workflows/backend-ci.yml` 的 `compose-config-gate` 会使用明确的 CI-only 假值执行以上六项，
+只归档 Compose 文件哈希和 PASS 结果，不归档展开后可能包含配置值的完整输出。
+
+同一 workflow 的 `candidate-oci-evidence` 只在所有核心测试、真实 PostgreSQL、前端、lint 与
+Compose 门禁通过后，按正式发布使用的 `Dockerfile.goreleaser` 构建 `linux/amd64` OCI 候选包。
+它不登录或推送镜像仓库，并会生成 SPDX SBOM 与 SLSA provenance，重算 manifest、config、attestation
+和 archive SHA-256，验证镜像 revision label 与候选 commit 精确一致，再归档 OCI 和映射文件。
+该工件是发布候选证据，不是正式 tag 镜像或生产发布成功声明。
 
 ## 6. 必须归档的证据
 

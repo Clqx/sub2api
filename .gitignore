@@ -131,6 +131,7 @@ AGENTS.md
 backend/cmd/server/server
 deploy/docker-compose.override.yml
 .gocache/
+.tmp-go-verify/
 vite.config.js
 docs/*
 !docs/PROJECT_CAPABILITIES_AND_ROADMAP_CN.md

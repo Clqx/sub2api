@@ -27,8 +27,57 @@ jobs:
       - name: Run govulncheck
         working-directory: backend
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
+
+  trusted-pool-platform-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache-dependency-path: trusted-pool-platform/backend/go.sum
+      - name: Run govulncheck
+        working-directory: trusted-pool-platform/backend
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          govulncheck ./...
+
+  monitor-backend-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: sub2api-monitor/backend/pyproject.toml
+      - name: Audit production dependencies
+        working-directory: sub2api-monitor/backend
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit --strict --progress-spinner off .
+
+  redeem-platform-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: redeem-platform/package-lock.json
+      - name: Audit production dependencies
+        working-directory: redeem-platform
+        run: |
+          npm ci
+          npm audit --omit=dev
 
   frontend-security:
     runs-on: ubuntu-latest

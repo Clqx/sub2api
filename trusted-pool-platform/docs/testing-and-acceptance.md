@@ -192,6 +192,8 @@
 - 数据库迁移在空库和已有测试数据上均验证成功，包括平台 `001 -> 011`、`009 -> 010`、`010 -> 011` 和 Sub2API
   受支持基线到 `226` 的历史审计与混合 scope 处理；`227` 的当前候选结果必须由受控 commit 上的 CI 另行归档。
 - migration ledger、checksum 漂移和 unmanaged 历史卷的受控 baseline 演练通过。
+  migration 005 的历史已发布 checksum 仅允许映射到本次 PostgreSQL 解析修复；新空库记录修复后的 checksum，
+  其他 migration 或任意第三方 checksum 仍必须以漂移错误失败关闭。
 - 真实 PostgreSQL 门禁必须显式提供 `PHASE2H_TEST_POSTGRES_DSN`；最小权限门禁另需
   `PHASE2H_TEST_POSTGRES_ADMIN_DSN`，Sub2API 226/227 门禁需在其模块提供 `SUB2API_TEST_POSTGRES_DSN`。
   常规本地 `go test ./...` 会在变量缺失时跳过这些测试；仓库 CI 的 `postgresql-gates` job 已显式提供

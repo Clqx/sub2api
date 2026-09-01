@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,6 +20,116 @@ jobs:
           /bin/sh deploy/tests/docker-compose-security-test.sh
           /bin/sh deploy/tests/docker-runtime-resources-test.sh
           /bin/sh deploy/test-caddyfile-cache.sh
+
+  compose-config-gate:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_USER: ci-user
+      POSTGRES_PASSWORD: ci-only-postgres-password
+      POSTGRES_DB: sub2api_ci
+      REDEEM_POSTGRES_USER: ci-redeem-user
+      REDEEM_POSTGRES_PASSWORD: ci-only-redeem-postgres-password
+      REDEEM_POSTGRES_DB: redeem_ci
+      ADMIN_EMAIL: ci-admin@example.invalid
+      ADMIN_PASSWORD: ci-only-admin-password
+      JWT_SECRET: ci-only-jwt-secret-that-is-not-used
+      TOTP_ENCRYPTION_KEY: ci-only-totp-key-that-is-not-used
+      REDEEM_CODE_PEPPER: ci-only-redeem-code-pepper
+      REDEEM_SESSION_SECRET: ci-only-redeem-session-secret
+      REDEEM_MANAGER_USERNAME: ci-manager
+      REDEEM_MANAGER_PASSWORD: ci-only-redeem-manager-password
+      DATABASE_HOST: ci-postgres.example.invalid
+      DATABASE_PASSWORD: ci-only-external-database-password
+      REDIS_HOST: ci-redis.example.invalid
+      TRUSTED_POOL_DB_PASSWORD: ci-only-trusted-pool-db-password
+      TRUSTED_POOL_API_KEY: ci-only-trusted-pool-api-key
+      TRUSTED_POOL_SETTLEMENT_API_KEY: ci-only-settlement-api-key
+      TRUSTED_POOL_BATCH_API_KEY: ci-only-batch-api-key
+      TRUSTED_POOL_FINGERPRINT_HMAC_KEY: ci-only-fingerprint-hmac-key-32-bytes
+      TRUSTED_POOL_WORKER_ID: ci-worker-1
+      TRUSTED_POOL_DATABASE_URL: 'postgres://trusted_pool:ci-only-password@postgres:5432/trusted_pool?sslmode=disable'
+      TRUSTED_POOL_KMS_KEY_REF: ci-kms-key-ref
+      TRUSTED_POOL_BATCH_CLIENT_ID: ci-batch-client
+      TRUSTED_POOL_BATCH_KMS_WRAP_ALGORITHM: ci-kms-wrap
+      TRUSTED_POOL_BATCH_KMS_DOMAIN: ci-kms-domain
+      TRUSTED_POOL_BATCH_KMS_KEY_REF: ci-batch-kms-key-ref
+      TRUSTED_POOL_BATCH_RECOVERY_WRAP_ALGORITHM: ci-recovery-wrap
+      TRUSTED_POOL_BATCH_RECOVERY_DOMAIN: ci-recovery-domain
+      TRUSTED_POOL_BATCH_RECOVERY_KEY_REF: ci-recovery-key-ref
+      TRUSTED_POOL_BATCH_FINGERPRINT_KEY_REF: ci-fingerprint-key-ref
+      TRUSTED_POOL_BATCH_FINGERPRINT_HMAC_KEY_HEX: '0000000000000000000000000000000000000000000000000000000000000000'
+      SUB2API_INTEGRATION_SECRET: ci-only-integration-secret
+      SUB2API_SETTLEMENT_READ_CLIENT_ID: ci-settlement-read-client
+      SUB2API_SETTLEMENT_READ_SECRET: ci-only-settlement-read-secret
+      SUB2API_SETTLEMENT_RESOLVE_CLIENT_ID: ci-settlement-resolve-client
+      SUB2API_SETTLEMENT_RESOLVE_SECRET: ci-only-settlement-resolve-secret
+      SUB2API_RECOVERY_ROTATION_CLIENT_ID: ci-recovery-rotation-client
+      SUB2API_RECOVERY_ROTATION_SECRET: ci-only-recovery-rotation-secret
+      SUB2API_RECOVERY_ROTATION_ATTESTATION_KEY_ID: ci-attestation-key
+      SUB2API_RECOVERY_ROTATION_ATTESTATION_PUBLIC_KEY_BASE64: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check candidate commit whitespace
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          git show --check --oneline --no-renames HEAD
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --check "$PR_BASE_SHA...HEAD"
+          elif [ -n "${PUSH_BEFORE_SHA:-}" ] &&
+               [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ] &&
+               git cat-file -e "$PUSH_BEFORE_SHA^{commit}" 2>/dev/null; then
+            git diff --check "$PUSH_BEFORE_SHA...HEAD"
+          fi
+      - name: Validate release Compose configurations
+        run: |
+          set -euo pipefail
+          mkdir -p compose-config-evidence
+          compose_files=(
+            docker-compose.yml
+            deploy/docker-compose.yml
+            deploy/docker-compose.dev.yml
+            deploy/docker-compose.local.yml
+            deploy/docker-compose.standalone.yml
+            trusted-pool-platform/compose.yaml
+          )
+          {
+            echo "commit=$(git rev-parse HEAD)"
+            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            docker compose version
+          } > compose-config-evidence/results.txt
+          for compose_file in "${compose_files[@]}"; do
+            error_file="compose-config-evidence/${compose_file//\//_}.stderr.txt"
+            compose_args=(-f "$compose_file")
+            if [ "$compose_file" = "docker-compose.yml" ]; then
+              compose_args=(--profile test "${compose_args[@]}")
+            fi
+            if docker compose "${compose_args[@]}" config --quiet 2>"$error_file"; then
+              :
+            else
+              status=$?
+              echo "FAIL  $compose_file" >> compose-config-evidence/results.txt
+              cat "$error_file" >&2
+              exit "$status"
+            fi
+            printf '%s  %s\n' "$(sha256sum "$compose_file" | cut -d ' ' -f 1)" "$compose_file" \
+              >> compose-config-evidence/results.txt
+            echo "PASS  $compose_file" >> compose-config-evidence/results.txt
+            rm -f "$error_file"
+          done
+      - name: Upload Compose validation evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: compose-config-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: compose-config-evidence/
+          if-no-files-found: error
+          retention-days: 30
 
   test:
     runs-on: ubuntu-latest
@@ -124,6 +235,7 @@ jobs:
           required_tests=(
             TestTrustedPoolPermanentRotationMigrationsOnRealPostgres
             TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/EncryptedPreparedCredentialSchema
+            TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/prepared_credential_ciphertext_is_append_only
             TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/EncryptedPreparedCredentialRow
             TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/EncryptedPreparedCredentialReplay
             TestTrustedPoolPermanentRotationMigrationsOnRealPostgres/EncryptedPreparedCredentialClearedOnActivate
@@ -214,3 +326,195 @@ jobs:
           version: v2.9
           args: --timeout=30m
           working-directory: backend
+
+  candidate-oci-evidence:
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
+      startsWith(github.ref, 'refs/heads/release/')
+    needs:
+      - shell
+      - compose-config-gate
+      - test
+      - postgresql-gates
+      - frontend
+      - golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: backend/go.sum
+      - name: Build release-path binary and frontend
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          commit_date="$(git show -s --format=%cI HEAD)"
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend run build
+          go mod tidy -C backend
+          git diff --exit-code -- backend/go.mod backend/go.sum
+          (
+            cd backend
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+              -tags=embed \
+              -ldflags="-s -w -X main.Commit=$commit -X main.Date=$commit_date -X main.BuildType=release" \
+              -o ../sub2api \
+              ./cmd/server
+          )
+      - name: Build release-path candidate OCI archive
+        run: |
+          set -euo pipefail
+          mkdir -p release-candidate-evidence
+          commit="$(git rev-parse HEAD)"
+          commit_date="$(git show -s --format=%cI HEAD)"
+          version="0.0.0-candidate.${commit:0:12}"
+          docker buildx create --name candidate-builder --driver docker-container --use
+          docker buildx build \
+            --platform linux/amd64 \
+            --file Dockerfile.goreleaser \
+            --label "org.opencontainers.image.revision=$commit" \
+            --label "org.opencontainers.image.version=$version" \
+            --label "org.opencontainers.image.created=$commit_date" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file release-candidate-evidence/build-metadata.json \
+            --output type=oci,dest=release-candidate-evidence/sub2api-linux-amd64.oci.tar \
+            .
+      - name: Verify OCI, attestations, and commit binding
+        run: |
+          set -euo pipefail
+          archive=release-candidate-evidence/sub2api-linux-amd64.oci.tar
+          oci_dir="$(mktemp -d)"
+          trap 'rm -rf "$oci_dir"' EXIT
+          tar -xf "$archive" -C "$oci_dir"
+
+          jq -e '.schemaVersion == 2' "$oci_dir/index.json" >/dev/null
+          manifest_digest="$(jq -er '
+            [.manifests[] | select(
+              .platform.os == "linux" and .platform.architecture == "amd64"
+            )] | if length == 1 then .[0].digest else error("expected one linux/amd64 image") end
+          ' "$oci_dir/index.json")"
+          metadata_digest="$(jq -er '."containerimage.digest"' release-candidate-evidence/build-metadata.json)"
+          if ! [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid OCI manifest digest: $manifest_digest" >&2
+            exit 1
+          fi
+          if ! [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid BuildKit metadata digest: $metadata_digest" >&2
+            exit 1
+          fi
+
+          index_digest="sha256:$(sha256sum "$oci_dir/index.json" | cut -d ' ' -f 1)"
+          if [ "$metadata_digest" != "$manifest_digest" ] && [ "$metadata_digest" != "$index_digest" ]; then
+            echo "Build metadata digest matches neither the image manifest nor OCI index" >&2
+            exit 1
+          fi
+
+          while read -r descriptor_digest; do
+            descriptor_path="$oci_dir/blobs/sha256/${descriptor_digest#sha256:}"
+            descriptor_actual="sha256:$(sha256sum "$descriptor_path" | cut -d ' ' -f 1)"
+            if [ "$descriptor_actual" != "$descriptor_digest" ]; then
+              echo "OCI index descriptor digest mismatch: $descriptor_digest" >&2
+              exit 1
+            fi
+          done < <(jq -er '.manifests[].digest' "$oci_dir/index.json")
+
+          manifest_path="$oci_dir/blobs/sha256/${manifest_digest#sha256:}"
+          manifest_actual="sha256:$(sha256sum "$manifest_path" | cut -d ' ' -f 1)"
+          if [ "$manifest_actual" != "$manifest_digest" ]; then
+            echo "OCI manifest blob digest mismatch" >&2
+            exit 1
+          fi
+
+          config_digest="$(jq -er '.config.digest' "$manifest_path")"
+          if ! [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid OCI config digest: $config_digest" >&2
+            exit 1
+          fi
+          config_path="$oci_dir/blobs/sha256/${config_digest#sha256:}"
+          config_actual="sha256:$(sha256sum "$config_path" | cut -d ' ' -f 1)"
+          if [ "$config_actual" != "$config_digest" ]; then
+            echo "OCI config blob digest mismatch" >&2
+            exit 1
+          fi
+
+          : > release-candidate-evidence/attestation-predicates.txt
+          while read -r attestation_digest; do
+            attestation_manifest="$oci_dir/blobs/sha256/${attestation_digest#sha256:}"
+            while read -r layer_digest; do
+              layer_path="$oci_dir/blobs/sha256/${layer_digest#sha256:}"
+              layer_actual="sha256:$(sha256sum "$layer_path" | cut -d ' ' -f 1)"
+              if [ "$layer_actual" != "$layer_digest" ]; then
+                echo "OCI attestation layer digest mismatch" >&2
+                exit 1
+              fi
+              jq -er \
+                --arg subject "${manifest_digest#sha256:}" \
+                'select(.subject | any(.digest.sha256 == $subject)) | .predicateType' \
+                "$layer_path" >> release-candidate-evidence/attestation-predicates.txt
+            done < <(jq -er '.layers[] | select(.mediaType == "application/vnd.in-toto+json") | .digest' "$attestation_manifest")
+          done < <(jq -er \
+            --arg digest "$manifest_digest" \
+            '.manifests[] | select(.annotations["vnd.docker.reference.digest"] == $digest) | .digest' \
+            "$oci_dir/index.json")
+          grep -Fxq 'https://spdx.dev/Document' release-candidate-evidence/attestation-predicates.txt
+          grep -Eq '^https://slsa.dev/provenance/' release-candidate-evidence/attestation-predicates.txt
+
+          commit="$(git rev-parse HEAD)"
+          commit_date="$(git show -s --format=%cI HEAD)"
+          version="0.0.0-candidate.${commit:0:12}"
+          jq -e \
+            --arg commit "$commit" \
+            --arg version "$version" \
+            --arg created "$commit_date" \
+            '.config.Labels["org.opencontainers.image.revision"] == $commit and
+             .config.Labels["org.opencontainers.image.version"] == $version and
+             .config.Labels["org.opencontainers.image.created"] == $created' \
+            "$config_path" >/dev/null
+
+          {
+            echo "commit=$commit"
+            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "platform=linux/amd64"
+            echo "version=$version"
+            echo "commit_date=$commit_date"
+            echo "index_digest=$index_digest"
+            echo "manifest_digest=$manifest_digest"
+            echo "metadata_digest=$metadata_digest"
+            echo "config_digest=$config_digest"
+            echo "archive_sha256=$(sha256sum "$archive" | cut -d ' ' -f 1)"
+            echo "binary_sha256=$(sha256sum sub2api | cut -d ' ' -f 1)"
+            echo "dockerfile_sha256=$(sha256sum Dockerfile.goreleaser | cut -d ' ' -f 1)"
+            echo "goreleaser_config_sha256=$(sha256sum .goreleaser.simple.yaml | cut -d ' ' -f 1)"
+            docker buildx version
+          } > release-candidate-evidence/candidate-image.txt
+      - name: Upload candidate OCI and digest evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: sub2api-candidate-${{ github.sha }}
+          path: release-candidate-evidence/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Remove candidate builder
+        if: always()
+        run: docker buildx rm candidate-builder || true
