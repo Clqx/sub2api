@@ -20,6 +20,7 @@ var ErrUnmanagedSchema = errors.New("trusted pool database contains an unmanaged
 var acceptedLegacyMigrationChecksums = map[string][]string{
 	// The original 005 file had an ambiguous PL/pgSQL CASE expression. Existing
 	// ledgers retain its checksum while fresh databases record the repaired file.
+	// Migration 012 reapplies the repaired function so both paths converge.
 	"005_phase2c_assignment_persistence.sql": {
 		"373ec4cd408840e1b769bdf4307f943be100cc8a1a7a1746149ccfacad5dbd83",
 	},

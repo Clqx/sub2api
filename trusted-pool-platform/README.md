@@ -134,7 +134,7 @@ docker compose up --build
 - 存活检查：`http://localhost:8092/health`
 - PostgreSQL/KMS 就绪检查：`http://localhost:8092/ready`
 
-API 启动时强制连接独立 PostgreSQL，并按顺序执行 `001` 至 `011`。历史版本由 Compose `initdb`
+API 启动时强制连接独立 PostgreSQL，并按顺序执行 `001` 至 `012`。历史版本由 Compose `initdb`
 创建、但没有 `trusted_pool_schema_migrations` ledger 的开发卷会被判定为 unmanaged schema 并拒绝启动；
 开发环境须删除并重建该卷。生产数据库不得自动认领，必须先完成受控基线核验和迁移演练。
 
@@ -194,6 +194,8 @@ trusted-pool-platform/
   以及 typed Seat prepare 到 Pool prepare/activation 的公开 Store 链路也已在真实 PostgreSQL 通过。011 后
   新建 operation 只能写 typed snapshot，旧格式新写入会在 Store 和数据库触发器两层失败。解除前仍须完成更广的
   跨工作流多副本矩阵，以及其余外部副作用边界联动真实 providers 的端到端演练。
+- `012` 是迁移兼容性前向修复：接受已发布 `005` checksum 的老库不会改写历史账本，但会重新安装修正后的
+  assignment aggregate 函数；空库和老库最终收敛到同一约束实现。
 - 生产数据库迁移身份与运行时身份必须分离；高权限迁移连接在 schema 升级后立即关闭，运行时账号不得持有 DDL 权限。
 - Recovery 治理生产开关默认关闭；当前二进制缺少真实 provider，误开启必须失败启动。Plan `READY`、旧
   单 Seat replace 都不得被解释为永久换员完成。只有 Pool finalize 达到 `FINALIZED` 才表示结构切换和远端

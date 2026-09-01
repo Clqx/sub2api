@@ -80,6 +80,11 @@ func TestPhase2MigrationUpgradeDDLRetainsPostgresFixes(t *testing.T) {
 	if !strings.Contains(assignment, "pending_assignment_type IS DISTINCT FROM (\n           CASE") {
 		t.Fatal("migration 005 lost the parenthesized assignment type CASE expression")
 	}
+	assignmentRepair := readPhase2HSource(t, "../../../../migrations/012_phase2i_assignment_aggregate_repair.sql")
+	if !strings.Contains(assignmentRepair, "CREATE OR REPLACE FUNCTION assert_assignment_aggregate") ||
+		!strings.Contains(assignmentRepair, "pending_assignment_type IS DISTINCT FROM (\n           CASE") {
+		t.Fatal("migration 012 does not forward-repair the assignment aggregate function")
+	}
 	governance := readPhase2HSource(t, "../../../../migrations/008_phase2f_recovery_governance.sql")
 	for _, fragment := range []string{
 		"ceremony_attestation_purpose' IS DISTINCT FROM (\n           CASE",
@@ -347,7 +352,7 @@ func TestPhase2HMigrationOnRealPostgres(t *testing.T) {
 		t.Fatalf("select isolated PostgreSQL schema: %v", err)
 	}
 	if err := Migrate(ctx, db, os.DirFS(filepath.Clean("../../../../migrations"))); err != nil {
-		t.Fatalf("apply migrations 001-010 on real PostgreSQL: %v", err)
+		t.Fatalf("apply migrations 001-012 on real PostgreSQL: %v", err)
 	}
 	for _, table := range []string{"recovery_member_artifact_receipts", "recovery_verification_exports",
 		"recovery_reveal_authorizations", "recovery_reveal_events"} {
@@ -381,6 +386,63 @@ executor_profile, executor_algorithm, executor_key_id, executor_signature, compl
           decode(repeat('02', 32), 'hex'), decode(repeat('03', 32), 'hex'),
           'offline-executor/v1', 'Ed25519', 'executor-key', decode('01', 'hex'), CURRENT_TIMESTAMP)`,
 		"online Reveal executor execution is unavailable in Phase2-H")
+}
+
+func TestPhase2ILegacy005ChecksumAppliesForwardRepair(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("PHASE2H_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("PHASE2H_TEST_POSTGRES_DSN is not set")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open PostgreSQL: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	schema := fmt.Sprintf("phase2i_upgrade_%x", time.Now().UnixNano())
+	if _, err := db.ExecContext(ctx, `CREATE SCHEMA `+schema); err != nil {
+		t.Fatalf("create upgrade schema: %v", err)
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		_, _ = db.ExecContext(cleanupCtx, `DROP SCHEMA `+schema+` CASCADE`)
+	}()
+	if _, err := db.ExecContext(ctx, `SET search_path TO `+schema+`, public`); err != nil {
+		t.Fatalf("select upgrade schema: %v", err)
+	}
+	_, through011 := phase2HProtocolCompatibilityMigrationSets(t)
+	if err := Migrate(ctx, db, through011); err != nil {
+		t.Fatalf("apply migrations 001-011: %v", err)
+	}
+	const published005Checksum = "373ec4cd408840e1b769bdf4307f943be100cc8a1a7a1746149ccfacad5dbd83"
+	if _, err := db.ExecContext(ctx, `UPDATE trusted_pool_schema_migrations
+SET checksum = decode($1, 'hex') WHERE version = '005_phase2c_assignment_persistence.sql'`,
+		published005Checksum); err != nil {
+		t.Fatalf("install published 005 ledger checksum: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE OR REPLACE FUNCTION assert_assignment_aggregate(target_operation_id uuid)
+RETURNS void LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'stale assignment aggregate'; END; $$`); err != nil {
+		t.Fatalf("install stale assignment aggregate: %v", err)
+	}
+	if err := Migrate(ctx, db, os.DirFS(filepath.Clean("../../../../migrations"))); err != nil {
+		t.Fatalf("upgrade published 005 ledger through migration 012: %v", err)
+	}
+	assertMigrationLedgerState(t, ctx, db, 12, "012_phase2i_assignment_aggregate_repair.sql")
+	if _, err := db.ExecContext(ctx, `SELECT assert_assignment_aggregate(gen_random_uuid())`); err != nil {
+		t.Fatalf("migration 012 did not replace stale assignment aggregate: %v", err)
+	}
+	var recorded005Checksum string
+	if err := db.QueryRowContext(ctx, `SELECT encode(checksum, 'hex')
+FROM trusted_pool_schema_migrations WHERE version = '005_phase2c_assignment_persistence.sql'`).
+		Scan(&recorded005Checksum); err != nil {
+		t.Fatalf("read migration 005 ledger checksum: %v", err)
+	}
+	if recorded005Checksum != published005Checksum {
+		t.Fatalf("migration 005 ledger history was rewritten: %s", recorded005Checksum)
+	}
 }
 
 func TestPhase2HUpgradeFrom009PreservesLegacyEvidenceFailClosed(t *testing.T) {

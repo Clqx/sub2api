@@ -265,6 +265,7 @@ jobs:
           required_tests=(
             TestPhase2HMigrationOnRealPostgres
             TestPhase2HUpgradeFrom009PreservesLegacyEvidenceFailClosed
+            TestPhase2ILegacy005ChecksumAppliesForwardRepair
             TestRuntimeRoleUsesStoreWithoutDDLOrDeletePrivileges
             TestRecoveryPlanAndFinalizationFenceOnTwoRealPostgresConnections
             TestRecoveryFinalizationFenceSurvivesProcessExit
@@ -370,7 +371,7 @@ jobs:
           commit_date="$(git show -s --format=%cI HEAD)"
           pnpm --dir frontend install --frozen-lockfile
           pnpm --dir frontend run build
-          go mod tidy -C backend
+          go -C backend mod tidy
           git diff --exit-code -- backend/go.mod backend/go.sum
           (
             cd backend
@@ -397,7 +398,7 @@ jobs:
             --provenance=mode=max \
             --sbom=true \
             --metadata-file release-candidate-evidence/build-metadata.json \
-            --output type=oci,dest=release-candidate-evidence/sub2api-linux-amd64.oci.tar \
+            --output type=oci,oci-mediatypes=true,oci-artifact=true,dest=release-candidate-evidence/sub2api-linux-amd64.oci.tar \
             .
       - name: Verify OCI, attestations, and commit binding
         run: |
@@ -407,75 +408,163 @@ jobs:
           trap 'rm -rf "$oci_dir"' EXIT
           tar -xf "$archive" -C "$oci_dir"
 
-          jq -e '.schemaVersion == 2' "$oci_dir/index.json" >/dev/null
-          manifest_digest="$(jq -er '
-            [.manifests[] | select(
-              .platform.os == "linux" and .platform.architecture == "amd64"
-            )] | if length == 1 then .[0].digest else error("expected one linux/amd64 image") end
-          ' "$oci_dir/index.json")"
+          verify_blob_descriptor() {
+            local descriptor_digest="$1"
+            local descriptor_size="$2"
+            local descriptor_media_type="$3"
+            local expected_media_type="$4"
+            local descriptor_label="$5"
+            if ! [[ "$descriptor_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Invalid $descriptor_label digest: $descriptor_digest" >&2
+              return 1
+            fi
+            if ! [[ "$descriptor_size" =~ ^[0-9]+$ ]] || [ "$descriptor_media_type" != "$expected_media_type" ]; then
+              echo "Invalid $descriptor_label descriptor: size=$descriptor_size mediaType=$descriptor_media_type" >&2
+              return 1
+            fi
+            local descriptor_path="$oci_dir/blobs/sha256/${descriptor_digest#sha256:}"
+            if [ ! -f "$descriptor_path" ]; then
+              echo "Missing $descriptor_label blob: $descriptor_digest" >&2
+              return 1
+            fi
+            local descriptor_actual descriptor_actual_size
+            descriptor_actual="sha256:$(sha256sum "$descriptor_path" | cut -d ' ' -f 1)"
+            descriptor_actual_size="$(stat -c '%s' "$descriptor_path")"
+            if [ "$descriptor_actual" != "$descriptor_digest" ] || [ "$descriptor_actual_size" != "$descriptor_size" ]; then
+              echo "$descriptor_label digest or size mismatch: $descriptor_digest" >&2
+              return 1
+            fi
+          }
+
+          jq -e '
+            .schemaVersion == 2 and
+            .mediaType == "application/vnd.oci.image.index.v1+json" and
+            (.manifests | type == "array" and length == 1)
+          ' "$oci_dir/index.json" >/dev/null
           metadata_digest="$(jq -er '."containerimage.digest"' release-candidate-evidence/build-metadata.json)"
-          if ! [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Invalid OCI manifest digest: $manifest_digest" >&2
-            exit 1
-          fi
+          metadata_config_digest="$(jq -r '."containerimage.config.digest" // empty' release-candidate-evidence/build-metadata.json)"
+          metadata_descriptor="$(jq -er '
+            [."containerimage.descriptor".digest,
+             (."containerimage.descriptor".size | tostring),
+             ."containerimage.descriptor".mediaType] | @tsv
+          ' release-candidate-evidence/build-metadata.json)"
+          IFS=$'\t' read -r metadata_descriptor_digest metadata_descriptor_size metadata_descriptor_media_type \
+            <<< "$metadata_descriptor"
           if ! [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "Invalid BuildKit metadata digest: $metadata_digest" >&2
             exit 1
           fi
 
-          index_digest="sha256:$(sha256sum "$oci_dir/index.json" | cut -d ' ' -f 1)"
-          if [ "$metadata_digest" != "$manifest_digest" ] && [ "$metadata_digest" != "$index_digest" ]; then
-            echo "Build metadata digest matches neither the image manifest nor OCI index" >&2
+          layout_index_digest="sha256:$(sha256sum "$oci_dir/index.json" | cut -d ' ' -f 1)"
+          root_descriptor="$(jq -er '
+            .manifests[0] | [.digest, (.size | tostring), .mediaType] | @tsv
+          ' "$oci_dir/index.json")"
+          IFS=$'\t' read -r index_digest index_size index_media_type <<< "$root_descriptor"
+          if [ "$metadata_digest" != "$index_digest" ] ||
+             [ "$metadata_descriptor_digest" != "$index_digest" ] ||
+             [ "$metadata_descriptor_size" != "$index_size" ] ||
+             [ "$metadata_descriptor_media_type" != "$index_media_type" ]; then
+            echo "Build metadata descriptor does not match the root OCI index" >&2
             exit 1
           fi
+          verify_blob_descriptor "$index_digest" "$index_size" "$index_media_type" \
+            "application/vnd.oci.image.index.v1+json" "root OCI index"
+          index_path="$oci_dir/blobs/sha256/${index_digest#sha256:}"
+          jq -e '
+            .schemaVersion == 2 and
+            .mediaType == "application/vnd.oci.image.index.v1+json" and
+            (.manifests | type == "array" and length > 0)
+          ' "$index_path" >/dev/null
+          manifest_digest="$(jq -er '
+            [.manifests[] | select(
+              .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+              .platform.os == "linux" and .platform.architecture == "amd64"
+            )] | if length == 1 then .[0].digest else error("expected one linux/amd64 image") end
+          ' "$index_path")"
 
-          while read -r descriptor_digest; do
-            descriptor_path="$oci_dir/blobs/sha256/${descriptor_digest#sha256:}"
-            descriptor_actual="sha256:$(sha256sum "$descriptor_path" | cut -d ' ' -f 1)"
-            if [ "$descriptor_actual" != "$descriptor_digest" ]; then
-              echo "OCI index descriptor digest mismatch: $descriptor_digest" >&2
-              exit 1
-            fi
-          done < <(jq -er '.manifests[].digest' "$oci_dir/index.json")
+          index_descriptors="$(jq -er '
+            .manifests[] | [.digest, (.size | tostring), .mediaType] | @tsv
+          ' "$index_path")"
+          while IFS=$'\t' read -r descriptor_digest descriptor_size descriptor_media_type; do
+            verify_blob_descriptor "$descriptor_digest" "$descriptor_size" "$descriptor_media_type" \
+              "application/vnd.oci.image.manifest.v1+json" "OCI index manifest"
+          done <<< "$index_descriptors"
 
           manifest_path="$oci_dir/blobs/sha256/${manifest_digest#sha256:}"
-          manifest_actual="sha256:$(sha256sum "$manifest_path" | cut -d ' ' -f 1)"
-          if [ "$manifest_actual" != "$manifest_digest" ]; then
-            echo "OCI manifest blob digest mismatch" >&2
+          manifest_size="$(stat -c '%s' "$manifest_path")"
+          jq -e '
+            .schemaVersion == 2 and
+            .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+            (.layers | type == "array" and length > 0)
+          ' "$manifest_path" >/dev/null
+          config_descriptor="$(jq -er '[.config.digest, (.config.size | tostring), .config.mediaType] | @tsv' "$manifest_path")"
+          IFS=$'\t' read -r config_digest config_size config_media_type <<< "$config_descriptor"
+          verify_blob_descriptor "$config_digest" "$config_size" "$config_media_type" \
+            "application/vnd.oci.image.config.v1+json" "OCI image config"
+          config_path="$oci_dir/blobs/sha256/${config_digest#sha256:}"
+          if [ -n "$metadata_config_digest" ] && [ "$metadata_config_digest" != "$config_digest" ]; then
+            echo "Build metadata config digest does not match the OCI image config" >&2
             exit 1
           fi
 
-          config_digest="$(jq -er '.config.digest' "$manifest_path")"
-          if ! [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Invalid OCI config digest: $config_digest" >&2
-            exit 1
-          fi
-          config_path="$oci_dir/blobs/sha256/${config_digest#sha256:}"
-          config_actual="sha256:$(sha256sum "$config_path" | cut -d ' ' -f 1)"
-          if [ "$config_actual" != "$config_digest" ]; then
-            echo "OCI config blob digest mismatch" >&2
-            exit 1
-          fi
+          image_layer_descriptors="$(jq -er '
+            .layers[] | [.digest, (.size | tostring), .mediaType] | @tsv
+          ' "$manifest_path")"
+          while IFS=$'\t' read -r layer_digest layer_size layer_media_type; do
+            if ! [[ "$layer_media_type" =~ ^application/vnd\.oci\.image\.layer\.(nondistributable\.)?v1\.tar(\+gzip|\+zstd)?$ ]]; then
+              echo "Invalid OCI image layer mediaType: $layer_media_type" >&2
+              exit 1
+            fi
+            verify_blob_descriptor "$layer_digest" "$layer_size" "$layer_media_type" \
+              "$layer_media_type" "OCI image layer"
+          done <<< "$image_layer_descriptors"
 
           : > release-candidate-evidence/attestation-predicates.txt
+          attestation_digests="$(jq -er \
+            --arg digest "$manifest_digest" \
+            '.manifests[] | select(
+              .annotations["vnd.docker.reference.digest"] == $digest and
+              .annotations["vnd.docker.reference.type"] == "attestation-manifest" and
+              .platform.os == "unknown" and .platform.architecture == "unknown"
+            ) | .digest' \
+            "$index_path")"
+          index_manifest_count="$(jq -er '.manifests | length' "$index_path")"
+          attestation_count="$(printf '%s\n' "$attestation_digests" | wc -l)"
+          if [ "$index_manifest_count" -ne "$((attestation_count + 1))" ]; then
+            echo "Root OCI index contains an unclassified manifest descriptor" >&2
+            exit 1
+          fi
           while read -r attestation_digest; do
             attestation_manifest="$oci_dir/blobs/sha256/${attestation_digest#sha256:}"
-            while read -r layer_digest; do
+            jq -e --arg digest "$manifest_digest" --argjson size "$manifest_size" '
+              .schemaVersion == 2 and
+              .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+              .artifactType == "application/vnd.docker.attestation.manifest.v1+json" and
+              .subject.digest == $digest and
+              .subject.size == $size and
+              .subject.mediaType == "application/vnd.oci.image.manifest.v1+json" and
+              (.layers | type == "array" and length > 0)
+            ' "$attestation_manifest" >/dev/null
+            attestation_config_descriptor="$(jq -er '
+              [.config.digest, (.config.size | tostring), .config.mediaType] | @tsv
+            ' "$attestation_manifest")"
+            IFS=$'\t' read -r attestation_config_digest attestation_config_size attestation_config_media_type \
+              <<< "$attestation_config_descriptor"
+            verify_blob_descriptor "$attestation_config_digest" "$attestation_config_size" \
+              "$attestation_config_media_type" "application/vnd.oci.empty.v1+json" "OCI attestation config"
+            attestation_layer_descriptors="$(jq -er '
+              .layers[] | [.digest, (.size | tostring), .mediaType] | @tsv
+            ' "$attestation_manifest")"
+            while IFS=$'\t' read -r layer_digest layer_size layer_media_type; do
+              verify_blob_descriptor "$layer_digest" "$layer_size" "$layer_media_type" \
+                "application/vnd.in-toto+json" "OCI attestation layer"
               layer_path="$oci_dir/blobs/sha256/${layer_digest#sha256:}"
-              layer_actual="sha256:$(sha256sum "$layer_path" | cut -d ' ' -f 1)"
-              if [ "$layer_actual" != "$layer_digest" ]; then
-                echo "OCI attestation layer digest mismatch" >&2
-                exit 1
-              fi
               jq -er \
                 --arg subject "${manifest_digest#sha256:}" \
                 'select(.subject | any(.digest.sha256 == $subject)) | .predicateType' \
                 "$layer_path" >> release-candidate-evidence/attestation-predicates.txt
-            done < <(jq -er '.layers[] | select(.mediaType == "application/vnd.in-toto+json") | .digest' "$attestation_manifest")
-          done < <(jq -er \
-            --arg digest "$manifest_digest" \
-            '.manifests[] | select(.annotations["vnd.docker.reference.digest"] == $digest) | .digest' \
-            "$oci_dir/index.json")
+            done <<< "$attestation_layer_descriptors"
+          done <<< "$attestation_digests"
           grep -Fxq 'https://spdx.dev/Document' release-candidate-evidence/attestation-predicates.txt
           grep -Eq '^https://slsa.dev/provenance/' release-candidate-evidence/attestation-predicates.txt
 
@@ -497,9 +586,12 @@ jobs:
             echo "platform=linux/amd64"
             echo "version=$version"
             echo "commit_date=$commit_date"
+            echo "layout_index_digest=$layout_index_digest"
             echo "index_digest=$index_digest"
             echo "manifest_digest=$manifest_digest"
             echo "metadata_digest=$metadata_digest"
+            echo "metadata_descriptor_media_type=$metadata_descriptor_media_type"
+            echo "metadata_descriptor_size=$metadata_descriptor_size"
             echo "config_digest=$config_digest"
             echo "archive_sha256=$(sha256sum "$archive" | cut -d ' ' -f 1)"
             echo "binary_sha256=$(sha256sum sub2api | cut -d ' ' -f 1)"

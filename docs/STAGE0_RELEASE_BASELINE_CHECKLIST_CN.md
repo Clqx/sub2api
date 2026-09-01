@@ -16,6 +16,10 @@
 下列能力文件及其实际依赖必须由 git ls-files --error-unmatch 验证为已跟踪：
 
 - .github/workflows/backend-ci.yml
+- .github/workflows/security-scan.yml
+- .goreleaser.yaml
+- .goreleaser.simple.yaml
+- backend/go.sum
 - backend/migrations/226_trusted_pool_permanent_rotation.sql
 - backend/migrations/227_trusted_pool_permanent_rotation_encrypted_staging.sql
 - backend/migrations/README.md
@@ -32,6 +36,7 @@
 - backend/internal/config/trusted_pool_permanent_rotation_test.go
 - backend/internal/service/trusted_pool_integration.go
 - backend/internal/service/trusted_pool_signing_config_test.go
+- backend/internal/service/openai_gateway_count_tokens_test.go
 - backend/internal/service/wire.go
 - backend/cmd/server/main.go
 - backend/cmd/server/setup_server_test.go
@@ -47,10 +52,15 @@
 - deploy/docker-compose.dev.yml
 - deploy/docker-compose.local.yml
 - deploy/docker-compose.standalone.yml
+- trusted-pool-platform/migrations/005_phase2c_assignment_persistence.sql
 - trusted-pool-platform/migrations/008_phase2f_recovery_governance.sql
 - trusted-pool-platform/migrations/009_phase2g_permanent_finalization.sql
 - trusted-pool-platform/migrations/010_phase2h_offline_verification.sql
 - trusted-pool-platform/migrations/011_phase2h_recovery_protocol_compatibility.sql
+- trusted-pool-platform/migrations/012_phase2i_assignment_aggregate_repair.sql
+- trusted-pool-platform/backend/internal/persistence/postgres/migrator.go
+- trusted-pool-platform/backend/internal/persistence/postgres/migrator_test.go
+- trusted-pool-platform/backend/internal/persistence/postgres/store_recovery_evidence_test.go
 - trusted-pool-platform/backend/internal/integration/sub2api/client.go
 - trusted-pool-platform/backend/internal/integration/sub2api/client_test.go
 - trusted-pool-platform/backend/internal/persistence/postgres/store_recovery.go
@@ -121,6 +131,9 @@
     go test ./cmd/trusted-pool-client -count=1
     go vet ./internal/repository ./internal/config ./internal/service ./cmd/trusted-pool-client
 
+上述命令默认不访问真实 OpenAI；只有显式设置 `SUB2API_LIVE_OPENAI_TEST=1` 且提供
+`OPENAI_API_KEY` 时才运行 token 估算对比。该 live 对比不属于阶段 0 离线封板门禁。
+
 真实 PostgreSQL 门禁由 .github/workflows/backend-ci.yml 的 postgresql-gates job 执行。
 必须显式提供并实际消费以下三个 DSN：
 
@@ -145,8 +158,9 @@ CI 必须保留 skip 拦截，并逐项确认 migration、秘密存储、权限�
 
 同一 workflow 的 `candidate-oci-evidence` 只在所有核心测试、真实 PostgreSQL、前端、lint 与
 Compose 门禁通过后，按正式发布使用的 `Dockerfile.goreleaser` 构建 `linux/amd64` OCI 候选包。
-它不登录或推送镜像仓库，并会生成 SPDX SBOM 与 SLSA provenance，重算 manifest、config、attestation
-和 archive SHA-256，验证镜像 revision label 与候选 commit 精确一致，再归档 OCI 和映射文件。
+它不登录或推送镜像仓库，并会生成 SPDX SBOM 与 SLSA provenance，验证 layout index 到根 index 的
+descriptor 链，重算 root index、manifest、config、普通镜像层、attestation manifest/config/layer 和
+archive SHA-256，验证镜像 revision label 与候选 commit 精确一致，再归档 OCI 和映射文件。
 该工件是发布候选证据，不是正式 tag 镜像或生产发布成功声明。
 
 ## 6. 必须归档的证据

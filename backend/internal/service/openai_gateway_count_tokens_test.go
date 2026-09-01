@@ -307,6 +307,9 @@ func TestOpenAIInputTokensEncodingForModel(t *testing.T) {
 }
 
 func TestEstimateOpenAIInputTokens_CompareWithOpenAIAPI(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("SUB2API_LIVE_OPENAI_TEST")) != "1" {
+		t.Skip("SUB2API_LIVE_OPENAI_TEST=1 is required for live OpenAI comparison")
+	}
 	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
 	if apiKey == "" {
 		t.Skip("OPENAI_API_KEY not set")

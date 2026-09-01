@@ -54,7 +54,7 @@
 | 模块 | 最近通过的验证 | 尚未覆盖的关键门禁 |
 |---|---|---|
 | Sub2API 后端 | 单元测试与 `go vet` 通过；在 WSL 隔离 PostgreSQL 16.15 上，迁移 226/227、密文暂存 schema/原始行、回放、篡改拒绝和激活清理完整门禁通过 | live OpenAI 对比不属于本次离线封板；本地 JSON 是修复候选验证，仍需由提交后 CI 工件绑定最终 commit |
-| 可信资源池后端 | `go test ./...` 与 `go vet ./...` 通过；隔离 PostgreSQL 16.15 上 persistence 包 113 个测试事件通过，仅两个明确子进程 helper 跳过；`govulncheck` 无发现 | 仍缺最终 commit 对应的远端工件；生产 provider、真实网关/KMS 全链路和更广多副本演练未完成 |
+| 可信资源池后端 | `go test ./...` 与 `go vet ./...` 通过；隔离 PostgreSQL 16.15 上 persistence 包 114 个测试事件通过，仅两个明确子进程 helper 跳过；`govulncheck` 无发现 | 仍缺最终 commit 对应的远端工件；生产 provider、真实网关/KMS 全链路和更广多副本演练未完成 |
 | Monitor 后端 | `pytest -q`：160 个测试通过 | 代表版本兼容性、性能基线、发布镜像安全和灾备演练 |
 | Monitor 前端 | 25 个测试通过，生产构建通过 | 完整发布环境浏览器回归和可访问性验收 |
 | 独立代码审查 | 本轮确认的 commit/suspend 竞态、PREPARED 明文路径、Compose 覆盖、setup 启动门禁、CI 假绿和文档状态缺口已在受控提交中修复 | 仍需在真实 PostgreSQL 工件、发布候选镜像和真实外部系统上复审 |
@@ -69,9 +69,9 @@
 3. **真实 PostgreSQL CI 定义已关闭阻断。** 新 job 使用 PostgreSQL 16 和两个隔离库，实际消费 `SUB2API_TEST_POSTGRES_DSN`、`PHASE2H_TEST_POSTGRES_DSN`、`PHASE2H_TEST_POSTGRES_ADMIN_DSN`；除两个明确子进程 helper 外，任何 SKIP 都会失败，并归档版本、命令和 JSON 结果。
 4. **中断恢复决策已关闭设计空白。** 当前采用 fail-forward only，不增加无法安全证明的 abort；状态矩阵、证据留存、签名键故障和真实进程退出演练标准已经进入运维手册。
 5. **commit 回执丢失后的 suspend 竞态已关闭。** 服务在检查 Seat 当前 active 状态前先按完整请求绑定查询历史 commit；`committed` 和 `retiring` 可返回原回执且不重新启用资源，`superseded` 或 fingerprint 漂移稳定失败关闭。
-6. **启动和 CI 门禁已加固。** manual first-run setup server 在监听前执行永久轮换配置预检；五套 Sub2API Compose 不再用 `false` 覆盖配置文件；PostgreSQL job 除拒绝 skip 外，还归档秘密存储静态结果，并要求十二个真实库哨兵 pass 事件逐项出现。
+6. **启动和 CI 门禁已加固。** manual first-run setup server 在监听前执行永久轮换配置预检；五套 Sub2API Compose 不再用 `false` 覆盖配置文件；PostgreSQL job 除拒绝 skip 外，还归档秘密存储静态结果，并要求十三个真实库哨兵 pass 事件逐项出现。
 7. **PREPARED 明文路径已在代码中关闭。** Forward migration 227 对非空 legacy 明文失败关闭并删除旧列；PREPARED 使用独立 envelope、AAD 和 TTL，activate 清除可解密材料。静态与真实 PostgreSQL 子门禁已经接入，是否可发布仍取决于受控 commit 上的 CI 首跑证据。
-8. **历史迁移兼容缺口已关闭。** 平台 migration 005 的 PL/pgSQL `CASE` 比较已改为 PostgreSQL 16 可解析的显式表达式；迁移 runner 只为该文件接受已发布旧 checksum，空库记录修复后 checksum，其他版本或任意漂移仍失败关闭。Sub2API migration 226 同步把 Seat 状态列扩至 64 字符，避免激活中间态超过旧 20 字符上限。
+8. **历史迁移兼容缺口已关闭。** 平台 migration 005 的 PL/pgSQL `CASE` 比较已改为 PostgreSQL 16 可解析的显式表达式；迁移 runner 只为该文件接受已发布旧 checksum，migration 012 再以前向迁移重装修正函数，使老账本与空库收敛且不改写历史。其他版本或任意漂移仍失败关闭。Sub2API migration 226 同步把 Seat 状态列扩至 64 字符，避免激活中间态超过旧 20 字符上限。
 9. **发布候选证据已自动化。** 六套 Compose（含 root test profile）进入 CI；全部核心门禁通过后，CI 按正式发布使用的 `Dockerfile.goreleaser` 构建单架构 OCI，生成并验证 SPDX SBOM、SLSA provenance、manifest/config/blob 哈希和 commit revision 标签。该工件不会自动推送或提升为正式 release。
 10. **依赖扫描覆盖已扩展。** 安全 workflow 现覆盖核心与可信资源池 Go 模块、Monitor Python 生产依赖、兑换平台 npm 生产依赖和主前端审计；扫描器版本已固定。镜像漏洞与仓库秘密扫描仍是独立未关闭项。
 
