@@ -510,6 +510,12 @@ func (s *stubAdminService) RecoverDuplicateAccount(ctx context.Context, id int64
 	return nil, nil
 }
 
+func (s *stubAdminService) SetMonitorCostRouting(ctx context.Context, id int64, priority int, control service.MonitorCostRoutingControl) (*service.Account, error) {
+	return &service.Account{ID: id, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Priority: priority,
+		Extra: map[string]any{service.MonitorCostRoutingExtraKey: map[string]any{"version": control.Version, "unhealthy_priority": control.UnhealthyPriority, "fallback": control.Fallback, "suppressed": control.Suppressed}},
+	}, nil
+}
+
 func (s *stubAdminService) UpdateAccount(ctx context.Context, id int64, input *service.UpdateAccountInput) (*service.Account, error) {
 	s.updateAccountCalls++
 	s.lastUpdateAccountInput = input

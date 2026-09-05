@@ -21,7 +21,7 @@ const timeRanges: Array<{value:ChannelQualityTimeRange;label:string}> = [
 
 const sortOptions: Array<{value:QualitySort;label:string}> = [
   {value:'default',label:'默认'},
-  {value:'multiplier',label:'倍率'},
+  {value:'multiplier',label:'分组计费倍率'},
   {value:'speed',label:'用户速度'},
   {value:'cache',label:'缓存命中'},
   {value:'availability',label:'可用率'},
@@ -45,10 +45,11 @@ export function ChannelsPage() {
     refetchInterval:60_000,
   })
   const rows=useMemo(()=>sortRows(query.data?.items??[],sort),[query.data?.items,sort])
+  const stale=query.data?.coverage.freshness==='stale'
 
   return <>
     <div className="page-title">
-      <div><h1>渠道质量</h1><p>基于真实用户流量的缓存、可用性与首字速度</p></div>
+      <div><h1>渠道质量</h1><p>按平台 / 分组汇总真实用户质量；账号上游成本单独展示，不代表单账号质量</p></div>
       <div className="page-actions">
         <label>目标<select value={targetId} onChange={event=>setTargetId(event.target.value)}>{targets.data?.items.map(target=><option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
         <button className="icon-button" title="刷新" aria-label="刷新渠道质量" disabled={!targetId||query.isFetching} onClick={()=>query.refetch()}><RefreshCw/></button>
@@ -72,11 +73,12 @@ export function ChannelsPage() {
 
     {targets.isError?<ErrorState error={targets.error}/>:!targets.isLoading&&!targets.data?.items.length?<Empty title="没有监控目标" detail="先添加并探测一个 Sub2API 目标"/>:query.isError?<ErrorState error={query.error}/>:query.isLoading?<div className="inline-loading">正在读取渠道质量…</div>:<>
       {query.data&&!query.data.coverage.coverage_complete&&<div className="coverage-warning"><Activity size={16}/><span>当前时间窗口的历史数据仍在补齐</span></div>}
+      {stale&&<div className="coverage-warning" role="alert"><Clock3 size={16}/><span>质量数据已过期（聚合延迟 {query.data?.coverage.aggregation_lag_seconds} 秒）；以下仅为历史指标，当前可用性未知</span></div>}
       {query.data&&Object.keys(query.data.failures).length>0&&<div className="coverage-warning"><Activity size={16}/><span>分组倍率暂不可用，质量指标仍保持更新</span></div>}
       <div className="table-wrap channel-quality-table">
         <table>
-          <thead><tr><th>分组 / 渠道</th><th>倍率</th><th>状态</th><th>缓存命中率</th><th>可用率</th><th>用户首字速度</th><th>窗口趋势</th><th>模型检测</th></tr></thead>
-          <tbody>{rows.map((row,index)=><QualityRow key={`${row.platform}:${row.group_id??'none'}:${index}`} row={row}/>)}</tbody>
+          <thead><tr><th>平台 / 分组</th><th>分组计费倍率</th><th>账号上游成本倍率</th><th>状态</th><th>缓存命中率</th><th>可用率</th><th>用户首字速度</th><th>窗口趋势</th><th>模型检测</th></tr></thead>
+          <tbody>{rows.map((row,index)=><QualityRow key={`${row.platform}:${row.group_id??'none'}:${index}`} row={row} stale={stale}/>)}</tbody>
         </table>
         {!rows.length&&<Empty title="没有质量样本" detail="上游产生真实请求并完成被动聚合后会显示分组质量"/>}
       </div>
@@ -88,7 +90,8 @@ function ControlGroup({label,children}:{label:string;children:ReactNode}) {
   return <div className="control-group"><span>{label}</span>{children}</div>
 }
 
-function QualityRow({row}:{row:ChannelQualityRow}) {
+function QualityRow({row,stale}:{row:ChannelQualityRow;stale:boolean}) {
+  if(stale)row={...row,health:{...row.health,overall:'unknown',error_rate:'unknown',cache:'unknown',ttft:'unknown',score:null}}
   const cacheKnown=row.metrics.cache_rate_denominator>0
   const availabilityKnown=row.metrics.request_count>0
   const speed=row.metrics.ttft.p50_ms
@@ -96,7 +99,8 @@ function QualityRow({row}:{row:ChannelQualityRow}) {
   return <tr>
     <td><strong>{row.group_name||'未分组'}</strong><small>{row.platform} · {formatNumber(row.metrics.request_count)} 个用户请求</small></td>
     <td className="numeric-value">{formatMultiplier(row.rate_multiplier)}</td>
-    <td><Status value={!groupActive&&row.group_status!=='unknown'?'disabled':row.health.overall}/><small>{healthDetail(row.health)}</small></td>
+    <td>{row.accounts?.length?row.accounts.map(account=><small key={account.id} title={`采集于 ${account.observed_at} · ${account.cost_source??'无可信成本信号'}`}>{account.name} (#{account.external_account_id}) · {formatMultiplier(account.upstream_multiplier)}{account.freshness==='stale'?' · 已过期':''}</small>):<small>暂无账号成本数据</small>}<a href="/rates">查看账号倍率与路由</a></td>
+    <td><Status value={!groupActive&&row.group_status!=='unknown'?'disabled':row.health.overall}/><small>{stale?'数据已过期，当前状态未知':healthDetail(row.health)}</small></td>
     <td><QualityGauge value={cacheKnown?row.metrics.cache_rate:null} label={cacheKnown?formatPercent(row.metrics.cache_rate):'--'} state={row.health.cache}/><small>{cacheKnown?`${formatCompact(row.metrics.cache_rate_numerator)} / ${formatCompact(row.metrics.cache_rate_denominator)} Token`:'暂无可比较缓存 Token'}</small></td>
     <td><QualityGauge value={availabilityKnown?row.metrics.success_rate:null} label={availabilityKnown?formatPercent(row.metrics.success_rate):'--'} state={row.health.error_rate}/><small>{availabilityKnown?`${formatNumber(row.metrics.success_requests)} 成功 · ${formatNumber(row.metrics.error_requests)} 失败`:'暂无请求样本'}</small></td>
     <td><SpeedGauge value={speed} state={row.health.ttft}/><small>{speed==null?'暂无首 Token 样本':`P90 ${formatDuration(row.metrics.ttft.p90_ms)} · ${formatNumber(row.metrics.ttft.sample_count)} 样本`}</small></td>

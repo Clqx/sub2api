@@ -69,6 +69,7 @@ export interface UpstreamBillingProbeSnapshot {
 export interface UpstreamBillingSettings { enabled:boolean; interval_minutes:number }
 
 export interface CostRoutingPolicy {
+  maximum_multiplier?:number
   id?:string|null
   target_id:string
   enabled:boolean
@@ -245,6 +246,7 @@ export interface ChannelQualityRow {
   group_name?:string|null
   rate_multiplier?:number|null
   group_status:string
+  accounts?:Array<{id:string;external_account_id:string;name:string;upstream_multiplier:number|null;cost_source:string|null;observed_at:string;freshness:'fresh'|'stale'}>
   metrics:ChannelQualityMetrics
   health:ChannelQualityHealth
   buckets:ChannelQualityTrendPoint[]
@@ -262,6 +264,8 @@ export interface ChannelQualitySnapshot {
     data_through:string
     computed_at:string
     aggregation_lag_seconds:number
+    freshness?:'fresh'|'stale'
+    stale_after_seconds?:number
     coverage_complete:boolean
     bucket_seconds:number
   }

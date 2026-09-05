@@ -27,6 +27,7 @@ export function RatesPage() {
     "recommend",
   );
   const [priorityScale, setPriorityScale] = useState(1000);
+  const [maximumMultiplier, setMaximumMultiplier] = useState(1);
   const [unhealthyPriority, setUnhealthyPriority] = useState(100000);
   const [minimumPriority, setMinimumPriority] = useState(1);
   const [fallbackAccountIds, setFallbackAccountIds] = useState<string[]>([]);
@@ -64,6 +65,7 @@ export function RatesPage() {
       setRoutingEnabled(routingPolicy.data.enabled);
       setRoutingMode(routingPolicy.data.mode);
       setPriorityScale(routingPolicy.data.priority_scale);
+      setMaximumMultiplier(routingPolicy.data.maximum_multiplier ?? 1);
       setUnhealthyPriority(routingPolicy.data.unhealthy_priority);
       setMinimumPriority(routingPolicy.data.minimum_priority);
       setFallbackAccountIds(routingPolicy.data.fallback_account_ids ?? []);
@@ -103,6 +105,7 @@ export function RatesPage() {
         mode: routingMode,
         probe_interval_seconds: 30,
         priority_scale: priorityScale,
+        maximum_multiplier: maximumMultiplier,
         unhealthy_priority: unhealthyPriority,
         minimum_priority: minimumPriority,
         quality_bindings: routingPolicy.data?.quality_bindings ?? {},
@@ -160,8 +163,8 @@ export function RatesPage() {
       !routingEnabled ||
       window.confirm(
         routingMode === "execute"
-          ? "启用后将每分钟探测并自动修改上游账号优先级，确认继续？"
-          : "启用后将每分钟调用上游倍率探测接口，确认继续？",
+            ? `启用后将每 30 秒探测、修改账号优先级，并抑制倍率 ≥ ${maximumMultiplier} 的非兜底账号；完整历史会话可切换，状态续链可能需要重放。确认继续？`
+            : "启用后将每 30 秒调用上游倍率探测接口，确认继续？",
       );
     if (confirmed) saveRouting.mutate(routingEnabled);
   };
@@ -194,7 +197,7 @@ export function RatesPage() {
       <section className="content-band routing-settings">
         <div className="section-title">
           <div>
-            <h2>一分钟成本路由</h2>
+            <h2>成本路由（每 30 秒）</h2>
             <p>{routingPolicy.data?.enabled ? "运行中" : "未启用"}</p>
           </div>
           <Route size={19} />
@@ -242,7 +245,11 @@ export function RatesPage() {
                 />
               </label>
               <label>
-                故障优先级
+                倍率抑制阈值（≥）
+                <input type="number" min="0.000001" max="1000000" step="any" value={maximumMultiplier} onChange={event=>setMaximumMultiplier(Number(event.target.value))}/>
+              </label>
+              <label>
+                故障 / 抑制优先级
                 <input
                   type="number"
                   min="2"
@@ -281,6 +288,7 @@ export function RatesPage() {
               </button>
             </div>
             <RoutingSummary policy={routingPolicy.data} />
+            <p>抑制阈值约束新请求和会话续接；兜底仅在其他受管账号不可用时使用。停用策略会保留最后应用的抑制状态，不会恢复管理员手动停用的账号。</p>
             <FallbackAccounts
               accounts={rows}
               selected={fallbackAccountIds}

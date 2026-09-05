@@ -268,6 +268,7 @@ type PlatformDashboardStats struct {
 
 // UsageLogFilters represents filters for usage log queries
 type UsageLogFilters struct {
+	AfterID   int64 // Exclusive keyset cursor; only used by the admin log list.
 	UserID    int64
 	APIKeyID  int64
 	AccountID int64

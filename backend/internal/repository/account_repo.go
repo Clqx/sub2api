@@ -641,7 +641,8 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'upstream_billing_probe',
 			extra -> 'ollama_cloud_usage_session',
 			extra -> 'ollama_cloud_usage_auto_refresh',
-			extra -> 'ollama_cloud_usage_snapshot'
+			extra -> 'ollama_cloud_usage_snapshot',
+			extra -> 'monitor_cost_routing'
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -667,6 +668,7 @@ func lockAndMergeAccountProbeExtra(
 		currentOllamaSession         []byte
 		currentOllamaAutoRefresh     []byte
 		currentOllamaSnapshot        []byte
+		currentMonitorCostRouting    []byte
 	)
 	if err := rows.Scan(
 		&identityUnchanged,
@@ -678,6 +680,7 @@ func lockAndMergeAccountProbeExtra(
 		&currentOllamaSession,
 		&currentOllamaAutoRefresh,
 		&currentOllamaSnapshot,
+		&currentMonitorCostRouting,
 	); err != nil {
 		return nil, err
 	}
@@ -693,10 +696,16 @@ func lockAndMergeAccountProbeExtra(
 		service.OllamaCloudUsageSessionExtraKey,
 		service.OllamaCloudUsageAutoRefreshExtraKey,
 		service.OllamaCloudUsageSnapshotExtraKey,
+		service.MonitorCostRoutingExtraKey,
 	} {
 		delete(extra, key)
 	}
 	probeAccount := service.IsUpstreamBillingProbeIdentity(account.Platform, account.Type)
+	if control, ok, err := decodeAccountExtraJSON(currentMonitorCostRouting); err != nil {
+		return nil, err
+	} else if ok {
+		extra[service.MonitorCostRoutingExtraKey] = control
+	}
 	probeEnabled := false
 	probeEnabledPresent := false
 	if probeAccount {
@@ -3129,6 +3138,9 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	}
 	if rows > 0 && contextTx == nil {
 		shouldSync := false
+		if _, managed := updates.Extra[service.MonitorCostRoutingExtraKey]; managed {
+			shouldSync = true
+		}
 		if updates.Status != nil && (*updates.Status == service.StatusError || *updates.Status == service.StatusDisabled) {
 			shouldSync = true
 		}

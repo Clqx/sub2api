@@ -106,12 +106,13 @@ async def observe_actual_account_switches(
     target_id: str,
     target_name: str,
     routes: list[NormalizedUsageRoute],
-    eligible_account_ids: set[str],
+    eligible_account_ids: set[str] | None,
     actor: str,
+    initialize_only: bool = False,
 ) -> int:
     by_session: dict[str, list[NormalizedUsageRoute]] = defaultdict(list)
     for route in routes:
-        if route.external_account_id in eligible_account_ids:
+        if eligible_account_ids is None or route.external_account_id in eligible_account_ids:
             by_session[route.session_id].append(route)
     if not by_session:
         return 0
@@ -132,22 +133,21 @@ async def observe_actual_account_switches(
         session_routes.sort(key=lambda item: item.usage_id)
         state = state_by_session.get(session_id)
         if state is None:
-            latest = session_routes[-1]
-            session.add(
-                RoutingSessionState(
-                    target_id=target_id,
-                    session_id=session_id,
-                    external_account_id=latest.external_account_id,
-                    account_name=latest.account_name,
-                    last_usage_id=latest.usage_id,
-                    last_used_at=latest.used_at,
-                )
+            first = session_routes[0]
+            state = RoutingSessionState(
+                target_id=target_id,
+                session_id=session_id,
+                external_account_id=first.external_account_id,
+                account_name=first.account_name,
+                last_usage_id=first.usage_id,
+                last_used_at=first.used_at,
             )
-            continue
+            session.add(state)
 
-        newest = session_routes[-1]
-        if newest.usage_id < state.last_usage_id:
-            _update_state(state, newest, now)
+        if initialize_only:
+            latest = session_routes[-1]
+            if latest.usage_id > state.last_usage_id:
+                _update_state(state, latest, now)
             continue
 
         for route in session_routes:

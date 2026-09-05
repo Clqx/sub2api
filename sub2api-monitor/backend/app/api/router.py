@@ -273,18 +273,13 @@ async def delete_target_route(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    target = await session.scalar(
-        select(Target).where(Target.id == target_id).with_for_update()
-    )
+    target = await session.scalar(select(Target).where(Target.id == target_id).with_for_update())
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
     # Keep the lifecycle lock order consistent with policy updates. PostgreSQL
     # applies the same Policy locks later for the target's ON DELETE cascade.
     await session.scalars(
-        select(Policy.id)
-        .where(Policy.target_id == target_id)
-        .order_by(Policy.id)
-        .with_for_update()
+        select(Policy.id).where(Policy.target_id == target_id).order_by(Policy.id).with_for_update()
     )
     session.add(AuditEvent(actor=user.username, action="target.delete", target_id=target.id))
     await session.flush()
@@ -363,9 +358,7 @@ async def queue_collection(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> CollectionRun:
-    target = await session.scalar(
-        select(Target).where(Target.id == target_id).with_for_update()
-    )
+    target = await session.scalar(select(Target).where(Target.id == target_id).with_for_update())
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
     if target.monitoring_readiness != "ready":
@@ -639,11 +632,18 @@ async def update_cost_routing_policy(
     session: AsyncSession = Depends(get_session),
 ) -> CostRoutingPolicy:
     await required_target(session, target_id)
-    referenced_account_ids = set(payload.quality_bindings) | set(payload.fallback_account_ids)
+    policy = await session.scalar(
+        select(CostRoutingPolicy).where(CostRoutingPolicy.target_id == target_id)
+    )
+    # Model detection is paused. Its stored bindings are read-only, and stale
+    # references must not block unrelated routing edits (including disabling).
+    if "quality_bindings" in payload.model_fields_set and payload.quality_bindings != (
+        policy.quality_bindings if policy else {}
+    ):
+        reject_paused_model_detection_mutation()
+    referenced_account_ids = set(payload.fallback_account_ids)
     accounts: list[AccountCurrent] = []
-    unknown_quality_accounts: list[str] = []
     unknown_fallback_accounts: list[str] = []
-    unknown_monitors: list[str] = []
     if referenced_account_ids:
         accounts = list(
             await session.scalars(
@@ -659,31 +659,8 @@ async def update_cost_routing_policy(
             if account.platform.casefold() == "openai"
             and account.account_type.casefold() == "apikey"
         }
-        unknown_quality_accounts = sorted(set(payload.quality_bindings) - eligible_account_ids)
-        unknown_fallback_accounts = sorted(
-            set(payload.fallback_account_ids) - eligible_account_ids
-        )
-    if payload.quality_bindings:
-        bound_monitor_ids = {
-            monitor_id
-            for monitor_ids in payload.quality_bindings.values()
-            for monitor_id in monitor_ids
-        }
-        monitors = list(
-            await session.scalars(
-                select(ChannelMonitorCurrent).where(
-                    ChannelMonitorCurrent.target_id == target_id,
-                    ChannelMonitorCurrent.external_monitor_id.in_(bound_monitor_ids),
-                )
-            )
-        )
-        eligible_monitor_ids = {
-            monitor.external_monitor_id
-            for monitor in monitors
-            if monitor.provider.casefold() == "openai"
-        }
-        unknown_monitors = sorted(bound_monitor_ids - eligible_monitor_ids)
-    if unknown_quality_accounts or unknown_fallback_accounts or unknown_monitors:
+        unknown_fallback_accounts = sorted(set(payload.fallback_account_ids) - eligible_account_ids)
+    if unknown_fallback_accounts:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {
@@ -691,14 +668,9 @@ async def update_cost_routing_policy(
                     "routing controls must reference this target's OpenAI API-key "
                     "accounts and OpenAI channel monitors"
                 ),
-                "account_ids": unknown_quality_accounts,
                 "fallback_account_ids": unknown_fallback_accounts,
-                "monitor_ids": unknown_monitors,
             },
         )
-    policy = await session.scalar(
-        select(CostRoutingPolicy).where(CostRoutingPolicy.target_id == target_id)
-    )
     if policy is None:
         policy = CostRoutingPolicy(target_id=target_id)
         session.add(policy)
@@ -718,7 +690,9 @@ async def update_cost_routing_policy(
             payload.minimum_priority,
             min(int(baseline), payload.unhealthy_priority - 1),
         )
-    for key, value in payload.model_dump(exclude={"confirm_side_effects"}).items():
+    for key, value in payload.model_dump(
+        exclude={"confirm_side_effects", "quality_bindings"}
+    ).items():
         setattr(policy, key, value)
     policy.fallback_priorities = fallback_priorities
     policy.next_run_at = datetime.now(timezone.utc) if policy.enabled else None
@@ -842,6 +816,47 @@ async def target_channel_quality(
         raise _remote_http_error(exc) from exc
     snapshot["target_id"] = target.id
     snapshot["target_name"] = target.name
+    # Quality is group-aggregated; account costs are separate, timestamped facts.
+    from app.services.cost_routing import routing_rate_multiplier
+
+    accounts = list(
+        await session.scalars(
+            select(AccountCurrent)
+            .where(AccountCurrent.target_id == target.id)
+            .order_by(AccountCurrent.external_account_id)
+        )
+    )
+    now = datetime.now(timezone.utc)
+    for item in snapshot.get("items", []):
+        item["accounts"] = []
+        for account in accounts:
+            if account.platform != item["platform"]:
+                continue
+            group_id = item.get("group_id")
+            if (group_id is None and account.group_ids) or (
+                group_id is not None and str(group_id) not in account.group_ids
+            ):
+                continue
+            observed_at = account.observed_at
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            multiplier, source = routing_rate_multiplier(
+                account.upstream_billing_probe, account.rate_multiplier
+            )
+            fresh = (now - observed_at).total_seconds() <= max(
+                180, target.collection_interval_seconds * 2
+            )
+            item["accounts"].append(
+                {
+                    "id": account.id,
+                    "external_account_id": account.external_account_id,
+                    "name": account.name,
+                    "upstream_multiplier": multiplier if fresh else None,
+                    "cost_source": source if fresh else None,
+                    "observed_at": observed_at.isoformat(),
+                    "freshness": "fresh" if fresh else "stale",
+                }
+            )
     return snapshot
 
 
@@ -1206,9 +1221,7 @@ async def create_policy(
     locked_target_ids = await lock_ttft_target_rows(session, affected_target_ids)
     if payload.target_id is not None and payload.target_id not in locked_target_ids:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "target not found")
-    previous_policy_ids = await effective_policy_ids_for_targets(
-        session, affected_target_ids
-    )
+    previous_policy_ids = await effective_policy_ids_for_targets(session, affected_target_ids)
     policy = Policy(**payload.model_dump())
     session.add(policy)
     await session.flush()
@@ -1238,9 +1251,7 @@ async def update_policy_route(
     actor = user.username
     while True:
         policy_snapshot = await session.scalar(
-            select(Policy)
-            .where(Policy.id == policy_id)
-            .execution_options(populate_existing=True)
+            select(Policy).where(Policy.id == policy_id).execution_options(populate_existing=True)
         )
         if policy_snapshot is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "policy not found")
@@ -1269,9 +1280,7 @@ async def update_policy_route(
     previous_target_id = policy.target_id
     previous_enabled = policy.enabled
     previous_ttft_enabled = policy.ttft_enabled
-    previous_policy_ids = await effective_policy_ids_for_targets(
-        session, affected_target_ids
-    )
+    previous_policy_ids = await effective_policy_ids_for_targets(session, affected_target_ids)
     for key, value in payload.model_dump().items():
         setattr(policy, key, value)
     await session.flush()
@@ -1511,9 +1520,7 @@ async def update_channel(
     settings: Settings = Depends(get_settings),
 ) -> ChannelResponse:
     actor = user.username
-    requested_server_url = (
-        str(payload.server_url) if payload.server_url is not None else None
-    )
+    requested_server_url = str(payload.server_url) if payload.server_url is not None else None
     notification_url_validated = False
     while True:
         channel_snapshot = await session.scalar(
@@ -1551,10 +1558,9 @@ async def update_channel(
     new_server_url = (
         requested_server_url if requested_server_url is not None else channel.server_url
     )
-    credential_boundary_changed = (
-        new_kind != channel.kind
-        or notification_authority(new_server_url) != notification_authority(channel.server_url)
-    )
+    credential_boundary_changed = new_kind != channel.kind or notification_authority(
+        new_server_url
+    ) != notification_authority(channel.server_url)
     token_was_submitted = "token" in payload.model_fields_set
     effective_token_configured = (
         bool(payload.token)
@@ -1611,9 +1617,7 @@ async def update_channel(
         channel.signing_secret_ciphertext = (
             cipher.encrypt_text(payload.signing_secret) if payload.signing_secret else None
         )
-    session.add(
-        AuditEvent(actor=actor, action="notification.update", target_id=channel.target_id)
-    )
+    session.add(AuditEvent(actor=actor, action="notification.update", target_id=channel.target_id))
     await session.commit()
     await session.refresh(channel)
     return channel_response(channel)
@@ -1718,11 +1722,11 @@ async def system_status(
     )
     now = datetime.now(timezone.utc)
     heartbeat_at = _aware(heartbeat.last_seen_at) if heartbeat else None
-    stalled_loops = (
-        list(heartbeat.details.get("critical_loop_stalled") or []) if heartbeat else []
-    )
-    stale = bool(stalled_loops) or heartbeat_at is None or heartbeat_at < now - timedelta(
-        seconds=settings.worker_stale_seconds
+    stalled_loops = list(heartbeat.details.get("critical_loop_stalled") or []) if heartbeat else []
+    stale = (
+        bool(stalled_loops)
+        or heartbeat_at is None
+        or heartbeat_at < now - timedelta(seconds=settings.worker_stale_seconds)
     )
     pending = await session.scalar(
         select(func.count())

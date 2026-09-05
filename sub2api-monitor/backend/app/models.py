@@ -374,9 +374,7 @@ class Policy(Base):
     native_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     collection_failure_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     ttft_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    ttft_percentile: Mapped[str] = mapped_column(
-        String(10), default="p95", nullable=False
-    )
+    ttft_percentile: Mapped[str] = mapped_column(String(10), default="p95", nullable=False)
     ttft_min_samples: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     ttft_warning_ms: Mapped[int] = mapped_column(Integer, default=3000, nullable=False)
     ttft_critical_ms: Mapped[int] = mapped_column(Integer, default=6000, nullable=False)
@@ -592,15 +590,14 @@ class CostRoutingPolicy(Base):
     mode: Mapped[str] = mapped_column(String(20), default="recommend", nullable=False)
     probe_interval_seconds: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     priority_scale: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    maximum_multiplier: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     unhealthy_priority: Mapped[int] = mapped_column(Integer, default=100000, nullable=False)
     minimum_priority: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     quality_bindings: Mapped[dict[str, list[str]]] = mapped_column(
         JSON, default=dict, nullable=False
     )
     fallback_account_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    fallback_priorities: Mapped[dict[str, int]] = mapped_column(
-        JSON, default=dict, nullable=False
-    )
+    fallback_priorities: Mapped[dict[str, int]] = mapped_column(JSON, default=dict, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(500))
@@ -657,15 +654,29 @@ class RoutingSessionState(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    target_id: Mapped[str] = mapped_column(
-        ForeignKey("targets.id", ondelete="CASCADE"), index=True
-    )
+    target_id: Mapped[str] = mapped_column(ForeignKey("targets.id", ondelete="CASCADE"), index=True)
     session_id: Mapped[str] = mapped_column(String(160), nullable=False)
     external_account_id: Mapped[str] = mapped_column(String(160), nullable=False)
     account_name: Mapped[str] = mapped_column(String(160), nullable=False)
     last_usage_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class RoutingUsageCursor(Base):
+    __tablename__ = "routing_usage_cursors"
+
+    target_id: Mapped[str] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_usage_id: Mapped[int | None] = mapped_column(BigInteger)
+    lease_owner: Mapped[str | None] = mapped_column(String(100))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

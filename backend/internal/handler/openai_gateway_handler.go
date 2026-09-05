@@ -1956,6 +1956,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if errors.Is(err, service.ErrMonitorCostReplayRequired) {
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "cost policy changed; reconnect and resend full history without previous_response_id")
+				return
+			}
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(wsConn, lastFailoverErr)
 			} else {
@@ -2103,6 +2107,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			TurnStarted:             recordTurnStart,
 			BeforeRequest: func(turn int, payload []byte, originalModel string) error {
 				c.Set(securityAuditWSTurnContextKey, turn)
+				// Includes passthrough ingress, which does not invoke BeforeTurn.
+				if err := h.gatewayService.CheckMonitorCostContinuation(ctx, account); err != nil {
+					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "cost policy changed; reconnect and resend full history without previous_response_id", err)
+				}
 				if turn == 1 {
 					return nil
 				}
@@ -2139,6 +2147,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return mapping.MappedModel, nil
 			},
 			BeforeTurn: func(turn int) error {
+				if turn == 1 {
+					if err := h.gatewayService.CheckMonitorCostContinuation(ctx, account); err != nil {
+						return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "cost policy changed; reconnect and resend full history without previous_response_id", err)
+					}
+				}
 				// turn==1 的会话屏蔽已由握手层检查覆盖；连接内 flag 只拦截后续 turn。
 				if cyberBlockedThisConn {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)

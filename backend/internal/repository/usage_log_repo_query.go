@@ -99,6 +99,10 @@ type UsageLogFilters = usagestats.UsageLogFilters
 func (r *usageLogRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, filters UsageLogFilters) ([]service.UsageLog, *pagination.PaginationResult, error) {
 	conditions := make([]string, 0, 9)
 	args := make([]any, 0, 9)
+	if filters.AfterID > 0 {
+		conditions = append(conditions, fmt.Sprintf("id > $%d", len(args)+1))
+		args = append(args, filters.AfterID)
+	}
 
 	if filters.UserID > 0 {
 		conditions = append(conditions, fmt.Sprintf("user_id = $%d", len(args)+1))

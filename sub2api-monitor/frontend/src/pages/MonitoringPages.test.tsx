@@ -46,7 +46,7 @@ describe('monitoring expansion pages', () => {
     renderPage(<RatesPage />)
 
     expect((await screen.findAllByText('Relay')).length).toBeGreaterThan(0)
-    expect(screen.getByText('一分钟成本路由')).toBeTruthy()
+    expect(screen.getByText('成本路由（每 30 秒）')).toBeTruthy()
     expect(screen.getByText('×0.2')).toBeTruthy()
     expect(screen.getAllByText('×0.16').length).toBeGreaterThan(0)
     expect(screen.getAllByText('200').length).toBeGreaterThan(0)
@@ -71,6 +71,7 @@ describe('monitoring expansion pages', () => {
       coverage:{requested_start:'2026-08-23T00:00:00Z',requested_end:'2026-08-23T06:00:00Z',coverage_start:'2026-08-23T00:00:00Z',data_through:'2026-08-23T05:59:00Z',computed_at:'2026-08-23T06:00:00Z',aggregation_lag_seconds:60,coverage_complete:true,bucket_seconds:3600},
       items:[{
         platform:'openai',group_id:7,group_name:'Low rate',rate_multiplier:.21,group_status:'active',
+        accounts:[{id:'raised',external_account_id:'12',name:'Raised account',upstream_multiplier:3,cost_source:'upstream_probe',observed_at:'2026-08-23T06:00:00Z',freshness:'fresh'}],
         metrics:{success_requests:99,error_requests:1,request_count:100,input_tokens:1000,output_tokens:500,cache_creation_tokens:0,cache_read_tokens:910,token_count:2410,rpm:.3,tpm:12,error_rate:.01,success_rate:.99,cache_rate:.91,cache_rate_numerator:910,cache_rate_denominator:1000,ttft:{sample_count:80,p50_ms:850,p90_ms:1200},duration:{sample_count:100,p50_ms:2600}},
         health:{overall:'healthy',error_rate:'healthy',ttft:'healthy',cache:'healthy',score:96,minimum_sample:20},
         buckets:[
@@ -85,6 +86,9 @@ describe('monitoring expansion pages', () => {
 
     expect(await screen.findByText('Low rate')).toBeTruthy()
     expect(screen.getByText('0.21x')).toBeTruthy()
+    expect(screen.getByRole('columnheader',{name:'分组计费倍率'})).toBeTruthy()
+    expect(screen.getByRole('columnheader',{name:'账号上游成本倍率'})).toBeTruthy()
+    expect(screen.getByText('Raised account (#12) · 3x')).toBeTruthy()
     expect(screen.getByText('91.0%')).toBeTruthy()
     expect(screen.getByText('99.0%')).toBeTruthy()
     expect(screen.getByText('850 ms')).toBeTruthy()
@@ -95,6 +99,13 @@ describe('monitoring expansion pages', () => {
     expect(activeRun).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button',{name:'24h'}))
     await vi.waitFor(()=>expect(quality.mock.calls.some(([,range])=>range==='24h')).toBe(true))
+    const snapshot=await api.targetChannelQuality('target-1','24h')
+    quality.mockResolvedValue({...snapshot,coverage:{...snapshot.coverage,freshness:'stale',aggregation_lag_seconds:7200}})
+    await vi.waitFor(()=>expect((screen.getByRole('button',{name:'刷新渠道质量'}) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button',{name:'刷新渠道质量'}))
+    expect((await screen.findByRole('alert')).textContent).toContain('当前可用性未知')
+    expect(screen.queryByText('健康评分 96')).toBeNull()
+    expect(screen.getByText('数据已过期，当前状态未知')).toBeTruthy()
   })
 
   it('renders native target operations and group capacity', async () => {

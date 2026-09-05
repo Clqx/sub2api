@@ -418,9 +418,7 @@ class ChannelCreate(BaseModel):
     target_id: str | None = None
     enabled: bool = True
     event_types: list[EventType] = Field(default_factory=default_event_types, min_length=1)
-    severities: list[EventSeverity] = Field(
-        default_factory=default_event_severities, min_length=1
-    )
+    severities: list[EventSeverity] = Field(default_factory=default_event_severities, min_length=1)
     token: str | None = Field(default=None, max_length=4096)
     signing_secret: str | None = Field(default=None, min_length=16, max_length=4096)
 
@@ -445,9 +443,7 @@ class ChannelUpdate(BaseModel):
     target_id: str | None = None
     enabled: bool | None = None
     event_types: list[EventType] | None = Field(default=None, min_length=1)
-    severities: list[EventSeverity] | None = Field(
-        default=None, min_length=1
-    )
+    severities: list[EventSeverity] | None = Field(default=None, min_length=1)
     token: str | None = Field(default=None, max_length=4096)
     signing_secret: str | None = Field(default=None, min_length=16, max_length=4096)
 
@@ -549,6 +545,7 @@ class CostRoutingPolicyUpdate(BaseModel):
     mode: Literal["recommend", "execute"] = "recommend"
     probe_interval_seconds: int = Field(default=30, ge=30, le=30)
     priority_scale: int = Field(default=1000, ge=1, le=1_000_000)
+    maximum_multiplier: float = Field(default=1.0, gt=0, le=1_000_000, allow_inf_nan=False)
     unhealthy_priority: int = Field(default=100000, ge=2, le=2_000_000_000)
     minimum_priority: int = Field(default=1, ge=0, le=1_999_999_999)
     quality_bindings: dict[str, list[str]] = Field(default_factory=dict)
@@ -577,7 +574,9 @@ class CostRoutingPolicyUpdate(BaseModel):
                 raise ValueError("quality_bindings contains an invalid monitor id")
             if monitor_ids:
                 normalized[account_id] = monitor_ids
-        self.quality_bindings = normalized
+        # Normalization must not turn an omitted read-only field into an
+        # explicitly supplied one (router uses model_fields_set for this).
+        object.__setattr__(self, "quality_bindings", normalized)
         fallback_ids = list(
             dict.fromkeys(item.strip() for item in self.fallback_account_ids if item.strip())
         )
@@ -594,6 +593,7 @@ class CostRoutingPolicyResponse(ORMModel):
     mode: str = "recommend"
     probe_interval_seconds: int = 30
     priority_scale: int = 1000
+    maximum_multiplier: float = 1.0
     unhealthy_priority: int = 100000
     minimum_priority: int = 1
     quality_bindings: dict[str, list[str]] = Field(default_factory=dict)

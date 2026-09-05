@@ -273,8 +273,7 @@ async def test_channel_quality_snapshot_uses_only_passive_metrics(
         "/api/v1/admin/groups/all",
     }
     assert all(
-        "models" not in request.url.path and "run" not in request.url.path
-        for request in seen
+        "models" not in request.url.path and "run" not in request.url.path for request in seen
     )
 
 
@@ -737,9 +736,7 @@ async def test_account_action_refresh_retry_preserves_idempotency_header_and_bod
                     "data": {"access_token": "new-access", "refresh_token": "new-refresh"},
                 },
             )
-        action_attempts = sum(
-            item.url.path.endswith("/clear-error") for item in requests
-        )
+        action_attempts = sum(item.url.path.endswith("/clear-error") for item in requests)
         if action_attempts == 1:
             return httpx.Response(401, json={"code": 401, "message": "expired"})
         return httpx.Response(200, json={"code": 0, "data": {"updated": True}})
@@ -1015,7 +1012,17 @@ async def test_account_priority_update_is_fixed_and_account_id_is_encoded(
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, json={"code": 0, "data": {"id": "relay/one"}})
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "priority": 840,
+                    "enforced": True,
+                    "control": {"version": 1, "unhealthy_priority": 100000, "fallback": False},
+                },
+            },
+        )
 
     connector = Sub2APIConnector(
         base_url="http://target.test",
@@ -1025,12 +1032,16 @@ async def test_account_priority_update_is_fixed_and_account_id_is_encoded(
         transport=httpx.MockTransport(handler),
     )
     async with connector:
-        result = await connector.set_account_priority("relay/one", 840)
+        result = await connector.set_account_priority(
+            "relay/one",
+            840,
+            control={"version": 1, "unhealthy_priority": 100000, "fallback": False},
+        )
 
     assert seen[0].method == "PUT"
-    assert seen[0].url.raw_path == b"/api/v1/admin/accounts/relay%2Fone"
-    assert json.loads(seen[0].content) == {"priority": 840}
-    assert result == {"http_status": 200, "priority": 840}
+    assert seen[0].url.raw_path == b"/api/v1/admin/accounts/relay%2Fone/monitor-cost-routing"
+    assert json.loads(seen[0].content) == {"priority": 840, "control": result["control"]}
+    assert result["priority"] == 840
 
 
 def test_upstream_probe_error_redacts_embedded_secrets() -> None:

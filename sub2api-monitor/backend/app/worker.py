@@ -26,6 +26,7 @@ from app.services.cost_routing import (
 )
 from app.services.maintenance import purge_expired_history
 from app.services.notifier import dispatch_due
+from app.services.routing_observer import claim_due_route_observations, observe_target_routes
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class Worker:
         logger.info("worker started", extra={"worker_id": self.worker_id})
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         cost_routing_task = asyncio.create_task(self._cost_routing_loop())
+        routing_observation_task = asyncio.create_task(self._routing_observation_loop())
         try:
             while True:
                 self._critical_loop_started_at["main"] = datetime.now(timezone.utc)
@@ -68,7 +70,10 @@ class Worker:
         finally:
             heartbeat_task.cancel()
             cost_routing_task.cancel()
-            await asyncio.gather(heartbeat_task, cost_routing_task, return_exceptions=True)
+            routing_observation_task.cancel()
+            await asyncio.gather(
+                heartbeat_task, cost_routing_task, routing_observation_task, return_exceptions=True
+            )
 
     async def tick(self) -> None:
         await self._recover_stale_runs()
@@ -132,6 +137,33 @@ class Worker:
                     self.cipher,
                     claim_owner=self.worker_id,
                 )
+
+    async def _routing_observation_loop(self) -> None:
+        while True:
+            self._critical_loop_started_at["routing_observation"] = datetime.now(timezone.utc)
+            try:
+                async with SessionFactory() as session:
+                    targets = await claim_due_route_observations(
+                        session, self.worker_id, self.settings.worker_concurrency
+                    )
+
+                async def observe(target_id: str) -> None:
+                    async with SessionFactory() as session:
+                        await observe_target_routes(
+                            session, target_id, self.settings, self.cipher, self.worker_id
+                        )
+
+                await asyncio.gather(*(observe(target_id) for target_id in targets))
+                async with SessionFactory() as session:
+                    await dispatch_due(
+                        session, self.settings, self.cipher, claim_owner=self.worker_id
+                    )
+            except Exception:
+                logger.exception("routing observation tick failed")
+            finally:
+                self._critical_loop_started_at.pop("routing_observation", None)
+                self._critical_loop_completed_at["routing_observation"] = datetime.now(timezone.utc)
+            await asyncio.sleep(min(self.settings.worker_poll_seconds, 2.0))
 
     async def _heartbeat_loop(self) -> None:
         while True:

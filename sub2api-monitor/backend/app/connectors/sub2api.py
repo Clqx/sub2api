@@ -38,6 +38,7 @@ NonNegativeInt = Annotated[int, Field(ge=0)]
 NonNegativeFloat = Annotated[float, Field(ge=0)]
 UnitRate = Annotated[float, Field(ge=0, le=1)]
 HealthState = Literal["healthy", "warning", "critical", "unknown"]
+CHANNEL_QUALITY_STALE_SECONDS = 180
 
 
 class _ChannelQualityPayload(BaseModel):
@@ -161,6 +162,7 @@ class NormalizedAccount:
     upstream_billing_rate_sync_enabled: bool = False
     upstream_billing_probe: dict[str, Any] | None = None
     quotas: list[QuotaWindow] = field(default_factory=list)
+    routing_control: dict[str, Any] | None = None
 
     def observation_payload(self) -> dict[str, Any]:
         return {
@@ -548,6 +550,46 @@ class Sub2APIConnector:
         routes.sort(key=lambda item: item.usage_id)
         return ProbeFact("supported", "healthy", "fresh"), routes
 
+    async def usage_route_page(
+        self, after_id: int | None
+    ) -> tuple[list[NormalizedUsageRoute], int, bool]:
+        """Read a stable keyset page; None initializes a current tail baseline."""
+        page_size = min(self.settings.connector_page_size, 100)
+        response = await self.request(
+            "GET",
+            "/api/v1/admin/usage",
+            params={
+                "page": 1,
+                "page_size": page_size,
+                "sort_by": "id",
+                "sort_order": "desc" if after_id is None else "asc",
+                "after_id": after_id or 0,
+            },
+        )
+        if response.status_code != 200:
+            raise ConnectorError("usage cursor read failed", status_code=response.status_code)
+        if response.headers.get("X-Usage-Cursor-Version") != "1":
+            raise ContractError(
+                "target does not support lossless usage cursor pagination; upgrade Sub2API"
+            )
+        data = _require_dict_data(response, "usage cursor")
+        items = data.get("items")
+        if not isinstance(items, list) or len(items) > page_size:
+            raise ContractError("invalid usage cursor page")
+        ids: list[int] = []
+        routes: list[NormalizedUsageRoute] = []
+        for raw in items:
+            usage_id = _as_int(raw.get("id")) if isinstance(raw, dict) else None
+            if usage_id is None or usage_id <= (after_id or 0):
+                raise ContractError("invalid usage cursor ID")
+            ids.append(usage_id)
+            route = normalize_usage_route(raw)
+            if route is not None:
+                routes.append(route)
+        if len(set(ids)) != len(ids) or ids != sorted(ids, reverse=after_id is None):
+            raise ContractError("usage cursor page is not strictly ordered")
+        return routes, max(ids, default=after_id or 0), len(items) == page_size
+
     async def account_usage_stats(
         self, external_account_id: str, *, days: int = 30
     ) -> dict[str, Any]:
@@ -659,19 +701,28 @@ class Sub2APIConnector:
             raise ContractError("invalid upstream billing batch probe response")
         return [item for item in raw if isinstance(item, dict)]
 
-    async def set_account_priority(self, external_account_id: str, priority: int) -> dict[str, Any]:
+    async def set_account_priority(
+        self, external_account_id: str, priority: int, *, control: dict[str, Any]
+    ) -> dict[str, Any]:
         account_id = quote(external_account_id, safe="")
         response = await self.request(
             "PUT",
-            f"/api/v1/admin/accounts/{account_id}",
-            json={"priority": priority},
+            f"/api/v1/admin/accounts/{account_id}/monitor-cost-routing",
+            json={"priority": priority, "control": control},
         )
         if response.status_code != 200:
             raise ConnectorError(
                 f"account priority update returned HTTP {response.status_code}",
                 status_code=response.status_code,
             )
-        return {"http_status": response.status_code, "priority": priority}
+        data = _require_dict_data(response, "monitor cost routing control")
+        if (
+            data.get("enforced") is not True
+            or data.get("priority") != priority
+            or data.get("control") != control
+        ):
+            raise ContractError("target did not confirm monitor cost routing enforcement")
+        return {"http_status": response.status_code, "priority": priority, "control": control}
 
     async def channel_monitors(self) -> tuple[ProbeFact, list[NormalizedChannelMonitor]]:
         output: list[NormalizedChannelMonitor] = []
@@ -897,15 +948,24 @@ class Sub2APIConnector:
             )
         matrix = _require_dict_data(matrix_response, "channel quality matrix")
         try:
-            normalized_matrix = _ChannelQualityMatrix.model_validate(matrix).model_dump(
-                mode="json"
-            )
+            normalized_matrix = _ChannelQualityMatrix.model_validate(matrix).model_dump(mode="json")
         except ValidationError as exc:
             raise ContractError(
                 "invalid channel quality matrix response",
                 status_code=matrix_response.status_code,
             ) from exc
         raw_items = normalized_matrix["items"]
+        coverage = normalized_matrix["coverage"]
+        now = datetime.now(timezone.utc)
+        timestamps = [_parse_datetime(coverage[key]) for key in ("data_through", "computed_at")]
+        lag = max(
+            coverage["aggregation_lag_seconds"],
+            *(max(0, int((now - stamp).total_seconds())) for stamp in timestamps if stamp),
+        )
+        stale = any(stamp is None for stamp in timestamps) or lag > CHANNEL_QUALITY_STALE_SECONDS
+        coverage["aggregation_lag_seconds"] = lag
+        coverage["freshness"] = "stale" if stale else "fresh"
+        coverage["stale_after_seconds"] = CHANNEL_QUALITY_STALE_SECONDS
 
         failures: dict[str, str] = {}
         inventory: dict[str, dict[str, Any]] = {}
@@ -939,6 +999,13 @@ class Sub2APIConnector:
             group = inventory.get(str(group_id)) if group_id is not None else None
             item["rate_multiplier"] = group.get("rate_multiplier") if group else None
             item["group_status"] = group.get("status") if group else "unknown"
+            if stale:
+                # Keep historical measurements, but never label them current health.
+                item["health"] = {
+                    **item["health"],
+                    **dict.fromkeys(("overall", "error_rate", "ttft", "cache"), "unknown"),
+                    "score": None,
+                }
             items.append(item)
 
         return {
@@ -1035,9 +1102,7 @@ class Sub2APIConnector:
                 "expected_updated_at": expected_state.get("source_updated_at"),
                 "expected_status": expected_state.get("status"),
                 "expected_schedulable": expected_state.get("schedulable"),
-                "expected_temp_unschedulable_until": expected_state.get(
-                    "temp_unschedulable_until"
-                ),
+                "expected_temp_unschedulable_until": expected_state.get("temp_unschedulable_until"),
             }
         kwargs: dict[str, Any] = {"json": conditions} if conditions else {}
         if action == "clear_temp_unschedulable":
@@ -1338,6 +1403,11 @@ def normalize_account(raw: dict[str, Any], now: datetime | None = None) -> Norma
         observed_at=observed_at,
         source_updated_at=_parse_datetime(raw.get("updated_at")),
         quotas=quotas,
+        routing_control=(
+            extra["monitor_cost_routing"]
+            if isinstance(extra.get("monitor_cost_routing"), dict)
+            else None
+        ),
     )
 
 

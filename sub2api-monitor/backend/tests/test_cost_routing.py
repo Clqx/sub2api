@@ -41,15 +41,18 @@ from app.services.policies import evaluate_upstream_rate_change, upstream_rate_m
 
 
 def test_cost_priority_uses_absolute_multiplier_bands() -> None:
-    assert upstream_rate_multiplier(
-        {
-            "status": "ok",
-            "data": {
-                "resolved_rate_multiplier": 0.2,
-                "effective_rate_multiplier": 0.8,
-            },
-        }
-    ) == 0.8
+    assert (
+        upstream_rate_multiplier(
+            {
+                "status": "ok",
+                "data": {
+                    "resolved_rate_multiplier": 0.2,
+                    "effective_rate_multiplier": 0.8,
+                },
+            }
+        )
+        == 0.8
+    )
     assert (
         desired_priority(
             0.16,
@@ -257,7 +260,7 @@ async def test_execute_mode_demotes_fault_and_applies_cost_increase(
                 },
             ]
 
-        async def set_account_priority(self, account_id: str, priority: int):
+        async def set_account_priority(self, account_id: str, priority: int, *, control):
             writes.append((account_id, priority))
             return {"http_status": 200, "priority": priority}
 
@@ -457,7 +460,7 @@ async def test_recommend_mode_chunks_probes_without_priority_writes(
             finally:
                 active_batches -= 1
 
-        async def set_account_priority(self, _account_id: str, _priority: int):
+        async def set_account_priority(self, _account_id: str, _priority: int, *, control):
             raise AssertionError("recommend mode must not write account priority")
 
     async def fake_connector(*_args: object):
@@ -573,7 +576,7 @@ async def test_recommend_mode_adapts_to_configured_account_multipliers(
                 for account_id in account_ids
             ]
 
-        async def set_account_priority(self, _account_id: str, _priority: int):
+        async def set_account_priority(self, _account_id: str, _priority: int, *, control):
             raise AssertionError("recommend mode must not write account priority")
 
     async def fake_connector(*_args: object):
@@ -595,9 +598,7 @@ async def test_recommend_mode_adapts_to_configured_account_multipliers(
     )
     assert [decision.observed_multiplier for decision in first_decisions] == [0.3, 0.5, 0.8]
     assert [decision.desired_priority for decision in first_decisions] == [30, 50, 80]
-    assert {decision.result["cost_source"] for decision in first_decisions} == {
-        "account_config"
-    }
+    assert {decision.result["cost_source"] for decision in first_decisions} == {"account_config"}
     assert "account_id=12 multiplier=0.3 cost_source=account_config" in caplog.text
     assert "account_count=3 change_count=0" in caplog.text
 
@@ -618,7 +619,7 @@ async def test_recommend_mode_adapts_to_configured_account_multipliers(
             .order_by(RoutingDecision.created_at)
         )
     )
-    assert [decision.desired_priority for decision in changed] == [30, 120]
+    assert [decision.desired_priority for decision in changed] == [30, 10000]
     assert changed[-1].reason == "cost_increase"
     assert "account_id=12 multiplier=1.2 cost_source=account_config" in caplog.text
 
@@ -786,7 +787,7 @@ async def test_execute_mode_guard_cancels_pending_priority_write(
                 }
             ]
 
-        async def set_account_priority(self, account_id: str, priority: int):
+        async def set_account_priority(self, account_id: str, priority: int, *, control):
             writes.append((account_id, priority))
             return {"priority": priority}
 
@@ -854,6 +855,14 @@ async def test_retired_model_quality_binding_does_not_demote_account(
             {
                 "id": "1",
                 "name": "Bound",
+                "extra": {
+                    "monitor_cost_routing": {
+                        "version": 1,
+                        "unhealthy_priority": 100000,
+                        "fallback": False,
+                        "suppressed": False,
+                    }
+                },
                 "platform": "openai",
                 "type": "apikey",
                 "status": "active",
@@ -889,7 +898,7 @@ async def test_retired_model_quality_binding_does_not_demote_account(
                 }
             ]
 
-        async def set_account_priority(self, account_id: str, priority: int):
+        async def set_account_priority(self, account_id: str, priority: int, *, control):
             writes.append((account_id, priority))
             return {"priority": priority}
 
@@ -955,7 +964,7 @@ async def test_inventory_timeout_fails_closed_without_priority_write(
             await asyncio.sleep(0.05)
             return ProbeFact("supported", "healthy", "fresh"), []
 
-        async def set_account_priority(self, account_id: str, priority: int):
+        async def set_account_priority(self, account_id: str, priority: int, *, control):
             writes.append((account_id, priority))
             return {"priority": priority}
 
@@ -1088,9 +1097,8 @@ async def test_quality_bindings_reject_foreign_or_ineligible_references(db_sessi
             db_session,
         )
 
-    assert error.value.status_code == 422
-    assert error.value.detail["account_ids"] == ["foreign", "oauth"]
-    assert error.value.detail["monitor_ids"] == ["foreign-monitor", "wrong-provider"]
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "model_detection_paused"
     assert await db_session.scalar(select(CostRoutingPolicy)) is None
 
     saved = await update_cost_routing_policy(
@@ -1181,7 +1189,7 @@ async def test_execute_intent_survives_worker_crash_before_outcome(
                 }
             ]
 
-        async def set_account_priority(self, _account_id: str, _priority: int):
+        async def set_account_priority(self, _account_id: str, _priority: int, *, control):
             raise WorkerCrash()
 
     async def fake_connector(*_args: object):
@@ -1333,6 +1341,7 @@ async def test_applied_priority_with_lost_response_is_reconciled_and_notified(
     await db_session.commit()
 
     applied_priority = {"value": 800}
+    applied_control = {"value": None}
     multiplier = {"value": 0.1}
     calls = {"accounts": 0, "probes": 0, "writes": 0}
 
@@ -1354,6 +1363,7 @@ async def test_applied_priority_with_lost_response_is_reconciled_and_notified(
                     "status": "active",
                     "schedulable": True,
                     "priority": applied_priority["value"],
+                    "extra": {"monitor_cost_routing": applied_control["value"]},
                     "rate_multiplier": multiplier["value"],
                 },
                 now,
@@ -1372,9 +1382,10 @@ async def test_applied_priority_with_lost_response_is_reconciled_and_notified(
                 }
             ]
 
-        async def set_account_priority(self, _account_id: str, priority: int):
+        async def set_account_priority(self, _account_id: str, priority: int, *, control):
             calls["writes"] += 1
             applied_priority["value"] = priority
+            applied_control["value"] = control
             raise TimeoutError("response lost after apply")
 
     async def fake_connector(*_args: object):
@@ -1578,7 +1589,7 @@ async def test_unknown_mismatch_threshold_allows_only_active_policy_to_retry(
                 }
             ]
 
-        async def set_account_priority(self, account_id: str, priority: int):
+        async def set_account_priority(self, account_id: str, priority: int, *, control):
             writes.append((account_id, priority))
             return {"priority": priority}
 
@@ -1635,7 +1646,7 @@ async def test_unknown_mismatch_threshold_allows_only_active_policy_to_retry(
         actor="worker:test",
     )
     assert ran is policy_enabled
-    assert writes == ([('1', 100)] if policy_enabled else [])
+    assert writes == ([("1", 100)] if policy_enabled else [])
     decisions = list(
         await db_session.scalars(
             select(RoutingDecision).order_by(RoutingDecision.created_at, RoutingDecision.id)
@@ -1776,7 +1787,7 @@ async def test_policy_run_keeps_unknown_mismatch_reconcilable(
                 }
             ]
 
-        async def set_account_priority(self, account_id: str, priority: int):
+        async def set_account_priority(self, account_id: str, priority: int, *, control):
             writes.append((account_id, priority))
             return {"priority": priority}
 

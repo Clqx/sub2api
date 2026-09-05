@@ -200,6 +200,18 @@ func (h *UsageHandler) List(c *gin.Context) {
 		ExactTotal:            exactTotal,
 	}
 
+	// Cursor support is explicitly negotiated so old targets cannot silently
+	// ignore after_id and cause a monitor to advance past unobserved records.
+	if raw, present := c.GetQuery("after_id"); present {
+		afterID, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || afterID < 0 || page != 1 || params.SortBy != "id" {
+			response.BadRequest(c, "after_id requires a non-negative ID, page=1 and sort_by=id")
+			return
+		}
+		filters.AfterID = afterID
+		filters.ExactTotal = false
+		c.Header("X-Usage-Cursor-Version", "1")
+	}
 	records, result, err := h.usageService.ListWithFilters(c.Request.Context(), params, filters)
 	if err != nil {
 		response.ErrorFrom(c, err)

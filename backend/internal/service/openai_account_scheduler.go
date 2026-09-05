@@ -381,6 +381,19 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	}()
 
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
+	if previousResponseID != "" && s.service.accountRepo != nil {
+		if store := s.service.getOpenAIWSStateStore(); store != nil {
+			if id, err := store.GetResponseAccount(ctx, derefGroupID(req.GroupID), previousResponseID); err == nil && id > 0 {
+				account, readErr := s.service.accountRepo.GetByID(ctx, id)
+				if readErr != nil {
+					return nil, decision, readErr
+				}
+				if account != nil && account.IsMonitorCostSuppressed() {
+					return nil, decision, ErrMonitorCostReplayRequired
+				}
+			}
+		}
+	}
 	if previousResponseID != "" && NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI &&
 		(!req.StickyWeighted || !req.PreviousResponseCanMove) {
 		selection, err := s.service.selectAccountByPreviousResponseIDForCapability(
@@ -520,6 +533,10 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		return nil, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
+	if req.PreviousResponseID == "" && s.hasCheaperMonitorAccount(ctx, req, account) {
+		// Rebind only after normal selection succeeds; retain equal-cost stickiness.
+		return nil, false, nil
+	}
 	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape {
 		slog.Info("sticky_escape_triggered",
 			"account_id", accountID,
@@ -1487,14 +1504,35 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 	}
 
-	attempt := s.trySelectByLoadBalancePool(ctx, req, filtered, loadMap, budget)
-	if attempt.err != nil {
-		return nil, attempt.candidateCount, attempt.topK, attempt.loadSkew, attempt.err
+	for len(filtered) > 0 {
+		preferred := monitorCostPreferredPool(filtered)
+		attempt := s.trySelectByLoadBalancePool(ctx, req, preferred, loadMap, budget)
+		if attempt.result != nil {
+			return attempt.result, attempt.candidateCount, attempt.topK, attempt.loadSkew, nil
+		}
+		var result *AccountSelectionResult
+		count, topK, skew, err := attempt.candidateCount, attempt.topK, attempt.loadSkew, attempt.err
+		if err == nil {
+			result, count, topK, skew, err = s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
+		}
+		if result != nil || len(preferred) == len(filtered) {
+			return result, count, topK, skew, err
+		}
+		// Fresh DB checks may invalidate the cheap snapshot. Retry the next
+		// eligible cost tier rather than hiding a healthy protected fallback.
+		attempted := make(map[int64]struct{}, len(preferred))
+		for _, account := range preferred {
+			attempted[account.ID] = struct{}{}
+		}
+		remaining := make([]*Account, 0, len(filtered)-len(preferred))
+		for _, account := range filtered {
+			if _, seen := attempted[account.ID]; !seen {
+				remaining = append(remaining, account)
+			}
+		}
+		filtered = remaining
 	}
-	if attempt.result != nil {
-		return attempt.result, attempt.candidateCount, attempt.topK, attempt.loadSkew, nil
-	}
-	return s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
+	return nil, 0, 0, 0, ErrNoAvailableAccounts
 }
 
 func partitionOpenAIChatGPTSubscriptionAccounts(accounts []*Account) ([]*Account, []*Account) {
@@ -2023,6 +2061,10 @@ func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) Op
 	if !s.isOpenAIAdvancedSchedulerEnabled(ctx) {
 		return nil
 	}
+	return s.ensureOpenAIAccountScheduler()
+}
+
+func (s *OpenAIGatewayService) ensureOpenAIAccountScheduler() OpenAIAccountScheduler {
 	s.openaiSchedulerOnce.Do(func() {
 		if s.openaiAccountStats == nil {
 			s.openaiAccountStats = newOpenAIAccountRuntimeStats()
@@ -2164,6 +2206,20 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}
 	scheduler := s.getOpenAIAccountScheduler(ctx)
+	if scheduler == nil && platform == PlatformOpenAI {
+		// Monitor-managed groups must enforce the same cost and sticky gates
+		// even when the optional advanced scoring setting is disabled.
+		accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+		if err != nil {
+			return nil, decision, err
+		}
+		for i := range accounts {
+			if _, managed := accounts[i].MonitorCostRouting(); managed {
+				scheduler = s.ensureOpenAIAccountScheduler()
+				break
+			}
+		}
+	}
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
 		if requiredTransport == OpenAIUpstreamTransportAny || requiredTransport == OpenAIUpstreamTransportHTTPSSE {

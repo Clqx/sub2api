@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.connectors.sub2api import (
+    ConnectorError,
     NormalizedAccount,
     Sub2APIConnector,
     sanitize_monitoring_error,
@@ -38,7 +39,7 @@ from app.services.policies import (
     evaluate_upstream_rate_change,
     upstream_rate_multiplier,
 )
-from app.services.routing_usage import observe_actual_account_switches, queue_rate_recovered
+from app.services.routing_usage import queue_rate_recovered
 from app.services.targets import connector_for_target, target_with_secret
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ class AccountRoutingPlan:
     cost_source: str | None
     quality_failures: list[str]
     fallback_protected: bool
+    control: dict[str, Any]
     decision: RoutingDecision | None = None
 
 
@@ -83,8 +85,11 @@ def desired_priority(
     priority_scale: int,
     minimum_priority: int,
     unhealthy_priority: int,
+    maximum_multiplier: float = 1.0,
 ) -> int:
     if not healthy or multiplier is None or not math.isfinite(multiplier) or multiplier < 0:
+        return unhealthy_priority
+    if multiplier >= maximum_multiplier:
         return unhealthy_priority
     calculated = max(minimum_priority, round(multiplier * priority_scale))
     return min(calculated, unhealthy_priority - 1)
@@ -231,7 +236,7 @@ async def reconcile_unknown_routing_decisions(
 
     async def read_priorities(
         target: Target,
-    ) -> tuple[str, dict[str, int | None] | None, str | None]:
+    ) -> tuple[str, dict[str, NormalizedAccount] | None, str | None]:
         try:
             connector = await connector_for_target(session, target, settings, cipher)
             async with connector:
@@ -246,7 +251,7 @@ async def reconcile_unknown_routing_decisions(
                 return target.id, None, reason
             return (
                 target.id,
-                {item.external_account_id: item.priority for item in inventory},
+                {item.external_account_id: item for item in inventory},
                 None,
             )
         except Exception as exc:
@@ -255,7 +260,7 @@ async def reconcile_unknown_routing_decisions(
     inventory_results = await asyncio.gather(
         *(read_priorities(target) for target in targets.values())
     )
-    priorities_by_target: dict[str, dict[str, int | None]] = {}
+    priorities_by_target: dict[str, dict[str, NormalizedAccount]] = {}
     for target_id, priorities, error in inventory_results:
         if priorities is None:
             target_errors[target_id] = error or "account inventory unavailable"
@@ -282,8 +287,11 @@ async def reconcile_unknown_routing_decisions(
         target = targets.get(target_id or "")
         priorities = priorities_by_target.get(target_id or "")
         error = target_errors.get(target_id or "")
-        actual_priority = (
-            priorities.get(decision.external_account_id) if priorities is not None else None
+        actual_account = priorities.get(decision.external_account_id) if priorities else None
+        actual_priority = actual_account.priority if actual_account else None
+        control_matches = "required_control" not in result or (
+            actual_account is not None
+            and actual_account.routing_control == result["required_control"]
         )
         next_result = {
             key: value
@@ -310,7 +318,7 @@ async def reconcile_unknown_routing_decisions(
                 decision.external_account_id,
                 decision.id,
             )
-        elif actual_priority != decision.desired_priority:
+        elif actual_priority != decision.desired_priority or not control_matches:
             next_result, mismatch_attempts, terminal = _record_reconciliation_mismatch(
                 next_result,
                 actual_priority=actual_priority,
@@ -439,8 +447,9 @@ async def run_cost_routing_policy(
                 policy,
                 actor,
                 target_name=target.name,
-                actual_priorities={
-                    item.external_account_id: item.priority for item in inventory
+                actual_priorities={item.external_account_id: item.priority for item in inventory},
+                actual_controls={
+                    item.external_account_id: item.routing_control for item in inventory
                 },
             )
             unresolved_account_ids = {
@@ -554,7 +563,18 @@ async def run_cost_routing_policy(
                         priority_scale=policy.priority_scale,
                         minimum_priority=policy.minimum_priority,
                         unhealthy_priority=policy.unhealthy_priority,
+                        maximum_multiplier=policy.maximum_multiplier,
                     )
+                control = {
+                    "version": 1,
+                    "unhealthy_priority": policy.unhealthy_priority,
+                    "fallback": external_account_id in policy.fallback_account_ids,
+                    "suppressed": wanted >= policy.unhealthy_priority,
+                }
+                source_account = inventory_by_id.get(external_account_id)
+                control_matches = (
+                    source_account is not None and source_account.routing_control == control
+                )
                 reason = _routing_reason(
                     account=account,
                     was_available=was_available,
@@ -573,7 +593,7 @@ async def run_cost_routing_policy(
                     account.routing_status = "outcome_unknown"
                 else:
                     account.routing_status = (
-                        "in_sync" if account.priority == wanted else policy.mode
+                        "in_sync" if account.priority == wanted and control_matches else policy.mode
                     )
                 plan = AccountRoutingPlan(
                     account=account,
@@ -586,11 +606,13 @@ async def run_cost_routing_policy(
                     cost_source=cost_source,
                     quality_failures=quality_failures,
                     fallback_protected=fallback_protected,
+                    control=control,
                 )
                 logger.info(
                     "cost routing account evaluated policy_id=%s target_id=%s "
                     "account_id=%s multiplier=%s cost_source=%s available=%s "
-                    "fallback_protected=%s previous_priority=%s desired_priority=%s reason=%s",
+                    "fallback_protected=%s previous_priority=%s desired_priority=%s "
+                    "reason=%s desired_suppressed=%s",
                     policy.id,
                     target.id,
                     external_account_id,
@@ -601,10 +623,11 @@ async def run_cost_routing_policy(
                     account.priority,
                     wanted,
                     reason,
+                    control["suppressed"],
                 )
                 should_record_decision = (
                     external_account_id not in unresolved_account_ids
-                    and account.priority != wanted
+                    and (account.priority != wanted or not control_matches)
                     and (
                         policy.mode == "execute"
                         or previous_desired_priority != wanted
@@ -626,21 +649,14 @@ async def run_cost_routing_policy(
                         status="recommended" if policy.mode == "recommend" else "running",
                         result={
                             "cost_source": cost_source,
+                            "required_control": control,
                             **(
                                 {"previous_multiplier": prior_multiplier}
                                 if prior_multiplier is not None
                                 else {}
                             ),
-                            **(
-                                {"fallback_protected": True}
-                                if fallback_protected
-                                else {}
-                            ),
-                            **(
-                                {"quality_failures": quality_failures}
-                                if quality_failures
-                                else {}
-                            ),
+                            **({"fallback_protected": True} if fallback_protected else {}),
+                            **({"quality_failures": quality_failures} if quality_failures else {}),
                         },
                         finished_at=now if policy.mode == "recommend" else None,
                     )
@@ -709,10 +725,20 @@ async def run_cost_routing_policy(
                                 connector.set_account_priority(
                                     plan.account.external_account_id,
                                     plan.desired_priority,
+                                    control=plan.control,
                                 ),
                                 timeout=min(COST_ROUTING_WRITE_TIMEOUT_SECONDS, remaining),
                             )
                             return plan, result, None, False, False
+                        except ConnectorError as exc:
+                            # Explicit client-side rejection (e.g. old target without
+                            # enforcement) is not an uncertain applied mutation.
+                            unknown = (
+                                exc.status_code is None
+                                or exc.status_code >= 500
+                                or exc.status_code in {408, 429}
+                            )
+                            return plan, None, _safe_error(exc), False, unknown
                         except Exception as exc:
                             # Once the connector call starts, an exception cannot prove
                             # that the upstream rejected the mutation. Reconcile it
@@ -785,7 +811,7 @@ async def run_cost_routing_policy(
                     logger.info(
                         "cost routing priority write policy_id=%s target_id=%s "
                         "account_id=%s previous_priority=%s desired_priority=%s "
-                        "cost_source=%s status=%s error=%s",
+                        "cost_source=%s status=%s applied_suppressed=%s error=%s",
                         policy.id,
                         target.id,
                         plan.account.external_account_id,
@@ -793,6 +819,11 @@ async def run_cost_routing_policy(
                         plan.desired_priority,
                         plan.cost_source or "none",
                         routing_decision.status,
+                        (
+                            plan.control["suppressed"]
+                            if routing_decision.status == "succeeded"
+                            else None
+                        ),
                         error or "none",
                     )
                     session.add(
@@ -826,14 +857,6 @@ async def run_cost_routing_policy(
                 )
                 await evaluate_upstream_probe_health(session, target.name, plan.account)
                 await _evaluate_routing_incidents(session, target, policy, plan)
-            await _observe_actual_switches(
-                session,
-                target,
-                connector,
-                plans,
-                actor=actor,
-                run_deadline=run_deadline,
-            )
 
         policy.last_run_at = datetime.now(timezone.utc)
         policy.last_error = None
@@ -947,58 +970,6 @@ async def _load_routing_inventory(
     return account_fact, accounts
 
 
-async def _observe_actual_switches(
-    session: AsyncSession,
-    target: Target,
-    connector: Sub2APIConnector,
-    plans: list[AccountRoutingPlan],
-    *,
-    actor: str,
-    run_deadline: float,
-) -> None:
-    read_routes = getattr(connector, "recent_usage_routes", None)
-    if not callable(read_routes):
-        return
-    remaining = run_deadline - asyncio.get_running_loop().time()
-    if remaining <= 1.0:
-        logger.warning(
-            "cost routing usage observation skipped target_id=%s reason=budget_exhausted",
-            target.id,
-        )
-        return
-    try:
-        fact, routes = await asyncio.wait_for(read_routes(), timeout=min(3.0, remaining - 0.5))
-        if fact.runtime_state != "healthy":
-            logger.warning(
-                "cost routing usage observation unavailable target_id=%s support_state=%s "
-                "runtime_state=%s",
-                target.id,
-                fact.support_state,
-                fact.runtime_state,
-            )
-            return
-        switch_count = await observe_actual_account_switches(
-            session,
-            target_id=target.id,
-            target_name=target.name,
-            routes=routes,
-            eligible_account_ids={plan.account.external_account_id for plan in plans},
-            actor=actor,
-        )
-        logger.info(
-            "cost routing usage routes observed target_id=%s route_count=%s switch_count=%s",
-            target.id,
-            len(routes),
-            switch_count,
-        )
-    except Exception as exc:
-        logger.warning(
-            "cost routing usage observation failed target_id=%s error_type=%s",
-            target.id,
-            exc.__class__.__name__,
-        )
-
-
 async def _sync_inventory_accounts(
     session: AsyncSession,
     target_id: str,
@@ -1007,9 +978,7 @@ async def _sync_inventory_accounts(
     inventory_by_id = {item.external_account_id: item for item in inventory}
     current_ids = set(
         await session.scalars(
-            select(AccountCurrent.external_account_id).where(
-                AccountCurrent.target_id == target_id
-            )
+            select(AccountCurrent.external_account_id).where(AccountCurrent.target_id == target_id)
         )
     )
     missing = [
@@ -1026,17 +995,13 @@ async def _sync_inventory_accounts(
             await session.execute(
                 sqlite_insert(AccountCurrent)
                 .values(values)
-                .on_conflict_do_nothing(
-                    index_elements=["target_id", "external_account_id"]
-                )
+                .on_conflict_do_nothing(index_elements=["target_id", "external_account_id"])
             )
         elif dialect == "postgresql":
             await session.execute(
                 postgresql_insert(AccountCurrent)
                 .values(values)
-                .on_conflict_do_nothing(
-                    index_elements=["target_id", "external_account_id"]
-                )
+                .on_conflict_do_nothing(index_elements=["target_id", "external_account_id"])
             )
         else:
             raise RuntimeError(
@@ -1193,9 +1158,7 @@ async def _evaluate_routing_incidents(
     plan: AccountRoutingPlan,
 ) -> None:
     decision = plan.decision
-    recommended = (
-        policy.mode == "recommend" and plan.previous_priority != plan.desired_priority
-    )
+    recommended = policy.mode == "recommend" and plan.previous_priority != plan.desired_priority
     changed = decision is not None and decision.status == "succeeded"
     failed = decision is not None and decision.status == "failed"
     detail = ", ".join(plan.quality_failures) if plan.quality_failures else None
@@ -1288,8 +1251,7 @@ def _record_reconciliation_mismatch(
     mismatch_attempts = max(0, previous_attempts) + 1
     terminal = mismatch_attempts >= COST_ROUTING_RECONCILIATION_MISMATCH_LIMIT
     error = (
-        "desired priority not observed after "
-        f"{mismatch_attempts} healthy inventory checks"
+        f"desired priority not observed after {mismatch_attempts} healthy inventory checks"
         if terminal
         else "desired priority not observed yet"
     )
@@ -1349,6 +1311,7 @@ async def _recover_interrupted_routing_decisions(
     *,
     target_name: str,
     actual_priorities: dict[str, int | None],
+    actual_controls: dict[str, dict[str, Any] | None] | None = None,
 ) -> None:
     interrupted = list(
         await session.scalars(
@@ -1364,7 +1327,11 @@ async def _recover_interrupted_routing_decisions(
     for decision in interrupted:
         account_present = decision.external_account_id in actual_priorities
         actual_priority = actual_priorities.get(decision.external_account_id)
-        reconciled = actual_priority == decision.desired_priority
+        reconciled = actual_priority == decision.desired_priority and (
+            "required_control" not in decision.result
+            or (actual_controls or {}).get(decision.external_account_id)
+            == decision.result["required_control"]
+        )
         audit_action: str
         if reconciled:
             decision.status = "succeeded"
