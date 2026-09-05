@@ -1,8 +1,8 @@
 # 项目能力盘点与交付路线图
 
-更新时间：2026-09-01
+更新时间：2026-09-05
 
-审查基线：分支 `codex/monitor-trusted-pool-hardening` 的受控提交序列。永久轮换核心、Monitor、可信资源池平台、PostgreSQL CI 和首轮文档基线分别固化为 `bf309373e`、`56c792b1c`、`70259d007`、`7a78472eb`、`37202644b`；后续兼容修复与发布证据自动化继续在同一候选分支推进。这些提交是代码封板记录，不是生产发布或远端 CI 成功声明。
+审查基线：分支 `codex/monitor-trusted-pool-hardening` 的受控提交序列。永久轮换核心、Monitor、可信资源池平台、PostgreSQL CI 和首轮文档基线分别固化为 `bf309373e`、`56c792b1c`、`70259d007`、`7a78472eb`、`37202644b`；兼容与最终证据阻断修复已推进至 `20357ba57`，发布安全门禁继续在同一候选分支形成后续受控提交。这些提交是代码封板记录，不是生产发布或远端 CI 成功声明。
 
 本文是当前仓库的跨模块状态入口，用业务语言统一说明“已经能做什么、在什么条件下能用、距离生产交付还差什么”。模块内的架构、协议和历史阶段报告仍负责提供技术细节与当时的验收证据。
 
@@ -73,7 +73,7 @@
 7. **PREPARED 明文路径已在代码中关闭。** Forward migration 227 对非空 legacy 明文失败关闭并删除旧列；PREPARED 使用独立 envelope、AAD 和 TTL，activate 清除可解密材料。静态与真实 PostgreSQL 子门禁已经接入，是否可发布仍取决于受控 commit 上的 CI 首跑证据。
 8. **历史迁移兼容缺口已关闭。** 平台 migration 005 的 PL/pgSQL `CASE` 比较已改为 PostgreSQL 16 可解析的显式表达式；迁移 runner 只为该文件接受已发布旧 checksum，migration 012 再以前向迁移重装修正函数，使老账本与空库收敛且不改写历史。其他版本或任意漂移仍失败关闭。Sub2API migration 226 同步把 Seat 状态列扩至 64 字符，避免激活中间态超过旧 20 字符上限。
 9. **发布候选证据已自动化。** 六套 Compose（含 root test profile）进入 CI；全部核心门禁通过后，CI 按正式发布使用的 `Dockerfile.goreleaser` 构建单架构 OCI，生成并验证 SPDX SBOM、SLSA provenance、manifest/config/blob 哈希和 commit revision 标签。该工件不会自动推送或提升为正式 release。
-10. **依赖扫描覆盖已扩展。** 安全 workflow 现覆盖核心与可信资源池 Go 模块、Monitor Python 生产依赖、兑换平台 npm 生产依赖和主前端审计；扫描器版本已固定。镜像漏洞与仓库秘密扫描仍是独立未关闭项。
+10. **依赖与发布安全扫描定义已扩展。** 安全 workflow 覆盖核心与可信资源池 Go 模块、Monitor Python 生产依赖、兑换平台 npm 生产依赖和主前端审计；仓库秘密门禁同时扫描候选 commit 的完整跟踪文件快照与本次候选历史差异，既有测试夹具、文档占位符和公开客户端凭据按“路径、规则、值指纹、出现次数、到期日”精确审批，原始命中报告不归档。候选 OCI 在 descriptor/commit 绑定验证后，以同一 OCI layout 执行固定版本 Trivy 扫描；存在可修复的 High/Critical OS 或依赖漏洞即失败。规则、校验器单测、工作流语法和本地秘密基线已通过，最终结论仍取决于远端工件。
 
 ## 仍未关闭的发布门禁
 
@@ -81,14 +81,14 @@
 2. **加密暂存的发布证据尚未关闭。** migration 227 和 envelope/TTL/activate 清理已在本地真实 PostgreSQL 通过；仍必须由最终 commit 对应的 CI 工件证明 legacy 非空升级失败关闭、七列 schema、PREPARED 原始行无明文、篡改/过期拒绝和 activate 清理全部通过。
 3. **真实 fail-forward 演练尚未完成。** 仍需使用真实 PostgreSQL、Sub2API 和可持久 provider，在 prepare、activate、结构事务、commit、token 各边界执行进程退出与响应丢失演练。
 4. **可信资源池生产组合根仍关闭。** 生产 KMS adapter、七类 Recovery providers 和 export signer 尚未注入，开启治理或导出会在服务监听前失败；这符合失败关闭设计，但不构成可调用的生产能力。
-5. **发布证据基线尚未形成。** PostgreSQL、Compose 与 OCI/SBOM/provenance 门禁已可自动生成证据，但缺少最终 HEAD 对应的远端工件、镜像漏洞/仓库秘密扫描和真实外部系统演练；必须继续执行 [Root Release Stage 0 发布基线清单](STAGE0_RELEASE_BASELINE_CHECKLIST_CN.md)。
+5. **发布证据基线尚未形成。** PostgreSQL、Compose、OCI/SBOM/provenance、镜像漏洞和仓库秘密门禁均已定义，但缺少最终 HEAD 对应的远端工件与真实外部系统演练；必须继续执行 [Root Release Stage 0 发布基线清单](STAGE0_RELEASE_BASELINE_CHECKLIST_CN.md)。
 
 ## 分阶段交付计划
 
 | 阶段 | 业务目标 | 进度 | 完成标准 |
 |---|---|---|---|
 | A. 状态与范围收敛 | 建立全仓统一能力口径，消除“开发完成”和“生产可用”的混用 | 已完成 | 根入口、模块状态、需求追踪和路线图互相链接，历史证据保留 |
-| B. 兼容性与发布加固 | 把 Monitor 和可信集成从功能闭环推进到可重复发布 | 进行中：本地真实库与发布证据流水线已完成，待远端工件、兼容样本、灾备和真实演练 | 两个代表版本样本、契约冻结、性能基线、故障恢复、备份/恢复/升级/回滚、安全扫描和发布候选报告通过 |
+| B. 兼容性与发布加固 | 把 Monitor 和可信集成从功能闭环推进到可重复发布 | 进行中：本地真实库、候选证据和安全门禁定义已完成，待远端工件、兼容样本、灾备和真实演练 | 两个代表版本样本、契约冻结、性能基线、故障恢复、备份/恢复/升级/回滚、安全扫描和发布候选报告通过 |
 | C. 生产基础设施接线 | 接入真实 KMS/HSM、签名、证明、成员和批次 provider，并完成真实 Sub2API 联调 | 待启动 | 所有生产 provider 就绪，敏感数据扫描通过，逐外部副作用失败和进程退出可恢复 |
 | D. 封闭试点 | 在严格边界下验证真实运营、对账和人工处置 | 受 C 阻塞 | 单实例试点、运行手册、告警值班、暂停未知结果和永久换员演练完成 |
 | E. 多实例与恢复执行 | 支持滚动发布、多副本接管、最终用户权限和受控 Reveal/恢复执行 | 规划中 | 跨工作流多副本矩阵、RBAC、Recovery Package 演练和独立安全评审通过 |
@@ -98,7 +98,7 @@
 1. **P0：生成最终 commit 的远端发布基线证据。** PREPARED 明文路径与本地 PostgreSQL 门禁已通过；下一步按 [Root Release Stage 0 发布基线清单](STAGE0_RELEASE_BASELINE_CHECKLIST_CN.md)运行完整 CI，归档数据库 JSON、六套 Compose 结果及 OCI/SBOM/provenance 工件。任何哨兵测试缺少 pass、非白名单 SKIP 或 digest/commit 不一致都不能转为“生产可用”。
 2. **P0：完成 Monitor 发布证据基线。** 收集两个代表 Sub2API 版本的脱敏 API/Schema 样本，冻结 V1 契约并建立 supported-version matrix。
 3. **P1：完成可靠性与灾备。** 建立真实账号规模下的采集并发和延迟基线，覆盖 API 401/429/5xx、数据库中断、通知超时、备份恢复和版本升级。
-4. **P2：完成生产安全门禁。** 依赖扫描与候选 OCI SBOM 已接入；继续完成 OCI 镜像漏洞和仓库秘密扫描，接入可信资源池所需的生产 KMS/HSM 与签名/证明 providers。
+4. **P2：完成生产安全门禁。** 依赖、仓库秘密、候选 OCI SBOM 和同镜像漏洞扫描定义已接入；下一步先取得最终 commit 的远端安全工件，再接入可信资源池所需的生产 KMS/HSM 与签名/证明 providers。
 5. **P3：完成真实联调和封闭试点。** 使用真实网关、KMS 和 provider 验证 prepare、activate-held、commit、claim 及失败恢复，全程保留审计和对账证据。
 6. **P4：再评估扩展能力。** 在上述门禁通过后，再启动多副本、滚动发布、最终用户 RBAC、Reveal 执行器和更多供应商适配。
 

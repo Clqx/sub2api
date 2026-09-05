@@ -9,6 +9,9 @@ permissions:
   contents: read
 
 jobs:
+  repository-secret-scan:
+    uses: ./.github/workflows/repository-secret-scan.yml
+
   shell:
     runs-on: macos-15
     steps:
@@ -335,6 +338,7 @@ jobs:
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
       startsWith(github.ref, 'refs/heads/release/')
     needs:
+      - repository-secret-scan
       - shell
       - compose-config-gate
       - test
@@ -599,7 +603,90 @@ jobs:
             echo "goreleaser_config_sha256=$(sha256sum .goreleaser.simple.yaml | cut -d ' ' -f 1)"
             docker buildx version
           } > release-candidate-evidence/candidate-image.txt
+      - name: Extract verified OCI layout for vulnerability scan
+        id: oci-scan-layout
+        run: |
+          set -euo pipefail
+          oci_scan_dir="$RUNNER_TEMP/sub2api-oci-layout-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$oci_scan_dir"
+          tar -xf release-candidate-evidence/sub2api-linux-amd64.oci.tar -C "$oci_scan_dir"
+          manifest_digest="$(sed -n 's/^manifest_digest=//p' release-candidate-evidence/candidate-image.txt)"
+          if ! [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Candidate evidence does not contain a valid runtime manifest digest" >&2
+            exit 1
+          fi
+          manifest_path="$oci_scan_dir/blobs/sha256/${manifest_digest#sha256:}"
+          if [ ! -f "$manifest_path" ]; then
+            echo "Verified runtime manifest blob is missing from the OCI layout" >&2
+            exit 1
+          fi
+          manifest_size="$(stat -c '%s' "$manifest_path")"
+          jq -n \
+            --arg digest "$manifest_digest" \
+            --argjson size "$manifest_size" \
+            '{
+              schemaVersion: 2,
+              mediaType: "application/vnd.oci.image.index.v1+json",
+              manifests: [{
+                mediaType: "application/vnd.oci.image.manifest.v1+json",
+                digest: $digest,
+                size: $size,
+                platform: {os: "linux", architecture: "amd64"}
+              }]
+            }' > "$oci_scan_dir/index.json"
+          echo "path=$oci_scan_dir" >> "$GITHUB_OUTPUT"
+      - name: Scan candidate OCI for fixable high and critical vulnerabilities
+        id: oci-vulnerability-scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ steps.oci-scan-layout.outputs.path }}
+          scanners: vuln
+          vuln-type: os,library
+          format: json
+          output: release-candidate-evidence/trivy-vulnerability-report.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          hide-progress: true
+          timeout: 10m0s
+          version: v0.74.0
+      - name: Record OCI vulnerability evidence
+        if: always()
+        env:
+          SCAN_OUTCOME: ${{ steps.oci-vulnerability-scan.outcome }}
+        run: |
+          report=release-candidate-evidence/trivy-vulnerability-report.json
+          summary=release-candidate-evidence/trivy-vulnerability-summary.txt
+          if [ -s "$report" ] && jq -e '.Results | type == "array"' "$report" >/dev/null 2>&1; then
+            critical_count="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$report")"
+            high_count="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$report")"
+            finding_count="$((critical_count + high_count))"
+            report_status=available
+          else
+            critical_count=unknown
+            high_count=unknown
+            finding_count=unknown
+            report_status=missing-or-invalid
+          fi
+          manifest_digest="$(sed -n 's/^manifest_digest=//p' release-candidate-evidence/candidate-image.txt 2>/dev/null || true)"
+          trivy_version="$(trivy version 2>/dev/null | head -n 1 || true)"
+          {
+            echo "schema_version=1"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "scanner=trivy"
+            echo "scanner_version=${trivy_version:-unavailable}"
+            echo "policy=fixable HIGH,CRITICAL OS and library vulnerabilities"
+            echo "candidate_manifest_digest=${manifest_digest:-unavailable}"
+            echo "report_status=$report_status"
+            echo "critical_findings=$critical_count"
+            echo "high_findings=$high_count"
+            echo "total_blocking_findings=$finding_count"
+            echo "scan_outcome=${SCAN_OUTCOME:-unknown}"
+          } > "$summary"
       - name: Upload candidate OCI and digest evidence
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: sub2api-candidate-${{ github.sha }}

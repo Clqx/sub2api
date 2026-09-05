@@ -1,0 +1,218 @@
+version: 1
+exceptions:
+  - rule: generic-api-key
+    path: backend/internal/handler/auth_wechat_oauth_test.go
+    value_sha256: "a8ae6e6ee929abea3afcfc5258c8ccd6f85273e0d4626d26c7279f3250f77c8e"
+    occurrences: 2
+    reason: "Synthetic OAuth credential used only by handler tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/handler/openai_gateway_handler_test.go
+    value_sha256: "09d0ceca06974190cf3cc91ff46a5df72e81eda40b3e203c6cc223e89e06796e"
+    occurrences: 1
+    reason: "Synthetic upstream token used only by a gateway test"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/handler/payment_handler_resume_test.go
+    value_sha256: "3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f9"
+    occurrences: 2
+    reason: "Synthetic payment credential used only by resume tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/handler/stream_error_event_test.go
+    value_sha256: "ad1624b658eaaedfa3dd3ef4c60e26445573c0369dcb1c555b258fa9092afb4c"
+    occurrences: 1
+    reason: "Synthetic stream token used only by an error-shape test"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/payment/provider/alipay_test.go
+    value_sha256: "5c3966c2104bb4887ab7266dc9896ac4946d8f377224d5a331b939881ef2876e"
+    occurrences: 1
+    reason: "Synthetic Alipay credential used only by provider tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: private-key
+    path: backend/internal/payment/provider/wxpay_test.go
+    value_sha256: "ad74ae185ab26dfbe29d435fc52ec30368faa6bd48004766f2983cb9708a3f99"
+    occurrences: 1
+    reason: "Locally generated private-key fixture used only by WeChat Pay tests"
+    mitigation: "Fixture has no external trust or production use; exact value is pinned"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: private-key
+    path: backend/internal/payment/provider/wxpay_test.go
+    value_sha256: "bb7313ce255281a4b1f2f23a076a60cc852c43642bd852ffb4f758644208b08c"
+    occurrences: 1
+    reason: "Locally generated private-key fixture used only by WeChat Pay tests"
+    mitigation: "Fixture has no external trust or production use; exact value is pinned"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/payment/provider/wxpay_test.go
+    value_sha256: "3fc6d1751a969fea49764515438a8a6a7ae064083aacce0c5709b222eb922438"
+    occurrences: 1
+    reason: "Synthetic WeChat Pay credential used only by provider tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/pkg/antigravity/oauth.go
+    value_sha256: "1d2f041093fd95aa8995a038c711d50a7960da09a505381c09a745d6ad0ecc60"
+    occurrences: 1
+    reason: "Upstream installed-app OAuth client credential is intentionally embedded for interoperability"
+    mitigation: "Runtime environment override is supported; exact upstream value and count are pinned"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/pkg/geminicli/constants.go
+    value_sha256: "6a5f78b8b99dd4025e41ba11bf54c304c6af29f924c5569cc7865b2428ce03a9"
+    occurrences: 1
+    reason: "Google Gemini CLI public installed-app OAuth credential is required for compatibility"
+    mitigation: "Runtime environment override is supported; exact public value and count are pinned"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/repository/migrations_runner_checksum_test.go
+    value_sha256: "c8fcb41e8c297fce34d0cb2cbabfdc42023e4b64c46724718d8653021fed6624"
+    occurrences: 1
+    reason: "Synthetic checksum fixture used only by migration tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/repository/ops_repo_preagg.go
+    value_sha256: "fef7476293ef0e8c7a91ad7b6a0a43358bcca4fa52fcb5581153903d5ace23e4"
+    occurrences: 2
+    reason: "SQL token_consumed column assignment is a detector false positive"
+    mitigation: "Exact matched value and occurrence count are pinned"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: private-key
+    path: backend/internal/service/batch_image_provider_vertex_test.go
+    value_sha256: "ae537c3534806901b13e362a59daef118e52aec4a5c58d42cd1d04ccf5a1831e"
+    occurrences: 1
+    reason: "Locally generated service-account key fixture used only by Vertex tests"
+    mitigation: "Fixture has no external trust or production use; exact value is pinned"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/service/content_moderation_test.go
+    value_sha256: "4d67feca69c5bbeb4cb5f2678ae2dde8ecf1ca5e0a1ceb5a74e6b411a2ee15d4"
+    occurrences: 1
+    reason: "Synthetic moderation credential used only by tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: jwt
+    path: backend/internal/service/content_moderation_test.go
+    value_sha256: "0ed1bb8c4d701c6afffe128ccfd9f704e43da38bef281ca6f4df5fe17e80b00f"
+    occurrences: 1
+    reason: "Synthetic JWT used only by moderation tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/service/gateway_beta_test.go
+    value_sha256: "577ac1adb016904259eff7b7cb12a01d97cd591d34d9ebd20780f580d9a107d7"
+    occurrences: 17
+    reason: "Shared synthetic credential used throughout beta gateway tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/service/gateway_context_management_test.go
+    value_sha256: "577ac1adb016904259eff7b7cb12a01d97cd591d34d9ebd20780f580d9a107d7"
+    occurrences: 1
+    reason: "Shared synthetic credential used by a gateway context test"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/service/payment_order_result_test.go
+    value_sha256: "3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f9"
+    occurrences: 1
+    reason: "Synthetic payment credential used only by order-result tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/service/payment_webhook_provider_test.go
+    value_sha256: "3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f9"
+    occurrences: 1
+    reason: "Synthetic payment credential used only by webhook tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/service/principal_auth_gate_test.go
+    value_sha256: "dab725bfe86584c2857f3e905708f7af14b9e84217143786a7030d5aeb88bc31"
+    occurrences: 1
+    reason: "Synthetic principal credential used only by auth-gate tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: backend/internal/util/logredact/redact_test.go
+    value_sha256: "8c4b7a1d9e1714bdcffc155110e98ab8f34d1223d1d602f7f246072bdaaa3555"
+    occurrences: 2
+    reason: "Synthetic credential is required to verify log redaction"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: docs/ADMIN_PAYMENT_INTEGRATION_API.md
+    value_sha256: "a7b21557e491698d28b927db10adebef854375ee55ea522b47c71ef04d482162"
+    occurrences: 4
+    reason: "Documentation-only API credential placeholder"
+    mitigation: "Exact placeholder and occurrence count are pinned"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: docs/ADMIN_PAYMENT_INTEGRATION_API.md
+    value_sha256: "abea3f5bb180e35c041e7c2935e3a27cf6bda2cf1c71c10969238e5af4e017dc"
+    occurrences: 2
+    reason: "Documentation-only integration credential placeholder"
+    mitigation: "Exact placeholder and occurrence count are pinned"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: trusted-pool-platform/.env.example
+    value_sha256: "ff0c15cf9858376f35d4b6e9d63aff3887b459948aff6fe3882f7fe9006c20c9"
+    occurrences: 1
+    reason: "Non-production environment-file placeholder"
+    mitigation: "Exact placeholder and occurrence count are pinned; production requires replacement"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: trusted-pool-platform/.env.example
+    value_sha256: "bf7f1dd5e044cc331cbe11b00860d05388f4c47c8740753f5788dbc73527dd9f"
+    occurrences: 1
+    reason: "Non-production environment-file placeholder"
+    mitigation: "Exact placeholder and occurrence count are pinned; production requires replacement"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: trusted-pool-platform/.env.example
+    value_sha256: "6646f8f703f4cf5af41520cf2669a151184d636ca14802b64acb4ce906e2d956"
+    occurrences: 1
+    reason: "Non-production environment-file placeholder"
+    mitigation: "Exact placeholder and occurrence count are pinned; production requires replacement"
+    expires_on: "2026-12-05"
+    owner: "maintainers"
+  - rule: generic-api-key
+    path: trusted-pool-platform/backend/internal/httpapi/server_test.go
+    value_sha256: "22f62e600b5065976f8a9436ac6750d74b8664a23f5ff49588706177565e301c"
+    occurrences: 1
+    reason: "Synthetic trusted-pool credential used only by HTTP API tests"
+    mitigation: "Exact value and occurrence count are pinned; test code is not packaged"
+    expires_on: "2026-12-05"
+    owner: "maintainers"

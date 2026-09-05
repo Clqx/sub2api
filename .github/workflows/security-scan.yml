@@ -3,6 +3,7 @@ name: Security Scan
 on:
   push:
   pull_request:
+  workflow_dispatch:
   schedule:
     - cron: '0 3 * * 1'
 
@@ -10,6 +11,10 @@ permissions:
   contents: read
 
 jobs:
+  repository-secret-scan:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/repository-secret-scan.yml
+
   backend-security:
     runs-on: ubuntu-latest
     timeout-minutes: 15

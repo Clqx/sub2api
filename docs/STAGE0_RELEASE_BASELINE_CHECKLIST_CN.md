@@ -1,6 +1,6 @@
 # Root Release Stage 0（阶段 0）发布基线清单
 
-更新日期：2026-09-01
+更新日期：2026-09-05
 
 本文定义永久轮换候选能力进入发布评审前的最小版本与证据基线。它是门禁清单，
 不是生产可用声明，也不授权自动提交、自动发布或启用永久轮换。
@@ -9,7 +9,8 @@
 
 代码候选已经按核心、Monitor、可信资源池平台、CI 和文档边界形成受控提交序列；本清单随最终文档
 提交进入同一候选 HEAD。提交后必须再次证明工作树清洁。当前仍没有该 HEAD 对应的远端 PostgreSQL
-门禁工件和候选镜像 digest，因此只能称为“代码封板完成、发布证据待生成”，不得标记为生产可用。
+门禁工件、候选镜像 digest、仓库秘密扫描和 OCI 漏洞扫描工件，因此只能称为“代码封板完成、
+发布证据待生成”，不得标记为生产可用。
 
 ## 2. 必须纳入受控版本的文件
 
@@ -17,6 +18,10 @@
 
 - .github/workflows/backend-ci.yml
 - .github/workflows/security-scan.yml
+- .github/workflows/repository-secret-scan.yml
+- .github/gitleaks-exceptions.yml
+- tools/check_gitleaks_exceptions.py
+- tools/test_check_gitleaks_exceptions.py
 - .goreleaser.yaml
 - .goreleaser.simple.yaml
 - backend/go.sum
@@ -98,7 +103,7 @@
 1. commit ID 与 CI 工件、候选镜像标签和评审记录一致。
 2. git status 没有任何输出。
 3. 必需文件全部被跟踪。
-4. 不存在空白错误、临时补丁、测试密钥、数据库转储或本地证据文件。
+4. 不存在空白错误、临时补丁、未审批测试密钥、数据库转储或本地证据文件。
 
 任何一项不满足都必须停止发布评审，不得由人工备注豁免。
 
@@ -161,7 +166,17 @@ Compose 门禁通过后，按正式发布使用的 `Dockerfile.goreleaser` 构�
 它不登录或推送镜像仓库，并会生成 SPDX SBOM 与 SLSA provenance，验证 layout index 到根 index 的
 descriptor 链，重算 root index、manifest、config、普通镜像层、attestation manifest/config/layer 和
 archive SHA-256，验证镜像 revision label 与候选 commit 精确一致，再归档 OCI 和映射文件。
+验证后的同一 OCI archive 会解包为临时 OCI layout，并把临时入口收敛到已验证的 runtime manifest，
+再由固定版本 Trivy 扫描 OS 与语言依赖；任何已有修复版本的 High 或 Critical 漏洞都会使 job 失败。
+完整 JSON 与绑定候选 manifest digest 的脱敏摘要进入同一候选工件，扫描失败时仍上传诊断证据，
+不得另建一个摘要不一致的替代镜像。
 该工件是发布候选证据，不是正式 tag 镜像或生产发布成功声明。
+
+`.github/workflows/security-scan.yml` 还会用校验和固定的 Gitleaks 扫描候选 commit 的完整跟踪文件
+快照和当前候选范围的 Git 历史差异。既有 51 个命中被收敛为 27 组精确、限时例外，每组绑定规则、
+路径、值的 SHA-256、预期出现次数、责任人、缓解措施和到期日；新增值、替换、数量漂移、过期或
+失效例外均失败。原始报告只存在于 runner 临时目录并在 job 结束前删除，归档工件只保留数量、版本、
+commit 和通过/失败状态，不保存原始命中、值指纹或秘密内容。
 
 ## 6. 必须归档的证据
 
@@ -170,6 +185,8 @@ archive SHA-256，验证镜像 revision label 与候选 commit 精确一致，�
 - 必跑哨兵 Test 名称及其 pass 事件检查结果。
 - migration ledger、秘密存储 information_schema 投影和清理断言结果。
 - 候选镜像不可变 digest，以及与 commit 的映射。
+- 仓库秘密扫描的扫描器版本、范围、当前/差异命中数、例外组数和零未审批命中结论。
+- 同一候选 OCI 的 Trivy 版本、策略、High/Critical 数量、manifest digest 和扫描结果。
 - 配置模式和 key ID；只能记录非秘密标识与指纹。
 - 评审结论、未关闭风险、回滚或 fail-forward 演练引用。
 
@@ -178,9 +195,9 @@ claim token、完整 Authorization header 或数据库明文转储。
 
 ## 7. 发布结论规则
 
-只有受控 commit、清洁工作树、全部哨兵 pass、证据工件可下载且候选镜像 digest
-一致时，阶段 0 才可标记为“基线已形成”。这仍不等于生产可用；真实 KMS/HSM、
-provider、故障注入、备份恢复、安全扫描和封闭试点继续按项目路线图执行。
+只有受控 commit、清洁工作树、全部哨兵 pass、秘密扫描无未审批命中、OCI 漏洞门禁通过、
+证据工件可下载且候选镜像 digest 一致时，阶段 0 才可标记为“基线已形成”。这仍不等于生产可用；
+真实 KMS/HSM、provider、故障注入、备份恢复和封闭试点继续按项目路线图执行。
 
 失败或证据缺失时保持单实例、禁止 rolling overlap，并按 fail-forward 手册处置
 已打开的永久轮换，禁止直接修改数据库伪造终态。
